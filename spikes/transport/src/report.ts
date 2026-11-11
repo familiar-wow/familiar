@@ -627,9 +627,12 @@ export function buildReport(dataDir: string, now = new Date()): string {
 	const sessions = saved.flatMap(({ account, db }) =>
 		list(db.sessions).map((s) => ({ account, session: table(s) ?? {} })),
 	);
-	const runs = events.filter((e) => e.ev === "companion").length;
+	const runs = events.filter((e) => e.ev === "companion");
+	const platforms = [...new Set(runs.map((e) => String(e.platform)))].join(
+		", ",
+	);
 	out.push(
-		`Generated ${now.toLocaleString()}. ${sessions.length} addon sessions in ${saved.length} account(s), ${runs} companion run(s), ${events.length} companion events.`,
+		`Generated ${now.toLocaleString()}. ${sessions.length} addon sessions in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
 		"",
 	);
 	if (sessions.length === 0) {

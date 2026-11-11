@@ -561,10 +561,14 @@ export class Companion {
 		const started = pids.filter((pid) => !this.pids.includes(pid));
 		const closed = this.pids.length > 0 && pids.length === 0;
 		if (started.length === 0 && pids.length === this.pids.length) return;
+		// A new client process reads the signal files fresh, so they can be reused. A second
+		// process next to a running client is left alone: a reset would drop a signal the
+		// running client has not heard yet.
+		const restarted =
+			started.length > 0 && !pids.some((pid) => this.pids.includes(pid));
 		this.pids = pids;
 		this.log.add("game", { pids });
-		if (started.length > 0 || closed) {
-			// A new client process reads signal files fresh, so they can be reused.
+		if (restarted || closed) {
 			const reset = resetVolatile(this.options.paths);
 			this.log.add("reset", reset);
 			this.log.say(

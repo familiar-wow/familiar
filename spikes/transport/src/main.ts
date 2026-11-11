@@ -1,33 +1,46 @@
 // familiar-spike: installs the measuring addon, runs the companion and writes report.md.
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Companion } from "./companion.ts";
 import { install, isInstalled, uninstall } from "./install.ts";
 import { EventLog } from "./log.ts";
 import { buildReport } from "./report.ts";
+import { VERSION } from "./version.ts";
 import {
 	accountNames,
+	addonsFiles,
 	clientProcesses,
 	clientVersion,
-	findClient,
+	findClients,
 	isClientFolder,
 	savedVariablesFile,
 	type WowPaths,
 	wowPaths,
 } from "./wow.ts";
 
-const VERSION = "0.1.0";
-
 const USAGE = `familiar-spike ${VERSION}: transport measurements for Familiar (FAM-15)
 
   familiar-spike              install or update the test addon, then measure until Ctrl+C
+  familiar-spike check        show which client it found, without changing anything
   familiar-spike report       rebuild report.md from the collected data
   familiar-spike uninstall    remove the test addon and its data from WoW (WoW must be closed)
 
 Options:
   --wow <folder>    the _forever_ client folder, if it is not found automatically
-  --data <folder>   where logs and report.md go (default: familiar-spike-data next to you)`;
+  --data <folder>   where logs and report.md go (default: familiar-spike-data in the current folder)`;
+
+const NOT_FOUND =
+	process.platform === "win32"
+		? 'WoW: Forever was not found. Pass the client folder, for example:\n  familiar-spike --wow "C:\\Program Files (x86)\\World of Warcraft\\_forever_"'
+		: 'WoW: Forever was not found in the Wine prefixes of Lutris, Steam (Proton), Bottles, Heroic or ~/.wine.\nPass the client folder, for example:\n  ./familiar-spike --wow "$HOME/Games/battlenet/drive_c/Program Files (x86)/World of Warcraft/_forever_"';
 
 function exitWith(message: string, code = 1): never {
 	console.error(message);
@@ -36,15 +49,59 @@ function exitWith(message: string, code = 1): never {
 	process.exit(code);
 }
 
+/** The shell does not expand ~ inside quotes. */
+function clientOption(option: string): string {
+	return resolve(option.replace(/^~(?=$|[\\/])/, homedir()));
+}
+
 async function resolveClient(option?: string): Promise<WowPaths> {
-	const client = option ? resolve(option) : await findClient();
-	if (!client)
-		exitWith(
-			'WoW: Forever was not found. Pass the client folder, for example:\n  familiar-spike --wow "C:\\Program Files (x86)\\World of Warcraft\\_forever_"',
-		);
+	const client = option ? clientOption(option) : (await findClients())[0];
+	if (!client) exitWith(NOT_FOUND);
 	if (!isClientFolder(client))
 		exitWith(`${client} does not look like a WoW client folder.`);
 	return wowPaths(client);
+}
+
+async function check(option?: string): Promise<void> {
+	const found = option ? [clientOption(option)] : await findClients();
+	console.log(`familiar-spike ${VERSION} on ${process.platform}`);
+	const client = found[0];
+	if (!client) exitWith(NOT_FOUND);
+	if (!isClientFolder(client))
+		exitWith(`${client} does not look like a WoW client folder.`);
+	const paths = wowPaths(client);
+	const { interface: iface, version } = clientVersion(paths.client);
+	const others = existsSync(paths.addons)
+		? readdirSync(paths.addons).filter((n) => !n.startsWith("FamiliarSpike"))
+				.length
+		: 0;
+	const characters = addonsFiles(paths).length;
+	const pids = await clientProcesses();
+	const rows: [string, string][] = [
+		["Client", paths.client],
+		[
+			"Version",
+			version
+				? `${version} (interface ${iface})`
+				: `unknown, assuming interface ${iface}`,
+		],
+		[
+			"Addons",
+			`${paths.addons} (${others} other addon${others === 1 ? "" : "s"}, test addon ${isInstalled(paths) ? "installed" : "not installed"})`,
+		],
+		[
+			"Characters",
+			characters ? `${characters} with AddOns.txt` : "none yet; log in once",
+		],
+		["WoW running", pids.length ? `yes (pid ${pids.join(", ")})` : "no"],
+		...found.slice(1).map((other): [string, string] => ["Also found", other]),
+	];
+	for (const [label, value] of rows)
+		console.log(`${`${label}:`.padEnd(13)}${value}`);
+	if (found.length > 1)
+		console.log(
+			"\nThe first one was played most recently. Use --wow to pick another.",
+		);
 }
 
 function stamp(date = new Date()): string {
@@ -128,7 +185,7 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 	};
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
-	// Windows sends this when the console window is closed.
+	// Sent when the console window or terminal is closed.
 	process.on("SIGHUP", shutdown);
 }
 
@@ -146,6 +203,7 @@ async function main(): Promise<void> {
 	if (values.help) return void console.log(USAGE);
 	if (values.version) return void console.log(VERSION);
 	const command = positionals[0] ?? "run";
+	if (command === "check") return check(values.wow);
 	const dataDir = resolve(values.data ?? "familiar-spike-data");
 	mkdirSync(dataDir, { recursive: true });
 
