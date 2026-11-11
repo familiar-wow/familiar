@@ -1,0 +1,28 @@
+name: Bug report
+description: Something in Familiar does not work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Familiar version, game client and operating system.
+    validations:
+      required: true
+  - type: input
+    id: brain
+    attributes:
+      label: Brain
+      description: The model or agent you use with Familiar.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Remove API keys and other secrets before posting.
