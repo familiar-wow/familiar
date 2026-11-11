@@ -1,0 +1,15 @@
+{
+	"name": "familiar-transport-spike",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "bun src/main.ts",
+		"sim": "bun sim/run.ts",
+		"typecheck": "tsc --noEmit",
+		"build": "bun scripts/build.ts"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.4",
+		"typescript": "7.0.2"
+	}
+}
