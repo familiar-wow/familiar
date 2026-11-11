@@ -1,13 +1,14 @@
 // End-to-end run without the game: the real addon (in sim/wow.lua) talks to the real companion
 // through real files. Needs Lua 5.1 with the bit library, or LuaJIT (set LUA=/path/to/lua).
 //
+// Every run logs in, benchmarks, reloads, then switches to a second character and back; the
+// client keeps addon states across the switch the way build 70888 does (see sim/wow.lua).
+//
 //   bun sim/run.ts               an older client: an empty .wav does not play
 //   bun sim/run.ts --emptyplays  build 70888 as Sven saw it: an empty .wav "plays", a missing
 //                                one stays missing; doorbells must switch to the sound length
-//   bun sim/run.ts --sparse      the client writes only AddOns.txt rows that differ from the
-//                                default; the lanes must still decode
 //   bun sim/run.ts --noreset     ResetAddOns keeps memory; lane D must fail, the rest not
-//   bun sim/run.ts --binary dist/familiar-spike-0.3.0-linux-x64/familiar-spike
+//   bun sim/run.ts --binary dist/familiar-spike-0.3.1-linux-x64/familiar-spike
 //                                the built Linux program instead of the source. The game is a
 //                                copy of Lua named Wow.exe, which is how Wine processes look.
 import {
@@ -34,24 +35,29 @@ const { values: options } = parseArgs({
 	args: Bun.argv.slice(2),
 	options: {
 		noreset: { type: "boolean" },
-		sparse: { type: "boolean" },
 		emptyplays: { type: "boolean" },
 		keep: { type: "boolean" },
 		binary: { type: "string" },
 	},
 });
-const flags = (["noreset", "sparse", "emptyplays"] as const).filter(
+const flags = (["noreset", "emptyplays"] as const).filter(
 	(flag) => options[flag],
 );
 const binary = options.binary ? resolve(options.binary) : undefined;
 const root = mkdtempSync(join(tmpdir(), "familiar-sim-"));
 const paths = wowPaths(join(root, "_forever_"));
 const dataDir = join(root, "data");
-const [ACCOUNT, REALM, CHARACTER] = ["SIM#1", "Forever", "Spike"];
+const [ACCOUNT, REALM, CHARACTER, SECOND] = [
+	"SIM#1",
+	"Forever",
+	"Spike",
+	"Bank",
+];
 
 for (const dir of [
 	paths.addons,
 	join(paths.accounts, ACCOUNT, REALM, CHARACTER),
+	join(paths.accounts, ACCOUNT, REALM, SECOND),
 	join(paths.accounts, ACCOUNT, "SavedVariables"),
 	dataDir,
 ])
@@ -330,6 +336,18 @@ expect(
 	"reload starts a new session",
 );
 await client.play(15);
+console.log(
+	`Switch to ${SECOND} and back: the client keeps addon states across logins`,
+);
+for (const who of [SECOND, CHARACTER]) {
+	const from = client.chat.length;
+	await client.send(`login ${who}`);
+	expect(
+		await client.play(15, () => client.said("Self-test:", from)),
+		`login as ${who} starts a new session`,
+	);
+	await client.play(15);
+}
 await client.send("logout");
 await client.close();
 
@@ -363,7 +381,7 @@ if (options.noreset) {
 	expect(report.includes("No failures."), "soak has no failures");
 }
 expect(
-	report.includes("2 addon session(s)") && !report.includes("from 0.2.0"),
+	report.includes("4 addon session(s)") && !report.includes("from 0.2.0"),
 	"results of 0.2.0 are dropped",
 );
 expect(!report.includes("## Addon errors"), "no addon errors");

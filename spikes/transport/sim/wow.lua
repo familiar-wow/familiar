@@ -9,12 +9,18 @@
 --   combat on|off                enter or leave combat
 --   reload                       /reload: save, then start a fresh UI
 --   logout                       fire PLAYER_LOGOUT and write SavedVariables
+--   login <character>            log out, then log in another character in the same process
 -- Chat output is written as lines starting with "chat ".
+--
+-- AddOns.txt behaves as measured on build 70888 (FAM-15): a character's file holds rows only
+-- for the addons set for that character, and the client keeps one enable state for the whole
+-- process. Logging in and ResetAddOns apply the character's rows; an addon without a row keeps
+-- whatever state the previous character left in memory. EnableAddOn and DisableAddOn give an
+-- addon a row only when they change its state.
 --
 -- usage: lua wow.lua <client folder> <account> <realm> <character> <names file> [flags]
 -- flags, comma-separated:
 --   noreset     C_AddOns.ResetAddOns keeps the in-memory state instead of re-reading disk
---   sparse      SaveAddOns writes only rows whose state differs from the addon's default
 --   emptyplays  PlaySoundFile succeeds for an empty file and returns nothing for a missing
 --               one, which then stays missing; as Sven saw on build 70888
 
@@ -27,16 +33,25 @@ end
 
 local ADDONS = client .. "/Interface/AddOns/"
 local ACCOUNT = client .. "/WTF/Account/" .. account .. "/"
-local ADDONS_TXT = ACCOUNT .. realm .. "/" .. character .. "/AddOns.txt"
 local SAVED = ACCOUNT .. "SavedVariables/"
 local MAIN = "FamiliarSpike"
-local GUID = "Player-4711-0ABC1234"
+
+local function guidOf(name)
+	local hash = 0
+	for i = 1, #name do
+		hash = (hash * 31 + name:byte(i)) % 4294967296
+	end
+	return string.format("Player-4711-%08X", hash)
+end
+
+local GUID = guidOf(character)
 
 math.randomseed(os.time())
 
--- Client state that survives /reload ------------------------------------------
+-- Client state that survives /reload and character switches -------------------
 local known, order, toc, indexOf = {}, {}, {}, {}
 local enabled, default = {}, {}
+local rows = {} -- addons with a row in the logged-in character's AddOns.txt
 local sounds = {} -- length in ms of every file that played, cached per process like the real client
 local absent = {} -- emptyplays: a file that was missing stays missing
 local playing = {} -- sound handle -> end time in ms
@@ -79,20 +94,25 @@ for name in (readFile(namesFile) or ""):gmatch("[^\r\n]+") do
 	order[#order + 1] = name
 	toc[name] = parseToc(name)
 	default[name] = toc[name].DefaultState ~= "disabled"
+	enabled[name] = default[name]
 end
 table.sort(order)
 for index, name in ipairs(order) do
 	indexOf[name] = index
 end
 
+local function addonsTxt()
+	return ACCOUNT .. realm .. "/" .. character .. "/AddOns.txt"
+end
+
+-- Applies the logged-in character's rows. Addons without a row keep their state in memory.
 local function loadAddonsTxt()
-	for _, name in ipairs(order) do
-		enabled[name] = default[name]
-	end
-	for line in (readFile(ADDONS_TXT) or ""):gmatch("[^\r\n]+") do
+	rows = {}
+	for line in (readFile(addonsTxt()) or ""):gmatch("[^\r\n]+") do
 		local name, state = line:match("^(.-):%s*(%a+)%s*$")
 		if name and known[name] then
 			enabled[name] = state == "enabled"
+			rows[name] = true
 		end
 	end
 end
@@ -100,11 +120,11 @@ end
 local function saveAddonsTxt()
 	local lines = {}
 	for _, name in ipairs(order) do
-		if not flags.sparse or enabled[name] ~= default[name] then
+		if rows[name] then
 			lines[#lines + 1] = name .. ": " .. (enabled[name] and "enabled" or "disabled")
 		end
 	end
-	writeFile(ADDONS_TXT, table.concat(lines, "\n") .. "\n")
+	writeFile(addonsTxt(), table.concat(lines, "\n") .. "\n")
 end
 
 -- Length of a canonical PCM .wav in ms, or nil if the data is no playable sound.
@@ -301,8 +321,16 @@ local function newEnvironment()
 		assert(type(nameOrIndex) == "string", "addon must be a name or an index")
 		return known[nameOrIndex] and nameOrIndex or nil
 	end
-	local function character(who)
+	local function player(who)
 		assert(who == GUID, "character must be the player GUID")
+	end
+	local function setEnabled(nameOrIndex, who, value)
+		player(who)
+		local name = addon(nameOrIndex)
+		if name and enabled[name] ~= value then
+			enabled[name] = value
+			rows[name] = true
+		end
 	end
 	env.C_AddOns = {
 		GetNumAddOns = function()
@@ -328,22 +356,14 @@ local function newEnvironment()
 			return loadAddon(addon(nameOrIndex) or tostring(nameOrIndex))
 		end,
 		GetAddOnEnableState = function(nameOrIndex, who)
-			character(who)
+			player(who)
 			return enabled[addon(nameOrIndex) or ""] and 2 or 0
 		end,
 		EnableAddOn = function(nameOrIndex, who)
-			character(who)
-			local name = addon(nameOrIndex)
-			if name then
-				enabled[name] = true
-			end
+			setEnabled(nameOrIndex, who, true)
 		end,
 		DisableAddOn = function(nameOrIndex, who)
-			character(who)
-			local name = addon(nameOrIndex)
-			if name then
-				enabled[name] = false
-			end
+			setEnabled(nameOrIndex, who, false)
 		end,
 		SaveAddOns = saveAddonsTxt,
 		ResetAddOns = function()
@@ -411,6 +431,13 @@ local commands = {
 		login(true)
 	end,
 	logout = logout,
+	login = function(name)
+		assert(name, "login needs a character")
+		logout()
+		character, GUID = name, guidOf(name)
+		loadAddonsTxt()
+		login(false)
+	end,
 }
 
 login(false)

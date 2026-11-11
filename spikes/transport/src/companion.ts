@@ -129,7 +129,8 @@ export class Companion {
 	private readonly slotWritten = new Map<number, number>();
 	private readonly timers: ReturnType<typeof setInterval>[] = [];
 	private wtf?: Map<string, string>;
-	private locked?: Watched;
+	/** The logged-in character's AddOns.txt: the one the client wrote last. */
+	private active?: Watched;
 	private watcher?: FSWatcher;
 	private running = false;
 	private startedAt = 0;
@@ -161,7 +162,7 @@ export class Companion {
 		return this.options.log;
 	}
 
-	private get gameRunning(): boolean {
+	get gameRunning(): boolean {
 		return this.pids.length > 0;
 	}
 
@@ -183,7 +184,7 @@ export class Companion {
 		this.every(this.timing.wtfMs, () => this.scanWtf());
 		this.every(50, () => {
 			for (const entry of this.watched.values())
-				if (entry !== this.locked) this.check(entry);
+				if (entry !== this.active) this.check(entry);
 		});
 		this.every(this.timing.laneDMs, () => this.writeLaneD());
 		this.every(1000, () => {
@@ -239,7 +240,7 @@ export class Companion {
 		const now = performance.now();
 		if (this.lastPoll) this.intervals.push(now - this.lastPoll);
 		this.lastPoll = now;
-		if (this.locked) this.check(this.locked);
+		if (this.active) this.check(this.active);
 		setTimeout(this.fastLoop, this.options.pollMs ?? 2);
 	};
 
@@ -337,6 +338,9 @@ export class Companion {
 		entry.size = stat.size;
 		entry.retries = 0;
 		entry.clientAt = readAt;
+		// The client writes only the logged-in character's file, so its last write tells us who
+		// plays, even when the frame in it does not decode.
+		this.active = entry;
 		this.counts.clientWrites++;
 		this.log.add("addons", {
 			file: entry.label,
@@ -392,7 +396,7 @@ export class Companion {
 		if (frame.kind !== Kind.Control) return;
 		this.log.add("frame", { ...base, kind: "control", op });
 		if (op === "H") {
-			this.locked = entry;
+			this.active = entry;
 			this.counts.sessions++;
 			const reload = p[1] === 1;
 			this.log.add("hello", {
@@ -421,7 +425,7 @@ export class Companion {
 
 	/**
 	 * Writes the next lane D frame into the active character's AddOns.txt, or into every
-	 * character's file while no hello said which one is active. A file the client wrote within
+	 * character's file until the client has written one. A file the client wrote within
 	 * the quiet period is skipped, so our rewrite cannot drop one of its lane U frames.
 	 */
 	private writeLaneD(): void {
@@ -429,7 +433,7 @@ export class Companion {
 		const at = Date.now();
 		const counter = ++this.laneDCounter;
 		const frame = laneDFrame(this.laneDEpoch, counter, at);
-		const targets = this.locked ? [this.locked] : [...this.watched.values()];
+		const targets = this.active ? [this.active] : [...this.watched.values()];
 		let written = 0;
 		let busy = 0;
 		for (const entry of targets) {
@@ -621,7 +625,7 @@ export class Companion {
 	private reset(): { signals: number; slots: number } {
 		this.nextBell = 1;
 		this.slotWritten.clear();
-		this.locked = undefined;
+		this.active = undefined;
 		return resetVolatile(this.options.paths);
 	}
 

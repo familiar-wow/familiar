@@ -30,7 +30,7 @@ const USAGE = `familiar-spike ${VERSION}: transport measurements for Familiar (F
 
   familiar-spike              install or update the test addon, then measure until Ctrl+C
   familiar-spike check        show which client it found, without changing anything
-  familiar-spike report       rebuild report.md from the collected data
+  familiar-spike report       collect the addon's saved results from WoW and rebuild report.md
   familiar-spike uninstall    remove the test addon and its data from WoW (WoW must be closed)
 
 Options:
@@ -172,7 +172,8 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 			"  1. Log in. Chat shows the self-test and whether doorbells work on this client.",
 			"  2. Stand somewhere quiet, out of combat, and type /fspike bench (about two minutes).",
 			"  3. Type /reload once when it is done, so the client saves the results.",
-			"  4. Keep playing as usual for at least an hour. Every /reload or logout adds results.",
+			"  4. Keep playing as usual for at least an hour. Switch characters once and come back.",
+			"  5. Type /reload once more at the end: WoW saves the addon's results only then.",
 			"Leave this window open. Ctrl+C stops and writes report.md.",
 			"",
 		].join("\n"),
@@ -183,6 +184,10 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 		companion.stop();
 		collectSaved(paths, dataDir);
 		console.log(`\nReport: ${writeReport(dataDir)}`);
+		if (companion.gameRunning)
+			console.log(
+				"\n!! WoW is still running: the addon's results since your last /reload or logout are not\n!! saved yet. Type /reload in game, then run: familiar-spike report\n",
+			);
 		process.exit(0);
 	};
 	process.on("SIGINT", shutdown);
@@ -210,7 +215,12 @@ async function main(): Promise<void> {
 	mkdirSync(dataDir, { recursive: true });
 
 	if (command === "report") {
-		if (values.wow) collectSaved(await resolveClient(values.wow), dataDir);
+		// Without a client the report uses the results collected so far.
+		const client = values.wow
+			? clientOption(values.wow)
+			: (await findClients())[0];
+		if (client && isClientFolder(client))
+			collectSaved(wowPaths(client), dataDir);
 		console.log(`Report: ${writeReport(dataDir)}`);
 	} else if (command === "uninstall") {
 		const paths = await resolveClient(values.wow);

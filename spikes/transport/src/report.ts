@@ -484,6 +484,7 @@ function bellsOf(session: Session, all: LogEvent[]): Bells {
 		latency: [],
 		contexts: new Map(),
 	};
+	const listening = num(session.data.listening) ?? session.from;
 	for (const entry of list(session.data.bells).map(String)) {
 		const [n = 0, seen = 0] = entry.split(",").map(Number);
 		const context = entry.split(",")[2] ?? "-";
@@ -497,8 +498,8 @@ function bellsOf(session: Session, all: LogEvent[]): Bells {
 		}
 		result.heard++;
 		count(result.contexts, context);
-		// A doorbell raised before the session cannot be heard before it.
-		if (Number(raised.raised) >= session.from)
+		// A doorbell raised before the addon listened waited for the login, not the doorbell.
+		if (Number(raised.raised) >= listening)
 			result.latency.push(seen - Number(raised.raised));
 	}
 	const next = num(session.data.nextSignal);
@@ -861,6 +862,39 @@ function overall(v: Verdict, minutes: number): boolean | undefined {
 const soakText = (t: Tally, unit: string) =>
 	t.ok + t.failed === 0 ? "–" : `${t.ok}/${t.ok + t.failed} ${unit}`;
 
+/**
+ * Sessions the companion got a hello from that are not in the saved results: the game writes
+ * them only on /reload or logout. Their uplink frames show how far they got.
+ */
+function unsavedNote(sessions: Session[], events: LogEvent[]): string[] {
+	const saved = new Set(sessions.map((s) => num(s.data.nonce)));
+	const hellos = events.filter((e) => e.ev === "hello");
+	const lines = hellos.flatMap((hello, k) => {
+		if (saved.has(Number(hello.nonce))) return [];
+		const until = hellos[k + 1]?.t ?? Number.POSITIVE_INFINITY;
+		const frames = events.filter(
+			(e) =>
+				e.ev === "frame" &&
+				e.epoch === hello.epoch &&
+				e.t >= hello.t &&
+				e.t < until,
+		);
+		const seqs = new Set(frames.map((e) => Number(e.seq)));
+		const last = Math.max(1, ...seqs);
+		const end = frames.at(-1)?.t ?? hello.t;
+		return [
+			`- Session ${hello.epoch} on ${hello.file} (${hello.reload ? "reload" : "login"}, ${time(hello.t)}–${time(end)}): ${seqs.size} uplink frames arrived, ${last - seqs.size} of 1–${last} missing.`,
+		];
+	});
+	if (lines.length === 0) return [];
+	return [
+		"⚠ **Results not saved yet.** The companion saw these sessions, but the game has not written their results. WoW writes them on `/reload` or logout: type `/reload` in game, then run `familiar-spike report`.",
+		"",
+		...lines,
+		"",
+	];
+}
+
 export function buildReport(dataDir: string, now = new Date()): string {
 	const events = readLogs(dataDir);
 	const saved = loadSaved(dataDir);
@@ -874,6 +908,7 @@ export function buildReport(dataDir: string, now = new Date()): string {
 		"",
 		`Generated ${now.toLocaleString()}. ${sessions.length} addon session(s) in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
 		"",
+		...unsavedNote(sessions, events),
 	];
 	if (sessions.length === 0) {
 		out.push(
@@ -897,7 +932,7 @@ export function buildReport(dataDir: string, now = new Date()): string {
 		body: [
 			`Build ${text(latest?.data.build) ?? "?"}. Self-test: ${text(bench?.selftest) ?? text(latest?.data.selftest) ?? "–"}.`,
 			"",
-			`Sound probe (\`PlaySoundFile\` result / \`C_Sound.IsPlaying\` a quarter second later; - means no handle): \`${sound}\`. *empty* is a 0-byte file, *valid* 10 ms and *long* 1.5 s of silence, *missing* does not exist. *secure* is 1 while \`PlaySoundFile\` is Blizzard's own function, otherwise the addon that replaced it.`,
+			`Sound probe (\`PlaySoundFile\` result / \`C_Sound.IsPlaying\` 0.3 s and 0.8 s later, one digit each; - means no handle): \`${sound}\`. *empty* is a 0-byte file, *valid* 10 ms and *long* 1.5 s of silence, *missing* does not exist. *secure* is 1 while \`PlaySoundFile\` is Blizzard's own function, otherwise the addon that replaced it.`,
 			"",
 			`Doorbell method: ${method ?? doorbell}. *PlaySoundFile result*: an empty file fails to play, a raised one plays. *Sound length*: both play, but only a raised one is still playing a quarter second later.`,
 		].join("\n"),
@@ -987,7 +1022,7 @@ export function buildReport(dataDir: string, now = new Date()): string {
 			]),
 		),
 		"",
-		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; doorbell raise → heard p95 < 1 s; no failures in a soak of at least 60 minutes. \`?\` means not enough data yet.`,
+		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; doorbell raise → heard p95 < 1 s once the addon listens after login; no failures in a soak of at least 60 minutes. \`?\` means not enough data yet.`,
 		"",
 	);
 	for (const section of sections)

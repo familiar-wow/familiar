@@ -120,20 +120,24 @@ end
 
 local POW2 = { [0] = 1, 2, 4, 8, 16, 32, 64, 128 }
 
+-- The writer cannot trust the state the client reports. Measured on build 70888 (FAM-15): a
+-- character's AddOns.txt holds rows only for the addons set for that character, and the client
+-- keeps one enable state for the whole process. Logging in and ResetAddOns apply the
+-- character's rows; a helper without a row keeps whatever the previous character left in
+-- memory. GetAddOnEnableState reports that memory, SaveAddOns writes only the rows, so a bit
+-- that memory already holds never reaches the file. The writer therefore disables every helper
+-- before its first frame and after anything that may have changed the lane: from then on each
+-- enabled bit has a row of its own, written by a real change.
 local Writer = {}
 Writer.__index = Writer
 
 function Wire.NewWriter(indices, character)
-	local writer = setmetatable({ indices = indices, character = character, bits = {} }, Writer)
-	writer:Sync()
-	return writer
+	return setmetatable({ indices = indices, character = character, bits = {}, stale = true }, Writer)
 end
 
--- Reads the client's current state, for example after ResetAddOns or the player's addon list.
-function Writer:Sync()
-	for i = 0, Wire.BITS - 1 do
-		self.bits[i] = C_AddOns.GetAddOnEnableState(self.indices[i], self.character) == 2
-	end
+-- The client may have changed the lane, for example after ResetAddOns or the player's addon list.
+function Writer:Invalidate()
+	self.stale = true
 end
 
 -- Applies a frame and persists it. Returns toggle ms, save ms, flipped bits and how many
@@ -142,6 +146,13 @@ function Writer:Write(frame)
 	local enable, disable, state = C_AddOns.EnableAddOn, C_AddOns.DisableAddOn, C_AddOns.GetAddOnEnableState
 	local indices, bits, character = self.indices, self.bits, self.character
 	local started, flipped = debugprofilestop(), {}
+	if self.stale then
+		for i = 0, Wire.BITS - 1 do
+			disable(indices[i], character)
+			bits[i] = false
+		end
+		self.stale = false
+	end
 	for index = 1, Wire.FRAME do
 		local value, base = byte(frame, index), (index - 1) * 8
 		for offset = 0, 7 do

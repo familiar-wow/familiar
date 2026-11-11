@@ -70,10 +70,6 @@ frame:SetScript("OnEvent", function(_, event, ...)
 			Probe.Event("zone", isInitialLogin and "login" or "")
 			return
 		end
-		if isInitialLogin then
-			-- A new client process: the companion has reset all doorbell files.
-			ns.db.nextSignal = 1
-		end
 		ns.session = newSession(isReloadingUi)
 		Probe.Setup(UnitGUID("player"), ns.session)
 		Probe.Event("session", isReloadingUi and "reload" or "login")

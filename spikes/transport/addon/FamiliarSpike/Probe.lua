@@ -203,7 +203,7 @@ function Probe.Frame(now, elapsedMs)
 		listOpen = open
 		Probe.Event(open and "list-open" or "list-close")
 		if not open and writer then
-			writer:Sync()
+			writer:Invalidate()
 		end
 	end
 	runTasks(now)
@@ -290,7 +290,7 @@ local function readLaneD()
 	laneD.reads = laneD.reads + 1
 	-- If ResetAddOns reloaded AddOns.txt, lane U may have changed under the writer.
 	if writer then
-		writer:Sync()
+		writer:Invalidate()
 	end
 	local f = Wire.Decode(frame)
 	if not f or f.kind ~= Wire.DATA or #f.payload < 10 then
@@ -435,29 +435,38 @@ local function isPlaying(handle)
 	return ok and playing == true
 end
 
--- Plays each control file and asks C_Sound.IsPlaying a moment later. "return": an empty file
--- does not play, so PlaySoundFile's result is the doorbell. "duration": both play, but only a
--- valid one is still playing a quarter second later. "none": neither works.
+-- Plays each control file and asks C_Sound.IsPlaying 0.3 s and 0.8 s later. "return": an empty
+-- file does not play, so PlaySoundFile's result is the doorbell. "duration": both play, but only
+-- a valid one is still playing a moment later. "none": neither works. The second look catches a
+-- sound that starts late, as one test on Linux right after /reload suggested.
 -- Format of the result: "empty=willPlay/isPlaying,valid=...,long=...,missing=...,secure=..."
--- with 1, 0 and - for "no handle". secure is 1 while PlaySoundFile is Blizzard's own function,
--- otherwise the name of the addon that replaced it.
+-- where isPlaying holds one digit per look, or - for "no handle". secure is 1 while
+-- PlaySoundFile is Blizzard's own function, otherwise the name of the addon that replaced it.
 local function soundTest()
 	local names, probes = { "empty", "valid", "long", "missing" }, {}
 	for _, name in ipairs(names) do
 		local will, handle = play(CTL .. name .. ".wav")
-		probes[name] = { will = will, handle = handle }
+		probes[name] = { will = will, handle = handle, looks = "" }
 	end
-	sleep(0.3)
+	for _, wait in ipairs({ 0.3, 0.5 }) do
+		sleep(wait)
+		for _, name in ipairs(names) do
+			local p = probes[name]
+			if p.handle then
+				local now = isPlaying(p.handle)
+				p.looks, p.playing = p.looks .. (now and "1" or "0"), p.playing or now
+			end
+		end
+	end
 	local parts = {}
 	for _, name in ipairs(names) do
 		local p = probes[name]
 		if p.handle then
-			p.playing = isPlaying(p.handle)
 			pcall(StopSound, p.handle)
 		end
-		parts[#parts + 1] =
-			format("%s=%s/%s", name, p.will and "1" or "0", p.handle and (p.playing and "1" or "0") or "-")
+		parts[#parts + 1] = format("%s=%s/%s", name, p.will and "1" or "0", p.handle and p.looks or "-")
 	end
+	doorbell.late = probes.long.looks == "01"
 	if issecurevariable then
 		local secure, taint = issecurevariable("PlaySoundFile")
 		parts[#parts + 1] = "secure=" .. (secure and "1" or tostring(taint or "0"))
@@ -474,6 +483,20 @@ local function soundTest()
 		mode, why = "none", "an empty file plays like a valid one"
 	end
 	return mode, why, concat(parts, ",")
+end
+
+local function doorbellOn()
+	return doorbell.mode == "return" or doorbell.mode == "duration"
+end
+
+local function probeDoorbell(session)
+	local mode, why, sound = "none", "sound API missing", "-"
+	if PlaySoundFile and C_Sound and C_Sound.IsPlaying then
+		mode, why, sound = soundTest()
+	end
+	doorbell.mode, doorbell.why = mode, why
+	session.sound, session.doorbell = sound, mode .. (why and (": " .. why) or "")
+	return doorbellOn()
 end
 
 local function describeDoorbell()
@@ -502,18 +525,36 @@ local function raised(n)
 	end
 	sleep(0.25)
 	local playing = isPlaying(handle)
+	if not playing and doorbell.late then
+		sleep(0.5)
+		playing = isPlaying(handle)
+	end
 	pcall(StopSound, handle)
 	return playing
 end
 
--- Polls the next doorbell four times a second. A raised file stays raised until the client
--- restarts.
+-- Polls the next doorbell four times a second. While doorbells are off, tries the sound again
+-- every minute. A raised file stays raised until the client restarts, and the companion
+-- silences all of them when the game starts. A login is a new process only if the last
+-- doorbell heard is silent again; after a character switch it still rings, and counting
+-- goes on from there.
 -- Format of session.bells: "n,seenMs,context"
 function Probe.Bells()
-	if doorbell.mode ~= "return" and doorbell.mode ~= "duration" then
-		return
+	local db, session = ns.db, ns.session
+	while not doorbellOn() do
+		sleep(60)
+		if probeDoorbell(session) then
+			Probe.Event("doorbell", describeDoorbell())
+			ns.Say("Doorbells: " .. describeDoorbell() .. ".")
+		end
 	end
-	local db, bells = ns.db, ns.session.bells
+	if not session.reload and db.nextSignal > 1 and not raised(db.nextSignal - 1) then
+		db.nextSignal = 1
+		Probe.Event("bells", "restart")
+	end
+	-- Doorbells raised before this moment waited for the login, not for the doorbell.
+	session.listening = Probe.WallMs()
+	local bells = session.bells
 	while db.nextSignal <= SIGNALS do
 		local n = db.nextSignal
 		if raised(n) then
@@ -655,12 +696,13 @@ function Probe.Start(isReload)
 	waitClock()
 	local session = ns.session
 	session.selftest = checkSetup()
-	local mode, why, sound = "none", "sound API missing", "-"
-	if PlaySoundFile and C_Sound and C_Sound.IsPlaying then
-		mode, why, sound = soundTest()
+	for attempt = 1, 3 do
+		if probeDoorbell(session) or attempt == 3 then
+			break
+		end
+		Probe.Event("sound-retry", session.sound)
+		sleep(2)
 	end
-	doorbell.mode, doorbell.why = mode, why
-	session.sound, session.doorbell = sound, mode .. (why and (": " .. why) or "")
 	if writer then
 		local build = tonumber((select(2, GetBuildInfo()))) or 0
 		control("H", char(isReload and 1 or 0) .. U32(build) .. U32(session.nonce))
