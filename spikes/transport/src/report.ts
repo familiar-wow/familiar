@@ -1,4 +1,6 @@
 // Joins the addon's SavedVariables with the companion log and renders report.md.
+// Every channel gets one verdict from its benchmark and its soak. The diagnosis section shows
+// what the client actually wrote, so a channel that fails can be explained.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type LogEvent, readLogs } from "./log.ts";
@@ -16,7 +18,6 @@ interface Stats {
 	p50: number;
 	p95: number;
 	max: number;
-	mean: number;
 }
 
 function stats(values: number[]): Stats | undefined {
@@ -31,8 +32,15 @@ function stats(values: number[]): Stats | undefined {
 		p50: pick(0.5),
 		p95: pick(0.95),
 		max: sorted.at(-1) ?? 0,
-		mean: sorted.reduce((a, b) => a + b, 0) / sorted.length,
 	};
+}
+
+/** The addon's "n:p50/p95/max" summaries. */
+function summary(value: string | undefined): Stats | undefined {
+	const [n = "0", rest] = (value ?? "0").split(":");
+	if (!rest || n === "0") return undefined;
+	const [p50 = 0, p95 = 0, max = 0] = rest.split("/").map(Number);
+	return { n: Number(n), p50, p95, max };
 }
 
 const ms = (value: number | undefined, digits = 0) =>
@@ -45,11 +53,19 @@ const pct = (part: number, whole: number) =>
 	whole === 0 ? "–" : `${((100 * part) / whole).toFixed(1)} %`;
 const mark = (ok: boolean | undefined) =>
 	ok === undefined ? "?" : ok ? "✔" : "✘";
-
 const rows = (value: string | undefined) =>
 	value ? value.split(";").filter(Boolean) : [];
 const numOrUndefined = (value: string | undefined) =>
-	value === undefined || value === "-" ? undefined : Number(value);
+	value === undefined || value === "" || value === "-"
+		? undefined
+		: Number(value);
+const bytes = (n: number) =>
+	n >= 1048576
+		? `${n / 1048576} MB`
+		: n >= 1024
+			? `${Math.round(n / 1024)} KB`
+			: `${n} B`;
+const time = (t: number) => new Date(t).toLocaleTimeString();
 
 function tableMd(head: string[], body: (string | number)[][]): string {
 	const line = (cells: (string | number)[]) => `| ${cells.join(" | ")} |`;
@@ -57,6 +73,13 @@ function tableMd(head: string[], body: (string | number)[][]): string {
 		"\n",
 	);
 }
+
+function count<K>(map: Map<K, number>, key: K, by = 1): void {
+	map.set(key, (map.get(key) ?? 0) + by);
+}
+
+const listing = (map: Map<string, number>) =>
+	[...map.entries()].map(([reason, n]) => `${reason} ×${n}`).join(", ");
 
 export interface Saved {
 	account: string;
@@ -83,46 +106,109 @@ export function loadSaved(dataDir: string): Saved[] {
 	return result;
 }
 
-/** Companion events that belong to one addon session: same epoch, inside its lifetime. */
-function eventsOf(events: LogEvent[], session: LuaTable): LogEvent[] {
-	const epoch = num(session.epoch);
-	const from = (num(session.started) ?? 0) * 1000 - 2000;
-	const to = (num(session.ended) ?? Number.POSITIVE_INFINITY) + 5000;
-	return events.filter((e) => e.epoch === epoch && e.t >= from && e.t <= to);
+/** One addon session (a login or /reload) and the companion events of its lifetime. */
+interface Session {
+	account: string;
+	data: LuaTable;
+	epoch: number;
+	from: number;
+	to: number;
+	events: LogEvent[];
+	/** Whether the companion ran during the session. */
+	companion: boolean;
 }
 
-const FRAME_BINS = ["<8", "<12", "<17", "<25", "<34", "<50", "<100", "≥100"];
+function sessionsOf(saved: Saved[], events: LogEvent[]): Session[] {
+	return saved.flatMap(({ account, db }) =>
+		list(db.sessions).map((value) => {
+			const data = table(value) ?? {};
+			const from = (num(data.started) ?? 0) * 1000 - 2000;
+			const to = (num(data.ended) ?? Number.POSITIVE_INFINITY) + 2000;
+			const own = events.filter((e) => e.t >= from && e.t <= to);
+			return {
+				account,
+				data,
+				epoch: num(data.epoch) ?? -1,
+				from,
+				to,
+				events: own,
+				companion: own.some((e) => e.ev === "poll" || e.ev === "lane-d"),
+			};
+		}),
+	);
+}
 
 interface Section {
 	title: string;
 	body: string;
 }
 
-interface Verdict {
-	channel: string;
-	ok: boolean | undefined;
-	summary: string;
+interface Tally {
+	ok: number;
+	failed: number;
 }
 
-function uplinkSection(
+interface Verdict {
+	channel: string;
+	/** undefined: not measured. */
+	bench: boolean | undefined;
+	benchText: string;
+	soak: Tally;
+	soakText: string;
+}
+
+const tally = (): Tally => ({ ok: 0, failed: 0 });
+
+// Uplink ------------------------------------------------------------------------
+
+const UPLINK_STREAMS = [1, 2, 3, 4, 5];
+const SOAK_STREAM = 9;
+
+function framesSeen(session: Session, stream: number): Map<number, LogEvent> {
+	const seen = new Map<number, LogEvent>();
+	for (const e of session.events)
+		if (
+			e.ev === "frame" &&
+			e.kind === "data" &&
+			e.epoch === session.epoch &&
+			e.stream === stream
+		)
+			seen.set(Number(e.index), e);
+	return seen;
+}
+
+/** What the client wrote to AddOns.txt between two times. */
+function clientWrites(events: LogEvent[], from: number, to: number) {
+	const writes = events.filter(
+		(e) => e.ev === "addons" && e.t >= from && e.t <= to,
+	);
+	const rowCounts = writes.map((e) => Number(e.rows ?? 0));
+	return {
+		writes: writes.length,
+		decoded: writes.filter((e) => e.frame).length,
+		minRows: rowCounts.length ? Math.min(...rowCounts) : 0,
+		maxRows: Math.max(0, ...rowCounts),
+		maxOn: Math.max(0, ...writes.map((e) => Number(e.on ?? 0))),
+	};
+}
+
+function uplinkBench(
+	session: Session,
 	bench: LuaTable,
-	events: LogEvent[],
-	verdicts: Verdict[],
-): Section {
+): { section: Section; ok: boolean | undefined; text: string } {
 	const up = table(bench.up);
 	const body: (string | number)[][] = [];
 	let lossFree = true;
-	let cost95 = 0;
 	let detect95 = 0;
+	let cost95 = 0;
 	let streams = 0;
-	for (const stream of ["1", "2", "3", "4"]) {
-		const run = table(up?.[stream]);
+	let seenTotal = 0;
+	let mismatches = 0;
+	for (const stream of UPLINK_STREAMS) {
+		const run = table(up?.[String(stream)]);
 		if (!run) continue;
 		streams++;
-		const seen = new Map<number, LogEvent>();
-		for (const e of events)
-			if (e.ev === "frame" && e.kind === "data" && e.stream === Number(stream))
-				seen.set(Number(e.index), e);
+		const seen = framesSeen(session, stream);
 		const sends = rows(text(run.sends)).map((row) =>
 			row.split(",").map(Number),
 		);
@@ -130,299 +216,481 @@ function uplinkSection(
 		const fileLag: number[] = [];
 		const cost: number[] = [];
 		let corrupt = 0;
-		for (const [index = 0, sent = 0, toggle = 0, save = 0] of sends) {
+		let streamMismatches = 0;
+		for (const [
+			index = 0,
+			sent = 0,
+			toggle = 0,
+			save = 0,
+			,
+			mis = 0,
+		] of sends) {
 			cost.push(toggle + save);
+			streamMismatches += mis;
 			const e = seen.get(index);
 			if (!e) continue;
 			if (e.ok === false) corrupt++;
 			detect.push(Number(e.read) - sent);
 			fileLag.push(Number(e.mtime) - sent);
 		}
-		const first = sends[0]?.[1] ?? 0;
-		const last = sends.at(-1)?.[1] ?? 0;
-		const seconds = Math.max(0.001, (last - first) / 1000);
+		seenTotal += detect.length;
+		mismatches += streamMismatches;
+		const interval = num(run.interval) ?? 0;
 		const lost = sends.length - detect.length;
-		if (lost > 0 && Number(stream) > 1) lossFree = false;
+		if ((lost > 0 || corrupt > 0) && interval >= 0.033) lossFree = false;
 		const d = stats(detect);
 		const c = stats(cost);
-		if (Number(stream) >= 3) {
+		if (interval >= 0.066) {
 			detect95 = Math.max(detect95, d?.p95 ?? 0);
 			cost95 = Math.max(cost95, c?.p95 ?? 0);
 		}
-		const interval = num(run.interval) ?? 0;
+		const first = sends[0]?.[1] ?? 0;
+		const last = sends.at(-1)?.[1] ?? 0;
+		const seconds = Math.max(0.001, (last - first) / 1000);
 		body.push([
 			interval === 0 ? "every frame" : `${Math.round(interval * 1000)} ms`,
 			`${detect.length}/${sends.length}`,
 			pct(lost, sends.length),
 			corrupt,
-			`${(sends.length / seconds).toFixed(1)}/s`,
+			streamMismatches,
 			`${((detect.length * 20) / seconds).toFixed(0)} B/s`,
 			trio(d),
 			trio(stats(fileLag)),
 			trio(c, 2),
 		]);
 	}
-	const ok =
-		streams === 0 ? undefined : lossFree && detect95 < 250 && cost95 < 2;
-	verdicts.push({
-		channel: "Uplink: AddOns.txt lane (SaveAddOns)",
-		ok,
-		summary:
-			streams === 0
-				? "not measured"
-				: `${lossFree ? "no loss at ≥33 ms spacing" : "frames lost"}, detect p95 ${ms(detect95)}, write cost p95 ${ms(cost95, 2)}`,
-	});
+	const from = num(bench.started) ?? 0;
+	const to = num(bench.finished) ?? from;
+	const writes = clientWrites(session.events, from, to);
+	let ok: boolean | undefined;
+	let verdict: string;
+	if (streams === 0) {
+		verdict = "not measured (helper addons missing?)";
+	} else if (seenTotal === 0) {
+		ok = session.companion ? false : undefined;
+		verdict = !session.companion
+			? "companion was not running"
+			: writes.writes === 0
+				? "no frame arrived: the client did not write AddOns.txt during the benchmark"
+				: writes.maxRows === 0
+					? `no frame arrived: the client wrote AddOns.txt ${writes.writes}× without FamiliarSpike_U rows`
+					: `no frame arrived: the client wrote AddOns.txt ${writes.writes}× (up to ${writes.maxRows} lane rows, ${writes.maxOn} enabled), none held a valid frame`;
+	} else {
+		ok = lossFree && detect95 < 250 && cost95 < 2 && mismatches === 0;
+		verdict = `${lossFree ? "no loss at ≥33 ms spacing" : "frames lost"}, detect p95 ${ms(detect95)}, write cost p95 ${ms(cost95, 2)}`;
+	}
+	if (mismatches > 0)
+		verdict += `; the client ignored ${mismatches} enable/disable calls`;
 	return {
-		title: "Uplink: AddOns.txt lane",
-		body: [
-			"The addon flips 256 helper enable states and calls `C_AddOns.SaveAddOns()`; the companion reads `AddOns.txt`.",
-			"*Detect* runs from the start of the write to the companion's read (two clocks, ± one frame). *File lag* is the file's mtime minus the start of the write. *Write cost* is the time inside the toggle and save calls, which the frame pays for. Payload per frame: 20 bytes.",
-			"",
-			tableMd(
-				[
-					"Spacing",
-					"Seen",
-					"Lost",
-					"Corrupt",
-					"Rate",
-					"Payload",
-					"Detect p50/p95/max",
-					"File lag p50/p95/max",
-					"Write cost p50/p95/max",
-				],
-				body,
-			),
-		].join("\n"),
+		ok,
+		text: verdict,
+		section: {
+			title: "Uplink: AddOns.txt lane U",
+			body: [
+				"The addon flips 256 helper enable states and calls `C_AddOns.SaveAddOns()`; the companion reads every client write of `AddOns.txt`. *Detect* runs from the start of the write to the companion's read (two clocks, ± one frame). *File lag* is the file's mtime minus the start of the write. *Write cost* is the time inside the toggle and save calls, which the frame pays for. *Ignored* counts enable/disable calls the client did not take. Payload per frame: 20 bytes.",
+				"",
+				tableMd(
+					[
+						"Spacing",
+						"Seen",
+						"Lost",
+						"Corrupt",
+						"Ignored",
+						"Payload",
+						"Detect p50/p95/max",
+						"File lag p50/p95/max",
+						"Write cost p50/p95/max",
+					],
+					body,
+				),
+				"",
+				`During the benchmark the client wrote \`AddOns.txt\` ${writes.writes}× (lane U rows per write: ${writes.minRows}–${writes.maxRows}, enabled up to ${writes.maxOn}); ${writes.decoded} of these writes held a valid frame.`,
+			].join("\n"),
+		},
 	};
 }
 
-function signalSection(
+// Lane D ------------------------------------------------------------------------
+
+function laneDBench(
+	session: Session,
 	bench: LuaTable,
-	events: LogEvent[],
-	verdicts: Verdict[],
-): Section {
-	const companion = new Map<number, LogEvent>();
-	for (const e of events)
-		if (e.ev === "signal") companion.set(Number(e.sig), e);
-	const roundTrip: number[] = [];
-	const handling: number[] = [];
-	const ring: number[] = [];
-	const pollCost: number[] = [];
-	let missed = 0;
-	const records = rows(text(bench.signals)).filter((row) => row !== "-");
-	for (const row of records) {
-		const [sig, requested, seen, , worst] = row.split(",");
-		const seenAt = numOrUndefined(seen);
-		pollCost.push(Number(worst));
-		if (seenAt === undefined) {
-			missed++;
+): { section: Section; ok: boolean | undefined; text: string } {
+	const d = table(bench.laneD);
+	if (!d)
+		return {
+			ok: undefined,
+			text: "not measured",
+			section: { title: "Downlink: AddOns.txt lane D", body: "Not measured." },
+		};
+	const started = num(d.started) ?? 0;
+	const finished = num(d.finished) ?? started;
+	const frames = rows(text(d.frames)).map((row) => row.split(",").map(Number));
+	const writes = session.events.filter(
+		(e) => e.ev === "lane-d" && e.t >= started && e.t <= finished - 500,
+	);
+	const written = writes.filter((e) => Number(e.written) > 0);
+	const busy = writes.length - written.length;
+	const seenCounters = new Set(frames.map(([counter]) => counter));
+	const missed = written.filter((e) => !seenCounters.has(Number(e.counter)));
+	const latency = frames
+		.filter(([, at = 0]) => at >= started)
+		.map(([, at = 0, seen = 0]) => seen - at);
+	const lat = stats(latency);
+	const reset = summary(text(d.reset));
+	const read = summary(text(d.read));
+	let ok: boolean | undefined;
+	let verdict: string;
+	if (!session.companion) verdict = "companion was not running";
+	else if (written.length === 0)
+		verdict = `the companion could not write lane D (${busy}× the client had just written AddOns.txt)`;
+	else if (frames.length === 0) {
+		ok = false;
+		verdict = `ResetAddOns does not pick up the file: 0 of ${written.length} companion frames seen`;
+	} else {
+		ok = missed.length === 0 && (lat?.p95 ?? 0) < 1000 && (reset?.p95 ?? 0) < 2;
+		verdict = `${written.length - missed.length}/${written.length} frames seen, latency p95 ${ms(lat?.p95)}, ResetAddOns cost p95 ${ms(reset?.p95, 2)}`;
+	}
+	return {
+		ok,
+		text: verdict,
+		section: {
+			title: "Downlink: AddOns.txt lane D",
+			body: [
+				"The companion rewrites lane D every 2 seconds with a counter and its clock, unless the client wrote the file within the last 3 seconds. The addon calls `C_AddOns.ResetAddOns()` every 0.1 s and reads the lane back. This only works if that call re-reads the file. Payload: 20 bytes per frame.",
+				"",
+				tableMd(
+					[
+						"Companion writes",
+						"Skipped (client busy)",
+						"Seen",
+						"Latency p50/p95/max",
+						"ResetAddOns cost p50/p95/max",
+						"Read cost p50/p95/max",
+					],
+					[
+						[
+							written.length,
+							busy,
+							`${written.length - missed.length}/${written.length}`,
+							trio(lat),
+							trio(reset, 3),
+							trio(read, 3),
+						],
+					],
+				),
+			].join("\n"),
+		},
+	};
+}
+
+// Slots -------------------------------------------------------------------------
+
+interface SlotLoad {
+	slot: number;
+	size: number;
+	cost: number;
+	age: number | undefined;
+	result: string;
+}
+
+function slotLoad(record: string): SlotLoad {
+	const [slot, size, cost, age, result = "?"] = record.split(",");
+	return {
+		slot: Number(slot),
+		size: Number(size),
+		cost: Number(cost),
+		age: numOrUndefined(age),
+		result,
+	};
+}
+
+function slotBench(
+	session: Session,
+	bench: LuaTable,
+): { section: Section; ok: boolean | undefined; text: string } {
+	const loads = rows(text(bench.slots)).map(slotLoad);
+	const until = num(bench.finished) ?? session.to;
+	const companionWrote = session.events.some(
+		(e) => e.ev === "slots" && Number(e.written) > 0 && e.t < until,
+	);
+	const fresh = loads.filter((l) => l.result === "fresh").length;
+	const small = stats(
+		loads
+			.filter((l) => l.size <= 2048 && l.result !== "used")
+			.map((l) => l.cost),
+	);
+	const big = loads.find((l) => l.size >= 1048576);
+	const age = stats(loads.flatMap((l) => (l.age === undefined ? [] : [l.age])));
+	let ok: boolean | undefined;
+	let verdict: string;
+	if (loads.length === 0) verdict = "not measured";
+	else if (!companionWrote && fresh === 0)
+		verdict = "companion did not write the slots";
+	else {
+		ok = fresh === loads.length;
+		const placeholders = loads.filter((l) => l.result === "placeholder").length;
+		verdict =
+			placeholders > 0 && companionWrote
+				? `${fresh}/${loads.length} fresh; ${placeholders}× the client loaded the install-time file although the companion had rewritten it`
+				: `${fresh}/${loads.length} fresh, data age p95 ${ms(age?.p95)}, LoadAddOn 2 KB p95 ${ms(small?.p95, 2)}${big ? `, 1 MB ${ms(big.cost, 1)}` : ""}`;
+	}
+	return {
+		ok,
+		text: verdict,
+		section: {
+			title: "Downlink: load-on-demand slots",
+			body: [
+				"The companion rewrites every slot's `data.lua` every 5 seconds (the 128 KB and 1 MB slots every 30 seconds); the addon loads one with `C_AddOns.LoadAddOn`. *fresh*: the data was written after the game started and is current; *placeholder*: the client loaded the file as installed. *Data age* is how old the data was when it was loaded. *Load cost* is paid inside one frame. A slot loads once per UI session; `/reload` frees them.",
+				"",
+				tableMd(
+					["Slot", "Size", "Result", "Data age", "Load cost"],
+					loads.map((l) => [
+						l.slot,
+						bytes(l.size),
+						l.result,
+						l.age === undefined ? "–" : ms(l.age),
+						ms(l.cost, 2),
+					]),
+				),
+			].join("\n"),
+		},
+	};
+}
+
+// Doorbells -----------------------------------------------------------------------
+
+/** How the addon tells a raised doorbell from a silent one, as Probe.lua names it. */
+const METHODS: Record<string, string> = {
+	return: "PlaySoundFile result",
+	duration: "sound length",
+};
+
+interface Bells {
+	heard: number;
+	missed: number;
+	early: number;
+	latency: number[];
+	contexts: Map<string, number>;
+}
+
+/** Matches the doorbells the addon heard with the ones the companion raised. */
+function bellsOf(session: Session, all: LogEvent[]): Bells {
+	const raises = all.filter((e) => e.ev === "bell");
+	const result: Bells = {
+		heard: 0,
+		missed: 0,
+		early: 0,
+		latency: [],
+		contexts: new Map(),
+	};
+	for (const entry of list(session.data.bells).map(String)) {
+		const [n = 0, seen = 0] = entry.split(",").map(Number);
+		const context = entry.split(",")[2] ?? "-";
+		const before = raises.filter(
+			(e) => Number(e.n) === n && Number(e.raised) <= seen + 1000,
+		);
+		const raised = before.at(-1);
+		if (!raised) {
+			result.early++;
 			continue;
 		}
-		roundTrip.push(seenAt - Number(requested));
-		const e = companion.get(Number(sig));
-		if (e) {
-			handling.push(Number(e.raised) - Number(e.read));
-			ring.push(seenAt - Number(e.raised));
+		result.heard++;
+		count(result.contexts, context);
+		// A doorbell raised before the session cannot be heard before it.
+		if (Number(raised.raised) >= session.from)
+			result.latency.push(seen - Number(raised.raised));
+	}
+	const next = num(session.data.nextSignal);
+	if (next !== undefined)
+		result.missed = raises.filter(
+			(e) =>
+				Number(e.n) >= next &&
+				Number(e.raised) >= session.from &&
+				Number(e.raised) <= session.to - 7000,
+		).length;
+	return result;
+}
+
+// Soak ----------------------------------------------------------------------------
+
+interface ContextRow {
+	up: Tally;
+	laneD: Tally;
+	slots: Tally;
+	bells: number;
+	skipped: number;
+}
+
+interface Soak {
+	minutes: number;
+	sessions: number;
+	up: Tally;
+	laneD: Tally;
+	slots: Tally;
+	bells: Tally;
+	contexts: Map<string, ContextRow>;
+	reasons: Map<string, number>;
+	upDetect: number[];
+	bellLatency: number[];
+}
+
+function soakOf(sessions: Session[], all: LogEvent[]): Soak {
+	const soak: Soak = {
+		minutes: 0,
+		sessions: 0,
+		up: tally(),
+		laneD: tally(),
+		slots: tally(),
+		bells: tally(),
+		contexts: new Map(),
+		reasons: new Map(),
+		upDetect: [],
+		bellLatency: [],
+	};
+	const row = (context: string) => {
+		let found = soak.contexts.get(context);
+		if (!found) {
+			found = {
+				up: tally(),
+				laneD: tally(),
+				slots: tally(),
+				bells: 0,
+				skipped: 0,
+			};
+			soak.contexts.set(context, found);
 		}
+		return found;
+	};
+	for (const session of sessions) {
+		if (!session.companion) continue;
+		const records = list(session.data.soak).map(String);
+		const bells = bellsOf(session, all);
+		if (records.length === 0 && bells.heard === 0) continue;
+		soak.sessions++;
+		const times = records
+			.map((r) => Number(r.split("|")[2]))
+			.filter(Number.isFinite);
+		if (times.length > 1)
+			soak.minutes += (Math.max(...times) - Math.min(...times)) / 60_000;
+		const seen = framesSeen(session, SOAK_STREAM);
+		const laneDWrites = session.events
+			.filter((e) => e.ev === "lane-d" && Number(e.written) > 0)
+			.map((e) => e.t);
+		const clientWrites = session.events
+			.filter((e) => e.ev === "addons")
+			.map((e) => Number(e.mtime));
+		let previousD = session.from;
+		for (const record of records) {
+			const [kind = "", context = "-", atText = "0", detail = ""] =
+				record.split("|");
+			const at = Number(atText);
+			const r = row(context);
+			const fail = (t: Tally, rt: Tally, reason: string) => {
+				t.failed++;
+				rt.failed++;
+				count(soak.reasons, reason);
+			};
+			if (kind === "U") {
+				// A frame sent right before logout may not have been read yet.
+				if (at > session.to - 4000) continue;
+				const e = seen.get(Number(detail));
+				if (e) {
+					soak.up.ok++;
+					r.up.ok++;
+					soak.upDetect.push(Number(e.read) - at);
+				} else fail(soak.up, r.up, "uplink frame lost");
+			} else if (kind === "D") {
+				// Every client save writes the client's own copy of lane D back. Nothing new to
+				// see is a failure only if the companion wrote a frame after the last client
+				// save and after the previous read.
+				const lastSave = Math.max(
+					previousD,
+					...clientWrites.filter((mtime) => mtime < at),
+				);
+				previousD = at;
+				if (detail !== "-") {
+					soak.laneD.ok++;
+					r.laneD.ok++;
+				} else if (laneDWrites.some((t) => t > lastSave && t < at - 300))
+					fail(soak.laneD, r.laneD, "lane D frame not seen");
+				else r.skipped++;
+			} else if (kind === "L") {
+				const load = slotLoad(detail);
+				if (load.result === "fresh") {
+					soak.slots.ok++;
+					r.slots.ok++;
+				} else fail(soak.slots, r.slots, `slot ${load.result}`);
+			} else if (kind === "X") r.skipped++;
+		}
+		soak.bells.ok += bells.heard;
+		soak.bells.failed += bells.missed + bells.early;
+		soak.bellLatency.push(...bells.latency);
+		if (bells.missed) count(soak.reasons, "doorbell not heard", bells.missed);
+		if (bells.early)
+			count(soak.reasons, "doorbell heard before it was raised", bells.early);
+		for (const [context, n] of bells.contexts) row(context).bells += n;
 	}
-	const rt = stats(roundTrip);
-	verdicts.push({
-		channel: "Doorbell: .wav made playable (PlaySoundFile)",
-		ok: records.length === 0 ? undefined : missed === 0 && (rt?.p95 ?? 0) < 500,
-		summary:
-			records.length === 0
-				? "not measured"
-				: `${records.length - missed}/${records.length} seen, round trip p95 ${ms(rt?.p95)}`,
-	});
+	return soak;
+}
+
+function soakSection(soak: Soak): Section {
+	const cell = (t: Tally) =>
+		t.ok + t.failed ? `${t.ok}/${t.ok + t.failed}` : "–";
 	return {
-		title: "Doorbells",
+		title: `Soak: ${soak.minutes.toFixed(0)} min in ${soak.sessions} session(s)`,
 		body: [
-			"The addon requests a doorbell over the uplink and polls `PlaySoundFile` every frame until the file plays. *Round trip* is measured on the addon clock alone.",
+			"While you play, the addon sends an uplink frame and reads lane D every 30 seconds, loads a slot every 3 minutes and listens for the doorbell the companion raises every 30 seconds. Cells show successful/attempted per context (combat, instance type, addon list open).",
 			"",
-			tableMd(
-				[
-					"Rounds",
-					"Missed",
-					"Round trip p50/p95/max",
-					"Companion handling",
-					"Raise → heard",
-					"Poll cost p50/p95/max",
-				],
-				[
-					[
-						records.length,
-						missed,
-						trio(rt),
-						trio(stats(handling), 1),
-						trio(stats(ring)),
-						trio(stats(pollCost), 3),
-					],
-				],
-			),
+			soak.contexts.size
+				? tableMd(
+						[
+							"Context",
+							"Uplink",
+							"Lane D",
+							"Slots",
+							"Doorbells heard",
+							"Skipped",
+						],
+						[...soak.contexts.entries()].map(([context, r]) => [
+							context,
+							cell(r.up),
+							cell(r.laneD),
+							cell(r.slots),
+							r.bells,
+							r.skipped,
+						]),
+					)
+				: "No soak rounds yet.",
+			"",
+			soak.reasons.size
+				? `Failures: ${listing(soak.reasons)}.`
+				: "No failures.",
 		].join("\n"),
 	};
 }
 
-function slotSection(
-	bench: LuaTable,
-	events: LogEvent[],
-	verdicts: Verdict[],
-): Section {
-	const companion = new Map<string, LogEvent>();
-	for (const e of events)
-		if (e.ev === "slot") companion.set(`${e.slot}:${e.sig}`, e);
-	const body: (string | number)[][] = [];
-	let fresh = 0;
-	let total = 0;
-	let worstSmall = 0;
-	const answer2k: number[] = [];
-	for (const row of rows(text(bench.slots)).filter((r) => r !== "-")) {
-		const [slot, size, sig, requested, signaled, loaded, loadMs, , result] =
-			row.split(",");
-		total++;
-		if (result === "fresh") fresh++;
-		const e = companion.get(`${slot}:${sig}`);
-		const loadedAt = numOrUndefined(loaded);
-		const sizeBytes = Number(size);
-		if (sizeBytes <= 16384) worstSmall = Math.max(worstSmall, Number(loadMs));
-		if (sizeBytes === 2048 && loadedAt !== undefined)
-			answer2k.push(loadedAt - Number(requested));
-		body.push([
-			sizeBytes >= 1024
-				? `${Math.round(sizeBytes / 1024)} KB`
-				: `${sizeBytes} B`,
-			result ?? "?",
-			loadedAt === undefined ? "–" : ms(loadedAt - Number(requested)),
-			numOrUndefined(signaled) === undefined
-				? "–"
-				: ms(Number(signaled) - Number(requested)),
-			ms(Number(loadMs), 2),
-			e ? ms(Number(e.writeMs), 1) : "–",
-		]);
-	}
-	const placeholder = text(bench.placeholder)?.split(",");
-	const worst2k = Math.max(0, ...answer2k);
-	verdicts.push({
-		channel: "Downlink: load-on-demand slot (LoadAddOn)",
-		ok:
-			total === 0
-				? undefined
-				: fresh === total &&
-					placeholder?.[2] === "placeholder" &&
-					answer2k.length > 0 &&
-					worst2k < 5000,
-		summary:
-			total === 0
-				? "not measured"
-				: `${fresh}/${total} fresh, 2 KB answer in up to ${ms(worst2k)}, LoadAddOn ≤16 KB costs up to ${ms(worstSmall, 1)}`,
-	});
-	return {
-		title: "Slots",
-		body: [
-			"The companion writes `data.lua` into an unused load-on-demand addon and rings a doorbell; the addon loads it. *Load cost* is the `LoadAddOn` call, paid inside one frame.",
-			"",
-			tableMd(
-				[
-					"Size",
-					"Result",
-					"Request → loaded",
-					"Request → doorbell",
-					"Load cost",
-					"Companion write",
-				],
-				body,
-			),
-			"",
-			placeholder
-				? `Untouched slot ${placeholder[0]}: \`${placeholder[2]}\` (load cost ${ms(Number(placeholder[1]), 2)}). Expected: \`placeholder\`.`
-				: "Untouched slot: not measured.",
-		].join("\n"),
-	};
-}
+// Frame times ---------------------------------------------------------------------
 
-function downlinkSection(
-	bench: LuaTable,
-	events: LogEvent[],
-	verdicts: Verdict[],
-): Section {
-	const dl = table(bench.dl);
-	if (!dl) {
-		verdicts.push({
-			channel: "Downlink: AddOns.txt lane (ResetAddOns)",
-			ok: undefined,
-			summary: "not measured",
-		});
-		return { title: "Downlink: AddOns.txt lane", body: "Not measured." };
-	}
-	const result = text(dl.result) ?? "?";
-	const bytes = num(dl.bytes) ?? 0;
-	const frames = num(dl.frames) ?? 0;
-	const seconds = ((num(dl.finished) ?? 0) - (num(dl.started) ?? 0)) / 1000;
-	const done = events.find((e) => e.ev === "dl-done");
-	const writes = events.filter((e) => e.ev === "dl-write").length;
-	const parse = (value: string | undefined) => {
-		const [n, rest] = (value ?? "0").split(":");
-		const [p50, p95, max] = (rest ?? "").split("/");
-		return n === "0" ? "–" : `${p50} / ${p95} / ${max} ms (${n} calls)`;
-	};
-	verdicts.push({
-		channel: "Downlink: AddOns.txt lane (ResetAddOns)",
-		ok: result === "ok" && seconds < 5,
-		summary:
-			result === "ok"
-				? `${bytes} B in ${seconds.toFixed(1)} s (${(bytes / Math.max(seconds, 0.001)).toFixed(0)} B/s)`
-				: `${result} after ${frames} frames`,
-	});
-	return {
-		title: "Downlink: AddOns.txt lane",
-		body: [
-			"The companion rewrites lane D in `AddOns.txt`; the addon calls `C_AddOns.ResetAddOns()` every frame and acks each frame over the uplink. This only works if `ResetAddOns` re-reads the file.",
-			"",
-			tableMd(
-				[
-					"Result",
-					"Frames",
-					"Bytes",
-					"Duration",
-					"Re-acks",
-					"Lane writes",
-					"ResetAddOns cost p50/p95/max",
-					"Read cost p50/p95/max",
-				],
-				[
-					[
-						result,
-						`${frames}${done ? `/${done.frames}` : ""}`,
-						bytes,
-						`${seconds.toFixed(1)} s`,
-						num(dl.reacks) ?? 0,
-						writes,
-						parse(text(dl.reset)),
-						parse(text(dl.read)),
-					],
-				],
-			),
-		].join("\n"),
-	};
-}
+const FRAME_BINS = ["<8", "<12", "<17", "<25", "<34", "<50", "<100", "≥100"];
+const PHASES = [
+	"baseline",
+	"idle",
+	"up1",
+	"up2",
+	"up3",
+	"up4",
+	"up5",
+	"laneD",
+	"slots",
+	"soak",
+];
 
 function frameSection(session: LuaTable): Section {
 	const frames = table(session.frames);
-	const order = [
-		"baseline",
-		"idle",
-		"up1",
-		"up2",
-		"up3",
-		"up4",
-		"signals",
-		"slots",
-		"dl",
-		"soak",
-	];
 	const phases = Object.keys(frames ?? {}).sort((a, b) => {
-		const ia = order.indexOf(a);
-		const ib = order.indexOf(b);
+		const ia = PHASES.indexOf(a);
+		const ib = PHASES.indexOf(b);
 		return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
 	});
 	const parsed = phases.map((phase) => {
@@ -432,37 +700,31 @@ function frameSection(session: LuaTable): Section {
 		return { phase, n, mean: n ? sum / n : 0, max, counts };
 	});
 	const baseline = parsed.find((p) => p.phase === "baseline")?.mean;
-	const body = parsed.map((p) => {
-		const slow = (p.counts[5] ?? 0) + (p.counts[6] ?? 0) + (p.counts[7] ?? 0);
-		return [
-			p.phase,
-			p.n,
-			ms(p.mean, 1),
-			baseline === undefined || p.phase === "baseline"
-				? ""
-				: `${p.mean - baseline >= 0 ? "+" : ""}${(p.mean - baseline).toFixed(1)}`,
-			ms(p.max, 0),
-			pct(slow, p.n),
-			pct((p.counts[6] ?? 0) + (p.counts[7] ?? 0), p.n),
-		];
-	});
+	const body = parsed.map((p) => [
+		p.phase,
+		p.n,
+		ms(p.mean, 1),
+		baseline === undefined || p.phase === "baseline"
+			? ""
+			: `${p.mean - baseline >= 0 ? "+" : ""}${(p.mean - baseline).toFixed(1)}`,
+		ms(p.max, 0),
+		pct((p.counts[5] ?? 0) + (p.counts[6] ?? 0) + (p.counts[7] ?? 0), p.n),
+		pct((p.counts[6] ?? 0) + (p.counts[7] ?? 0), p.n),
+	]);
 	const hitches = rows(text(session.hitches))
 		.map((row) => row.split(","))
-		.map(([at, frame, phase, ours, context]) => ({
-			at: Number(at),
+		.map(([, frame, phase, ours, context]) => ({
 			frame: Number(frame),
-			phase,
+			phase: phase ?? "",
 			ours: Number(ours),
-			context,
+			context: context ?? "",
 		}))
 		.sort((a, b) => b.ours - a.ours)
 		.slice(0, 8);
 	return {
 		title: "Frame times",
 		body: [
-			"Frame time per phase. *vs. baseline* compares the mean with ten idle seconds before the benchmark. Bins in ms: " +
-				FRAME_BINS.join(", ") +
-				".",
+			`Frame time per phase. *vs. baseline* compares the mean with ten idle seconds before the benchmark. Bins in ms: ${FRAME_BINS.join(", ")}.`,
 			"",
 			tableMd(
 				["Phase", "Frames", "Mean", "vs. baseline", "Max", "≥34 ms", "≥50 ms"],
@@ -474,9 +736,9 @@ function frameSection(session: LuaTable): Section {
 						["Hitch", "Phase", "Our share in previous frame", "Context"],
 						hitches.map((h) => [
 							ms(h.frame, 0),
-							h.phase ?? "",
+							h.phase,
 							ms(h.ours, 2),
-							h.context ?? "",
+							h.context,
 						]),
 					)
 				: "No hitches of 50 ms or more.",
@@ -484,112 +746,80 @@ function frameSection(session: LuaTable): Section {
 	};
 }
 
-interface Soak {
-	section: Section;
-	ok: number;
-	failed: number;
-	minutes: number;
-	contexts: string[];
-}
+// What the client wrote -------------------------------------------------------------
 
-function soakSection(session: LuaTable, events: LogEvent[]): Soak | undefined {
-	const entries = list(session.soak).map((value) => String(value));
-	if (entries.length === 0) return undefined;
-	let first = Number.POSITIVE_INFINITY;
-	let last = 0;
-	const companionSignals = new Set(
-		events.filter((e) => e.ev === "signal").map((e) => Number(e.sig)),
-	);
-	const groups = new Map<
-		string,
-		{
-			ok: number;
-			failed: number;
-			skipped: number;
-			rtt: number[];
-			reasons: Map<string, number>;
+function clientSection(events: LogEvent[]): Section {
+	const byFile = new Map<string, LogEvent[]>();
+	for (const e of events)
+		if (e.ev === "addons") {
+			const file = String(e.file);
+			byFile.set(file, [...(byFile.get(file) ?? []), e]);
 		}
-	>();
-	for (const entry of entries) {
-		const [kind, context = "-", record = ""] = entry.split("|");
-		let group = groups.get(context);
-		if (!group) {
-			group = { ok: 0, failed: 0, skipped: 0, rtt: [], reasons: new Map() };
-			groups.set(context, group);
-		}
-		const fail = (reason: string) => {
-			group.failed++;
-			group.reasons.set(reason, (group.reasons.get(reason) ?? 0) + 1);
-		};
-		const fields = record.split(",");
-		const requested = Number(kind === "A" ? fields[3] : fields[1]);
-		if (kind !== "X" && requested > 0) {
-			first = Math.min(first, requested);
-			last = Math.max(last, requested);
-		}
-		if (kind === "X") {
-			group.skipped++;
-		} else if (kind === "S") {
-			const seen = numOrUndefined(fields[2]);
-			if (seen === undefined)
-				fail(
-					companionSignals.has(Number(fields[0]))
-						? "doorbell not heard"
-						: "request not seen",
-				);
-			else {
-				group.ok++;
-				group.rtt.push(seen - Number(fields[1]));
-			}
-		} else if (kind === "A") {
-			const result = fields[8] ?? "?";
-			if (result === "fresh") {
-				group.ok++;
-				const loaded = numOrUndefined(fields[5]);
-				if (loaded !== undefined) group.rtt.push(loaded - Number(fields[3]));
-			} else fail(`answer ${result}`);
-		}
-	}
-	let ok = 0;
-	let failed = 0;
-	const body = [...groups.entries()].map(([context, g]) => {
-		ok += g.ok;
-		failed += g.failed;
+	const addons = [...byFile.entries()].map(([file, writes]) => {
+		const lane = writes.map((e) => Number(e.rows ?? 0));
+		const d = writes.map((e) => Number(e.dRows ?? 0));
 		return [
-			context,
-			g.ok,
-			g.failed,
-			g.skipped,
-			trio(stats(g.rtt)),
-			[...g.reasons.entries()]
-				.map(([reason, count]) => `${reason} ×${count}`)
-				.join(", ") || "",
+			file,
+			writes.length,
+			writes.filter((e) => e.frame).length,
+			`${Math.min(...lane)}–${Math.max(...lane)}`,
+			Math.max(...writes.map((e) => Number(e.on ?? 0))),
+			`${Math.min(...d)}–${Math.max(...d)}`,
 		];
 	});
-	const minutes = last > first ? (last - first) / 60000 : 0;
+	const wtf = new Map<
+		string,
+		{ n: number; last: number; changes: Set<string> }
+	>();
+	for (const e of events)
+		if (e.ev === "wtf") {
+			const path = String(e.path);
+			const entry = wtf.get(path) ?? { n: 0, last: 0, changes: new Set() };
+			entry.n++;
+			entry.last = e.t;
+			entry.changes.add(String(e.change));
+			wtf.set(path, entry);
+		}
+	const files = [...wtf.entries()].sort((a, b) => b[1].n - a[1].n);
+	const laneD = events.filter((e) => e.ev === "lane-d");
+	const readErrors = new Map<string, number>();
+	for (const e of events)
+		if (e.ev === "read-error") count(readErrors, String(e.code));
 	return {
-		ok,
-		failed,
-		minutes,
-		contexts: [...groups.keys()],
-		section: {
-			title: `Soak: session ${num(session.epoch)} (${new Date((num(session.started) ?? 0) * 1000).toLocaleString()}, ${minutes.toFixed(0)} min)`,
-			body: [
-				"Every 30 s a doorbell round, every 3 min a 2 KB answer through a slot, while you play. Context is taken when the round ends.",
-				"",
-				tableMd(
-					[
-						"Context",
-						"OK",
-						"Failed",
-						"Skipped",
-						"Round trip p50/p95/max",
-						"Failures",
-					],
-					body,
-				),
-			].join("\n"),
-		},
+		title: "What the client wrote",
+		body: [
+			"Every write of `AddOns.txt` the companion saw, per character, and every other file the client changed under `WTF`. This explains a channel that stays silent.",
+			"",
+			addons.length
+				? tableMd(
+						[
+							"AddOns.txt",
+							"Client writes",
+							"With a valid frame",
+							"Lane U rows",
+							"Enabled up to",
+							"Lane D rows",
+						],
+						addons,
+					)
+				: "The client never wrote `AddOns.txt` while the companion ran.",
+			"",
+			files.length
+				? tableMd(
+						["Other file under WTF", "Changes", "Kind", "Last"],
+						files
+							.slice(0, 15)
+							.map(([path, f]) => [
+								`\`${path}\``,
+								f.n,
+								[...f.changes].join(", "),
+								time(f.last),
+							]),
+					)
+				: "No other file under `WTF` changed.",
+			"",
+			`Lane D: the companion wrote ${laneD.filter((e) => Number(e.written) > 0).length}×, skipped ${laneD.filter((e) => Number(e.written) === 0).length}× because the client had just written the file.${readErrors.size ? ` Read errors: ${listing(readErrors)}.` : ""}`,
+		].join("\n"),
 	};
 }
 
@@ -597,7 +827,7 @@ function companionSection(events: LogEvent[]): Section {
 	const polls = events.filter((e) => e.ev === "poll");
 	const p95 = stats(polls.map((e) => Number(e.p95)));
 	const worst = Math.max(0, ...polls.map((e) => Number(e.max)));
-	const errors = events.filter((e) => e.ev === "error" || e.ev === "bad-frame");
+	const errors = events.filter((e) => e.ev === "error");
 	const games = events.filter((e) => e.ev === "game").length;
 	return {
 		title: "Companion",
@@ -606,13 +836,13 @@ function companionSection(events: LogEvent[]): Section {
 			"",
 			errors.length
 				? tableMd(
-						["Time", "Event", "Detail"],
+						["Time", "Where", "Detail"],
 						errors
 							.slice(0, 20)
 							.map((e) => [
 								new Date(e.t).toLocaleString(),
-								e.ev,
-								String(e.message ?? e.file ?? ""),
+								String(e.where ?? ""),
+								String(e.message ?? ""),
 							]),
 					)
 				: "No companion errors.",
@@ -620,70 +850,124 @@ function companionSection(events: LogEvent[]): Section {
 	};
 }
 
+// Report ----------------------------------------------------------------------------
+
+function overall(v: Verdict, minutes: number): boolean | undefined {
+	if (v.bench === false || v.soak.failed > 0) return false;
+	if (v.bench === true && minutes >= 60 && v.soak.ok > 0) return true;
+	return undefined;
+}
+
+const soakText = (t: Tally, unit: string) =>
+	t.ok + t.failed === 0 ? "–" : `${t.ok}/${t.ok + t.failed} ${unit}`;
+
 export function buildReport(dataDir: string, now = new Date()): string {
 	const events = readLogs(dataDir);
 	const saved = loadSaved(dataDir);
-	const out: string[] = ["# Transport spike report (FAM-15)", ""];
-	const sessions = saved.flatMap(({ account, db }) =>
-		list(db.sessions).map((s) => ({ account, session: table(s) ?? {} })),
-	);
+	const sessions = sessionsOf(saved, events);
 	const runs = events.filter((e) => e.ev === "companion");
 	const platforms = [...new Set(runs.map((e) => String(e.platform)))].join(
 		", ",
 	);
-	out.push(
-		`Generated ${now.toLocaleString()}. ${sessions.length} addon sessions in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
+	const out: string[] = [
+		"# Transport spike report (FAM-15)",
 		"",
-	);
+		`Generated ${now.toLocaleString()}. ${sessions.length} addon session(s) in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
+		"",
+	];
 	if (sessions.length === 0) {
 		out.push(
 			"No saved addon results yet. Type `/reload` in game (or log out) so the client writes them.",
+			"",
+			clientSection(events).body,
 		);
 		return `${out.join("\n")}\n`;
 	}
-	const benched = sessions.filter(({ session }) => table(session.bench));
-	const latest = benched.at(-1);
-	const verdicts: Verdict[] = [];
+
+	const latest = sessions.at(-1);
+	const benched = sessions.filter((s) => table(s.data.bench)).at(-1);
+	const bench = table(benched?.data.bench);
 	const sections: Section[] = [];
-	if (latest) {
-		const bench = table(latest.session.bench) ?? {};
-		const own = eventsOf(events, latest.session);
-		sections.push(
-			{
-				title: "Benchmark",
-				body: `Session ${num(latest.session.epoch)} on build ${text(latest.session.build)} (${latest.account}). Self-test: ${text(bench.selftest) ?? "–"}.`,
-			},
-			uplinkSection(bench, own, verdicts),
-			signalSection(bench, own, verdicts),
-			slotSection(bench, own, verdicts),
-			downlinkSection(bench, own, verdicts),
-			frameSection(latest.session),
-		);
-	} else {
-		sections.push({
-			title: "Benchmark",
-			body: "No benchmark yet. Type `/fspike bench` in game.",
-		});
-	}
-	const soak = { ok: 0, failed: 0, minutes: 0, contexts: new Set<string>() };
-	for (const { session } of sessions) {
-		const result = soakSection(session, eventsOf(events, session));
-		if (!result) continue;
-		sections.push(result.section);
-		soak.ok += result.ok;
-		soak.failed += result.failed;
-		soak.minutes += result.minutes;
-		for (const context of result.contexts) soak.contexts.add(context);
-	}
-	verdicts.push({
-		channel: "Soak while playing (goal: 60 min)",
-		ok: soak.failed > 0 ? false : soak.minutes >= 60 ? true : undefined,
-		summary: `${soak.ok} ok, ${soak.failed} failed over ${soak.minutes.toFixed(0)} min; contexts: ${[...soak.contexts].join(", ") || "–"}`,
+	const doorbell =
+		text(bench?.doorbell) ?? text(latest?.data.doorbell) ?? "not tested";
+	const method = METHODS[doorbell];
+	const sound = text(bench?.sound) ?? text(latest?.data.sound) ?? "–";
+	sections.push({
+		title: "Setup",
+		body: [
+			`Build ${text(latest?.data.build) ?? "?"}. Self-test: ${text(bench?.selftest) ?? text(latest?.data.selftest) ?? "–"}.`,
+			"",
+			`Sound probe (\`PlaySoundFile\` result / \`C_Sound.IsPlaying\` a quarter second later; - means no handle): \`${sound}\`. *empty* is a 0-byte file, *valid* 10 ms and *long* 1.5 s of silence, *missing* does not exist. *secure* is 1 while \`PlaySoundFile\` is Blizzard's own function, otherwise the addon that replaced it.`,
+			"",
+			`Doorbell method: ${method ?? doorbell}. *PlaySoundFile result*: an empty file fails to play, a raised one plays. *Sound length*: both play, but only a raised one is still playing a quarter second later.`,
+		].join("\n"),
 	});
-	sections.push(companionSection(events));
-	const errors = sessions.flatMap(({ session }) =>
-		list(session.errors).map(String),
-	);
+
+	const soak = soakOf(sessions, events);
+	const verdicts: Verdict[] = [];
+	if (benched && bench) {
+		const up = uplinkBench(benched, bench);
+		const laneD = laneDBench(benched, bench);
+		const slots = slotBench(benched, bench);
+		verdicts.push(
+			{
+				channel: "Uplink: AddOns.txt lane U (SaveAddOns)",
+				bench: up.ok,
+				benchText: up.text,
+				soak: soak.up,
+				soakText: soakText(soak.up, "frames"),
+			},
+			{
+				channel: "Downlink: AddOns.txt lane D (ResetAddOns)",
+				bench: laneD.ok,
+				benchText: laneD.text,
+				soak: soak.laneD,
+				soakText: soakText(soak.laneD, "reads"),
+			},
+			{
+				channel: "Downlink: load-on-demand slot (LoadAddOn)",
+				bench: slots.ok,
+				benchText: slots.text,
+				soak: soak.slots,
+				soakText: soakText(soak.slots, "fresh"),
+			},
+		);
+		sections.push(up.section, laneD.section, slots.section);
+	} else {
+		for (const [channel, tallied, unit] of [
+			["Uplink: AddOns.txt lane U (SaveAddOns)", soak.up, "frames"],
+			["Downlink: AddOns.txt lane D (ResetAddOns)", soak.laneD, "reads"],
+			["Downlink: load-on-demand slot (LoadAddOn)", soak.slots, "fresh"],
+		] as const)
+			verdicts.push({
+				channel,
+				bench: undefined,
+				benchText: "no benchmark yet: type `/fspike bench`",
+				soak: tallied,
+				soakText: soakText(tallied, unit),
+			});
+	}
+	const bellLatency = stats(soak.bellLatency);
+	verdicts.push({
+		channel: "Doorbell: .wav made playable (PlaySoundFile)",
+		bench: method
+			? soak.bells.ok + soak.bells.failed === 0
+				? undefined
+				: (bellLatency?.p95 ?? 0) < 1000
+			: doorbell.includes("game sound off") || doorbell === "not tested"
+				? undefined
+				: false,
+		benchText: method
+			? `${method}; raise → heard p95 ${ms(bellLatency?.p95)}`
+			: doorbell,
+		soak: soak.bells,
+		soakText: soakText(soak.bells, "heard"),
+	});
+
+	sections.push(soakSection(soak));
+	if (benched) sections.push(frameSection(benched.data));
+	sections.push(clientSection(events), companionSection(events));
+	const errors = sessions.flatMap((s) => list(s.data.errors).map(String));
 	if (errors.length)
 		sections.push({
 			title: "Addon errors",
@@ -694,11 +978,16 @@ export function buildReport(dataDir: string, now = new Date()): string {
 		"## Verdict",
 		"",
 		tableMd(
-			["", "Channel", "Measured"],
-			verdicts.map((v) => [mark(v.ok), v.channel, v.summary]),
+			["", "Channel", "Benchmark", "Soak"],
+			verdicts.map((v) => [
+				mark(overall(v, soak.minutes)),
+				v.channel,
+				v.benchText,
+				v.soakText,
+			]),
 		),
 		"",
-		"Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; doorbell round trip p95 < 500 ms; downlinks deliver 2 KB in under 5 s, every slot fresh; soak without failures for at least 60 minutes (FAM-15 decision rule). `?` means not enough data yet.",
+		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; doorbell raise → heard p95 < 1 s; no failures in a soak of at least 60 minutes. \`?\` means not enough data yet.`,
 		"",
 	);
 	for (const section of sections)

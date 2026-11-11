@@ -9,7 +9,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { Companion } from "./companion.ts";
+import { Companion, FAST_TIMING } from "./companion.ts";
 import { install, isInstalled, uninstall } from "./install.ts";
 import { EventLog } from "./log.ts";
 import { buildReport } from "./report.ts";
@@ -157,6 +157,8 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 	const companion = new Companion({
 		paths,
 		log,
+		// Set only by the simulator.
+		timing: process.env.FAMILIAR_SPIKE_FAST ? FAST_TIMING : undefined,
 		onSaved: () => {
 			collectSaved(paths, dataDir);
 			writeReport(dataDir);
@@ -167,10 +169,10 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 		[
 			"",
 			"In game:",
-			'  1. Log in. The addon reports "Companion connected" in chat.',
+			"  1. Log in. Chat shows the self-test and whether doorbells work on this client.",
 			"  2. Stand somewhere quiet, out of combat, and type /fspike bench (about two minutes).",
 			"  3. Type /reload once when it is done, so the client saves the results.",
-			"  4. Keep playing as usual. Every /reload or logout adds the soak results.",
+			"  4. Keep playing as usual for at least an hour. Every /reload or logout adds results.",
 			"Leave this window open. Ctrl+C stops and writes report.md.",
 			"",
 		].join("\n"),

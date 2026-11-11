@@ -1,11 +1,15 @@
 // End-to-end run without the game: the real addon (in sim/wow.lua) talks to the real companion
 // through real files. Needs Lua 5.1 with the bit library, or LuaJIT (set LUA=/path/to/lua).
 //
-//   bun sim/run.ts             ResetAddOns re-reads AddOns.txt; everything must pass
-//   bun sim/run.ts --noreset   ResetAddOns keeps memory; the AddOns.txt downlink must time out
-//   bun sim/run.ts --binary dist/familiar-spike-0.2.0-linux-x64/familiar-spike
-//                              the built Linux program instead of the source. The game is a
-//                              copy of Lua named Wow.exe, which is how Wine processes look.
+//   bun sim/run.ts               an older client: an empty .wav does not play
+//   bun sim/run.ts --emptyplays  build 70888 as Sven saw it: an empty .wav "plays", a missing
+//                                one stays missing; doorbells must switch to the sound length
+//   bun sim/run.ts --sparse      the client writes only AddOns.txt rows that differ from the
+//                                default; the lanes must still decode
+//   bun sim/run.ts --noreset     ResetAddOns keeps memory; lane D must fail, the rest not
+//   bun sim/run.ts --binary dist/familiar-spike-0.3.0-linux-x64/familiar-spike
+//                                the built Linux program instead of the source. The game is a
+//                                copy of Lua named Wow.exe, which is how Wine processes look.
 import {
 	chmodSync,
 	copyFileSync,
@@ -20,7 +24,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { Companion } from "../src/companion.ts";
+import { Companion, FAST_TIMING } from "../src/companion.ts";
 import { install } from "../src/install.ts";
 import { EventLog } from "../src/log.ts";
 import { buildReport } from "../src/report.ts";
@@ -30,11 +34,15 @@ const { values: options } = parseArgs({
 	args: Bun.argv.slice(2),
 	options: {
 		noreset: { type: "boolean" },
+		sparse: { type: "boolean" },
+		emptyplays: { type: "boolean" },
 		keep: { type: "boolean" },
 		binary: { type: "string" },
 	},
 });
-const noReset = options.noreset === true;
+const flags = (["noreset", "sparse", "emptyplays"] as const).filter(
+	(flag) => options[flag],
+);
 const binary = options.binary ? resolve(options.binary) : undefined;
 const root = mkdtempSync(join(tmpdir(), "familiar-sim-"));
 const paths = wowPaths(join(root, "_forever_"));
@@ -48,6 +56,11 @@ for (const dir of [
 	dataDir,
 ])
 	mkdirSync(dir, { recursive: true });
+// Results of version 0.2.0 in its own formats: the addon must drop them.
+writeFileSync(
+	savedVariablesFile(paths, ACCOUNT),
+	'FamiliarSpikeDB = { ["sessions"] = { { ["epoch"] = 7, ["started"] = 1, ["soak"] = { "S|-|1,2,3,4,0.1" }, ["bench"] = { ["selftest"] = "from 0.2.0" } } }, ["nextSignal"] = 601 }\n',
+);
 
 function findLua(): string {
 	const candidates = [process.env.LUA, "luajit", "lua5.1", "lua"].filter(
@@ -118,8 +131,8 @@ class Client {
 			REALM,
 			CHARACTER,
 			names,
+			flags.join(","),
 		];
-		if (noReset) args.push("noreset");
 		this.proc = Bun.spawn([lua, ...args], {
 			stdin: "pipe",
 			stdout: "pipe",
@@ -202,7 +215,7 @@ const expect = (ok: boolean, what: string) => {
 
 const lua = findLua();
 console.log(
-	`Sim in ${root} with ${lua}${noReset ? " (ResetAddOns keeps memory)" : ""}${binary ? `, companion ${binary}` : ""}`,
+	`Sim in ${root} with ${lua}${flags.length ? ` (${flags.join(", ")})` : ""}${binary ? `, companion ${binary}` : ""}`,
 );
 
 let client: Client;
@@ -213,7 +226,12 @@ if (binary) {
 	const said = (text: string) => output.some((line) => line.includes(text));
 	const program = Bun.spawn(
 		[binary, "--wow", paths.client, "--data", dataDir],
-		{ cwd: root, stdout: "pipe", stderr: "inherit" },
+		{
+			cwd: root,
+			env: { ...process.env, FAMILIAR_SPIKE_FAST: "1" },
+			stdout: "pipe",
+			stderr: "inherit",
+		},
 	);
 	void collect(program.stdout, output, "  [companion] ");
 	expect(
@@ -252,6 +270,7 @@ if (binary) {
 		log: new EventLog(join(dataDir, "companion-sim.jsonl")),
 		processes: async () => pids,
 		onSaved: () => saved++,
+		timing: FAST_TIMING,
 	});
 	companion.start();
 	pids = [4242];
@@ -259,8 +278,9 @@ if (binary) {
 	await client.ready();
 	await companion.checkGame();
 	finish = async () => {
+		// The old file at start, then the writes at /reload and at logout.
 		expect(
-			await waitFor(() => saved > 0, 5),
+			await waitFor(() => saved >= 3, 5),
 			"companion picked up SavedVariables",
 		);
 		companion.stop();
@@ -274,13 +294,25 @@ if (binary) {
 	};
 }
 
+const doorbellMode = options.emptyplays
+	? "sound length"
+	: "PlaySoundFile result";
 expect(
-	await client.play(15, () => client.said("Companion connected")),
-	"first login connects",
+	await client.play(15, () => client.said("Self-test:")),
+	"login runs the self-test",
+);
+expect(client.said("Self-test: ok"), "self-test passes");
+expect(
+	client.said(`Doorbells: on (${doorbellMode})`),
+	`doorbells use the ${doorbellMode}`,
+);
+expect(
+	await client.play(15, () => client.said("Companion seen")),
+	"addon sees the companion",
 );
 await client.send("slash /fspike bench");
 expect(
-	await client.play(150, () => client.said("Benchmark done")),
+	await client.play(180, () => client.said("Benchmark done")),
 	"benchmark finishes",
 );
 
@@ -294,10 +326,10 @@ await client.send("combat off");
 const before = client.chat.length;
 await client.send("reload");
 expect(
-	await client.play(15, () => client.said("Companion connected", before)),
-	"reload reconnects",
+	await client.play(15, () => client.said("Self-test:", before)),
+	"reload starts a new session",
 );
-await client.play(10);
+await client.play(15);
 await client.send("logout");
 await client.close();
 
@@ -307,27 +339,35 @@ console.log(`\n${report}`);
 
 const verdict = (channel: string) =>
 	report.split("\n").find((line) => line.includes(channel)) ?? "";
-expect(report.includes("Self-test: ok"), "self-test passes");
-expect(verdict("Uplink: AddOns.txt lane").startsWith("| ✔"), "uplink verdict");
-expect(verdict("Doorbell:").startsWith("| ✔"), "doorbell verdict");
-expect(verdict("load-on-demand slot").startsWith("| ✔"), "slot verdict");
-// The sim plays for seconds, not the 60 minutes the verdict needs: "?" is expected.
+// The sim plays for minutes, not the 60 the verdict needs: "?" is the best possible mark.
+const pending = (channel: string, text: string) =>
+	verdict(channel).startsWith("| ?") && verdict(channel).includes(text);
 expect(
-	verdict("Soak while playing").startsWith("| ?") &&
-		verdict("Soak while playing").includes(" 0 failed"),
-	"soak has no failures",
+	pending("lane U (SaveAddOns)", "no loss at ≥33 ms spacing"),
+	"uplink: benchmark passes, soak pending",
 );
-if (noReset)
+expect(pending("load-on-demand slot", "6/6 fresh"), "slots: all fresh");
+expect(pending("Doorbell:", "raise → heard"), "doorbells heard");
+if (options.noreset) {
 	expect(
-		verdict("Downlink: AddOns.txt lane").includes("timeout"),
-		"downlink times out without re-read",
+		verdict("lane D (ResetAddOns)").startsWith("| ✘") &&
+			verdict("lane D (ResetAddOns)").includes("does not pick up the file"),
+		"lane D fails without re-read",
 	);
-else
 	expect(
-		verdict("Downlink: AddOns.txt lane").startsWith("| ✔"),
-		"downlink verdict",
+		/Failures: lane D frame not seen ×\d+\./.test(report),
+		"only lane D fails in the soak",
 	);
+} else {
+	expect(pending("lane D (ResetAddOns)", "frames seen"), "lane D works");
+	expect(report.includes("No failures."), "soak has no failures");
+}
+expect(
+	report.includes("2 addon session(s)") && !report.includes("from 0.2.0"),
+	"results of 0.2.0 are dropped",
+);
 expect(!report.includes("## Addon errors"), "no addon errors");
+expect(report.includes("No companion errors."), "no companion errors");
 
 if (!options.keep) rmSync(root, { recursive: true, force: true });
 else console.log(`Kept ${root}`);

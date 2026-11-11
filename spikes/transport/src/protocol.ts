@@ -5,10 +5,8 @@ export const FRAME_BYTES = 32;
 export const PAYLOAD_BYTES = 20;
 export const SIGNALS = 600;
 export const SLOTS = 64;
-export const MAX_SLOT_BYTES = 2 * 1024 * 1024;
 
-export const Kind = { Data: 1, Ack: 2, Control: 3 } as const;
-export const LAST = 2;
+export const Kind = { Data: 1, Control: 3 } as const;
 
 export type Lane = "U" | "D";
 
@@ -70,38 +68,63 @@ export function decodeFrame(bytes: Uint8Array): Frame | undefined {
 const LANE_LINE =
 	/^FamiliarSpike_([UD])(\d{3}):[ \t]*(enabled|disabled)[ \t]*(\r?)$/gm;
 
-/** Reads a lane from AddOns.txt. Undefined while the client has not written all 256 rows. */
-export function readLane(text: string, lane: Lane): Uint8Array | undefined {
+export interface LaneRead {
+	/** The lane as a frame. A missing row counts as disabled, the helpers' default state. */
+	bytes: Uint8Array;
+	/** How many of the 256 rows the file holds. */
+	rows: number;
+	/** How many of them are enabled. */
+	on: number;
+	duplicate: boolean;
+}
+
+export function readLane(text: string, lane: Lane): LaneRead {
 	const bytes = new Uint8Array(FRAME_BYTES);
 	const seen = new Set<number>();
+	let on = 0;
+	let duplicate = false;
 	for (const match of text.matchAll(LANE_LINE)) {
 		if (match[1] !== lane) continue;
 		const index = Number(match[2]);
-		if (seen.has(index)) return undefined;
+		if (seen.has(index)) duplicate = true;
 		seen.add(index);
 		if (match[3] === "enabled") {
+			on++;
 			const at = index >> 3;
 			bytes[at] = (bytes[at] ?? 0) | (1 << (index & 7));
 		}
 	}
-	return seen.size === LANE_BITS ? bytes : undefined;
+	return { bytes, rows: seen.size, on, duplicate };
 }
 
-/** Rewrites only the rows of one lane and proves that nothing else changed. */
+function laneRow(lane: Lane, index: number, frame: Uint8Array): string {
+	const on = ((frame[index >> 3] ?? 0) >> (index & 7)) & 1;
+	return `FamiliarSpike_${lane}${String(index).padStart(3, "0")}: ${on ? "enabled" : "disabled"}`;
+}
+
+/**
+ * Sets the rows of one lane: existing rows are rewritten in place, missing ones are appended
+ * in the file's own line ending. Proves that no other row changed.
+ */
 export function writeLane(text: string, lane: Lane, frame: Uint8Array): string {
-	let rows = 0;
-	const result = text.replace(
+	const present = new Set<number>();
+	let result = text.replace(
 		LANE_LINE,
 		(row, letter: string, digits: string, _state: string, cr: string) => {
 			if (letter !== lane) return row;
-			rows++;
 			const index = Number(digits);
-			const on = ((frame[index >> 3] ?? 0) >> (index & 7)) & 1;
-			return `FamiliarSpike_${letter}${digits}: ${on ? "enabled" : "disabled"}${cr}`;
+			present.add(index);
+			return `${laneRow(lane, index, frame)}${cr}`;
 		},
 	);
-	if (rows !== LANE_BITS)
-		throw new Error(`lane ${lane} has ${rows} rows, expected ${LANE_BITS}`);
+	const missing: string[] = [];
+	for (let i = 0; i < LANE_BITS; i++)
+		if (!present.has(i)) missing.push(laneRow(lane, i, frame));
+	if (missing.length > 0) {
+		const eol = text.includes("\r\n") ? "\r\n" : "\n";
+		if (result.length > 0 && !result.endsWith("\n")) result += eol;
+		result += missing.join(eol) + eol;
+	}
 	if (foreignLines(result).join("\n") !== foreignLines(text).join("\n"))
 		throw new Error("lane rewrite touched foreign rows");
 	return result;
@@ -119,60 +142,61 @@ export function uplinkByte(stream: number, index: number, j: number): number {
 	return (stream * 31 + index * 7 + j * 13) % 251;
 }
 
-/** The downlink test message, as in Probe.lua downlinkBytes(). */
-export function downlinkBytes(nonce: number, count: number): Uint8Array {
-	const seed = nonce % 251;
-	return Uint8Array.from(
-		{ length: count },
-		(_, i) => (seed + (i + 1) * 17) % 256,
-	);
-}
-
-export function downlinkFrames(
+/** A lane D frame: a counter and the companion's wall time in ms, both little-endian. */
+export function laneDFrame(
 	epoch: number,
-	nonce: number,
-	count: number,
-): Uint8Array[] {
-	const data = downlinkBytes(nonce, count);
-	const frames: Uint8Array[] = [];
-	for (
-		let offset = 0, seq = 1;
-		offset < data.length;
-		offset += PAYLOAD_BYTES, seq++
-	) {
-		const payload = data.slice(offset, offset + PAYLOAD_BYTES);
-		const last = offset + PAYLOAD_BYTES >= data.length;
-		frames.push(
-			encodeFrame({
-				kind: Kind.Data,
-				epoch,
-				seq,
-				flags: last ? LAST : 0,
-				payload,
-			}),
-		);
-	}
-	return frames;
+	counter: number,
+	wallMs: number,
+): Uint8Array {
+	const payload = new Uint8Array(10);
+	const view = new DataView(payload.buffer);
+	view.setUint32(0, counter >>> 0, true);
+	view.setUint32(4, wallMs % 2 ** 32, true);
+	view.setUint16(8, Math.floor(wallMs / 2 ** 32), true);
+	return encodeFrame({
+		kind: Kind.Data,
+		epoch,
+		seq: counter % 65536,
+		flags: 0,
+		payload,
+	});
 }
 
 const ALPHABET =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+export interface SlotContent {
+	slot: number;
+	/** The companion's refresh round; 0 is the install-time placeholder. */
+	refresh: number;
+	/** Companion wall time in ms when it wrote the file. */
+	written: number;
+	/** How often the companion rewrites this slot, in ms. */
+	every: number;
+	size: number;
+}
+
 /** data.lua for a load-on-demand slot. The alphabet needs no escaping in a Lua string. */
-export function slotSource(slot: number, nonce: number, size: number): string {
+export function slotSource(content: SlotContent): string {
+	const { slot, refresh, written, every, size } = content;
 	const chars = new Array<string>(size);
 	for (let i = 1; i <= size; i++)
-		chars[i - 1] = ALPHABET[(nonce + i * 7) % 64] ?? "A";
-	return `FamiliarSpike_SlotData = { slot = ${slot}, nonce = ${nonce}, size = ${size}, data = "${chars.join("")}" }\n`;
+		chars[i - 1] = ALPHABET[(refresh + i * 7) % 64] ?? "A";
+	return `FamiliarSpike_SlotData = { slot = ${slot}, refresh = ${refresh}, written = ${written}, every = ${every}, size = ${size}, data = "${chars.join("")}" }\n`;
 }
 
 export function placeholderSource(slot: number): string {
-	return `FamiliarSpike_SlotData = { slot = ${slot}, nonce = 0, size = 0, data = "" }\n`;
+	return slotSource({ slot, refresh: 0, written: 0, every: 0, size: 0 });
 }
 
-/** 50 ms of 8-bit silence. PlaySoundFile reports it as playable; an empty file is not. */
-export const SILENT_WAV: Uint8Array = (() => {
-	const samples = 400;
+/** Bytes per slot: 1-6 are the benchmark sizes, the rest serve the soak. */
+export function slotSize(slot: number): number {
+	return [2048, 2048, 2048, 16384, 131072, 1048576][slot - 1] ?? 2048;
+}
+
+/** Mono 8-bit silence. */
+export function silentWav(ms: number): Uint8Array {
+	const samples = Math.round(8 * ms);
 	const bytes = new Uint8Array(44 + samples).fill(0x80);
 	const view = new DataView(bytes.buffer);
 	const ascii = (at: number, text: string) => {
@@ -192,7 +216,15 @@ export const SILENT_WAV: Uint8Array = (() => {
 	ascii(36, "data");
 	view.setUint32(40, samples, true);
 	return bytes;
-})();
+}
+
+/** A short valid sound for the self-test. */
+export const SHORT_WAV = silentWav(10);
+/**
+ * A raised doorbell. Long enough that C_Sound.IsPlaying still reports it a quarter second later,
+ * for clients where even an empty file "plays" (build 70888).
+ */
+export const LONG_WAV = silentWav(1500);
 
 export function signalName(n: number): string {
 	return `${String(n).padStart(4, "0")}.wav`;

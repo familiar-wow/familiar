@@ -11,11 +11,19 @@
 --   logout                       fire PLAYER_LOGOUT and write SavedVariables
 -- Chat output is written as lines starting with "chat ".
 --
--- usage: lua wow.lua <client folder> <account> <realm> <character> <names file> [noreset]
--- "noreset" makes C_AddOns.ResetAddOns keep the in-memory state instead of re-reading disk.
+-- usage: lua wow.lua <client folder> <account> <realm> <character> <names file> [flags]
+-- flags, comma-separated:
+--   noreset     C_AddOns.ResetAddOns keeps the in-memory state instead of re-reading disk
+--   sparse      SaveAddOns writes only rows whose state differs from the addon's default
+--   emptyplays  PlaySoundFile succeeds for an empty file and returns nothing for a missing
+--               one, which then stays missing; as Sven saw on build 70888
 
-local client, account, realm, character, namesFile, mode = ...
-assert(namesFile, "usage: lua wow.lua <client> <account> <realm> <character> <names file> [noreset]")
+local client, account, realm, character, namesFile, flagList = ...
+assert(namesFile, "usage: lua wow.lua <client> <account> <realm> <character> <names file> [flags]")
+local flags = {}
+for flag in (flagList or ""):gmatch("[^,]+") do
+	flags[flag] = true
+end
 
 local ADDONS = client .. "/Interface/AddOns/"
 local ACCOUNT = client .. "/WTF/Account/" .. account .. "/"
@@ -27,9 +35,11 @@ local GUID = "Player-4711-0ABC1234"
 math.randomseed(os.time())
 
 -- Client state that survives /reload ------------------------------------------
-local known, order, toc = {}, {}, {}
-local enabled = {}
-local heard = {} -- PlaySoundFile result, cached per process like the real client
+local known, order, toc, indexOf = {}, {}, {}, {}
+local enabled, default = {}, {}
+local sounds = {} -- length in ms of every file that played, cached per process like the real client
+local absent = {} -- emptyplays: a file that was missing stays missing
+local playing = {} -- sound handle -> end time in ms
 local wallMs, preciseMs, lastPreciseMs = os.time() * 1000, 0, nil
 local listShown, inCombat = false, false
 local soundHandle = 0
@@ -68,11 +78,17 @@ for name in (readFile(namesFile) or ""):gmatch("[^\r\n]+") do
 	known[name] = true
 	order[#order + 1] = name
 	toc[name] = parseToc(name)
-	enabled[name] = toc[name].DefaultState ~= "disabled"
+	default[name] = toc[name].DefaultState ~= "disabled"
 end
 table.sort(order)
+for index, name in ipairs(order) do
+	indexOf[name] = index
+end
 
 local function loadAddonsTxt()
+	for _, name in ipairs(order) do
+		enabled[name] = default[name]
+	end
 	for line in (readFile(ADDONS_TXT) or ""):gmatch("[^\r\n]+") do
 		local name, state = line:match("^(.-):%s*(%a+)%s*$")
 		if name and known[name] then
@@ -84,9 +100,23 @@ end
 local function saveAddonsTxt()
 	local lines = {}
 	for _, name in ipairs(order) do
-		lines[#lines + 1] = name .. ": " .. (enabled[name] and "enabled" or "disabled")
+		if not flags.sparse or enabled[name] ~= default[name] then
+			lines[#lines + 1] = name .. ": " .. (enabled[name] and "enabled" or "disabled")
+		end
 	end
 	writeFile(ADDONS_TXT, table.concat(lines, "\n") .. "\n")
+end
+
+-- Length of a canonical PCM .wav in ms, or nil if the data is no playable sound.
+local function wavLength(data)
+	if #data <= 44 or data:sub(1, 4) ~= "RIFF" or data:sub(9, 12) ~= "WAVE" then
+		return nil
+	end
+	local function u32(at)
+		local a, b, c, d = data:byte(at, at + 3)
+		return a + b * 256 + c * 65536 + d * 16777216
+	end
+	return u32(41) / u32(29) * 1000
 end
 
 loadAddonsTxt()
@@ -220,17 +250,38 @@ local function newEnvironment()
 	end
 	env.PlaySoundFile = function(path)
 		local file = client .. "/" .. path:gsub("\\", "/")
-		if not heard[file] then
+		local length = sounds[file]
+		if not length then
+			if absent[file] then
+				return
+			end
 			local data = readFile(file)
-			heard[file] = data ~= nil and #data > 44 and data:sub(1, 4) == "RIFF" or nil
+			if not data and flags.emptyplays then
+				absent[file] = true
+				return
+			end
+			length = data and wavLength(data)
+			if length then
+				sounds[file] = length
+			elseif flags.emptyplays then
+				length = 0 -- plays nothing, and is read again next time
+			else
+				return false
+			end
 		end
-		if heard[file] then
-			soundHandle = soundHandle + 1
-			return true, soundHandle
-		end
-		return false
+		soundHandle = soundHandle + 1
+		playing[soundHandle] = preciseMs + length
+		return true, soundHandle
 	end
-	env.StopSound = function() end
+	env.StopSound = function(handle)
+		playing[handle] = nil
+	end
+	env.C_Sound = {
+		IsPlaying = function(handle)
+			local ends = playing[handle]
+			return ends ~= nil and preciseMs < ends
+		end,
+	}
 	env.CreateFrame = function()
 		local frame = { events = {}, scripts = {} }
 		function frame:RegisterEvent(event)
@@ -242,37 +293,61 @@ local function newEnvironment()
 		frames[#frames + 1] = frame
 		return frame
 	end
-	local function check(name, who)
-		assert(type(name) == "string", "name must be a string")
+	-- The client takes an addon's name or its index, like the real API (uiAddon).
+	local function addon(nameOrIndex)
+		if type(nameOrIndex) == "number" then
+			return order[nameOrIndex]
+		end
+		assert(type(nameOrIndex) == "string", "addon must be a name or an index")
+		return known[nameOrIndex] and nameOrIndex or nil
+	end
+	local function character(who)
 		assert(who == GUID, "character must be the player GUID")
 	end
 	env.C_AddOns = {
-		DoesAddOnExist = function(name)
-			return known[name] == true
+		GetNumAddOns = function()
+			return #order
 		end,
-		IsAddOnLoaded = function(name)
-			return loaded[name] == true
+		GetAddOnInfo = function(nameOrIndex)
+			local name = addon(nameOrIndex)
+			if name then
+				return name, toc[name].Title or name, toc[name].Notes, true, nil, "INSECURE"
+			end
 		end,
-		LoadAddOn = loadAddon,
-		GetAddOnEnableState = function(name, who)
-			check(name, who)
-			return enabled[name] and 2 or 0
+		DoesAddOnExist = function(nameOrIndex)
+			return addon(nameOrIndex) ~= nil
 		end,
-		EnableAddOn = function(name, who)
-			check(name, who)
-			if known[name] then
+		GetAddOnMetadata = function(nameOrIndex, field)
+			local name = addon(nameOrIndex)
+			return name and toc[name][field] or nil
+		end,
+		IsAddOnLoaded = function(nameOrIndex)
+			return loaded[addon(nameOrIndex) or ""] == true
+		end,
+		LoadAddOn = function(nameOrIndex)
+			return loadAddon(addon(nameOrIndex) or tostring(nameOrIndex))
+		end,
+		GetAddOnEnableState = function(nameOrIndex, who)
+			character(who)
+			return enabled[addon(nameOrIndex) or ""] and 2 or 0
+		end,
+		EnableAddOn = function(nameOrIndex, who)
+			character(who)
+			local name = addon(nameOrIndex)
+			if name then
 				enabled[name] = true
 			end
 		end,
-		DisableAddOn = function(name, who)
-			check(name, who)
-			if known[name] then
+		DisableAddOn = function(nameOrIndex, who)
+			character(who)
+			local name = addon(nameOrIndex)
+			if name then
 				enabled[name] = false
 			end
 		end,
 		SaveAddOns = saveAddonsTxt,
 		ResetAddOns = function()
-			if mode ~= "noreset" then
+			if not flags.noreset then
 				loadAddonsTxt()
 			end
 		end,

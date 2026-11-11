@@ -1,21 +1,33 @@
-// The measuring companion: reads lane U, answers requests, drives lane D and logs every step.
-import { type FSWatcher, readFileSync, statSync, watch } from "node:fs";
-import { join } from "node:path";
+// The measuring companion. Every channel runs on its own schedule, so a channel that does not
+// work cannot stall the others:
+//   lane U    decodes the addon's frames from every client write of AddOns.txt
+//   lane D    rewrites lane D every 2 s with a counter and the time
+//   slots     keeps every slot's data.lua fresh
+//   doorbells raises the next sig\NNNN.wav every 30 s, starting a minute after WoW starts
+// It also logs every other file the client writes under WTF, which shows when it saves what.
+import {
+	type FSWatcher,
+	readdirSync,
+	readFileSync,
+	statSync,
+	watch,
+} from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { atomicWrite } from "./files.ts";
 import { resetVolatile } from "./install.ts";
 import type { EventLog } from "./log.ts";
 import {
 	decodeFrame,
-	downlinkFrames,
 	type Frame,
 	Kind,
-	MAX_SLOT_BYTES,
+	LONG_WAV,
+	laneDFrame,
 	readLane,
 	SIGNALS,
-	SILENT_WAV,
 	SLOTS,
 	signalName,
 	slotFolder,
+	slotSize,
 	slotSource,
 	uplinkByte,
 	writeLane,
@@ -42,17 +54,42 @@ interface Watched {
 	mtime: number;
 	size: number;
 	retries: number;
+	/** When the client last wrote this file, for lane D's quiet period. */
+	clientAt: number;
+	readErrors: number;
 }
 
-interface DownlinkJob {
-	entry: Watched;
-	epoch: number;
-	frames: Uint8Array[];
-	next: number;
-	writtenAt: number;
-	started: number;
-	rewrites: number;
+export interface Timing {
+	laneDMs: number;
+	/** Lane D leaves a file alone this long after the client wrote it. */
+	quietMs: number;
+	slotMs: number;
+	bigSlotMs: number;
+	bellStartMs: number;
+	bellEveryMs: number;
+	wtfMs: number;
 }
+
+export const TIMING: Timing = {
+	laneDMs: 2000,
+	quietMs: 3000,
+	slotMs: 5000,
+	bigSlotMs: 30_000,
+	bellStartMs: 60_000,
+	bellEveryMs: 30_000,
+	wtfMs: 2000,
+};
+
+/** For the simulator, which plays for seconds instead of hours. */
+export const FAST_TIMING: Timing = {
+	laneDMs: 500,
+	quietMs: 600,
+	slotMs: 1000,
+	bigSlotMs: 3000,
+	bellStartMs: 3000,
+	bellEveryMs: 3000,
+	wtfMs: 1000,
+};
 
 export interface CompanionOptions {
 	paths: WowPaths;
@@ -60,10 +97,12 @@ export interface CompanionOptions {
 	processes?: () => Promise<number[]>;
 	onSaved?: () => void;
 	pollMs?: number;
+	timing?: Partial<Timing>;
 }
 
-const DOWNLINK_RETRY_MS = 1500;
-const DOWNLINK_TIMEOUT_MS = 90_000;
+const MAX_WTF_FILES = 5000;
+/** A file without a valid frame that changed more recently than this may still be written. */
+const MID_WRITE_MS = 200;
 
 const u16 = (bytes: Uint8Array, at: number) =>
 	(bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8);
@@ -81,42 +120,75 @@ function percentile(values: number[], q: number): number {
 export class Companion {
 	/** Parsed FamiliarSpikeDB per account, refreshed whenever the game saves it. */
 	readonly saved = new Map<string, LuaTable>();
+	private readonly timing: Timing;
 	private readonly watched = new Map<string, Watched>();
 	private readonly handled = new Map<number, Set<number>>();
 	private readonly hellos = new Map<number, number>();
 	private readonly streams = new Map<string, Set<number>>();
 	private readonly savedMtimes = new Map<string, number>();
+	private readonly slotWritten = new Map<number, number>();
 	private readonly timers: ReturnType<typeof setInterval>[] = [];
+	private wtf?: Map<string, string>;
 	private locked?: Watched;
-	private downlink?: DownlinkJob;
 	private watcher?: FSWatcher;
 	private running = false;
 	private startedAt = 0;
 	private firstGameCheck = true;
 	private pids: number[] = [];
+	private gameStartedAt?: number;
+	private nextBell = 1;
+	private readonly laneDEpoch = 1 + Math.floor(Math.random() * 255);
+	private laneDCounter = 0;
+	private slotRefresh = 0;
 	private intervals: number[] = [];
 	private lastPoll = 0;
-	private counts = { frames: 0, signals: 0, slots: 0, sessions: 0 };
+	private errors = 0;
+	private counts = {
+		sessions: 0,
+		frames: 0,
+		clientWrites: 0,
+		laneD: 0,
+		slots: 0,
+		bells: 0,
+		wtf: 0,
+	};
 
-	constructor(private readonly options: CompanionOptions) {}
+	constructor(private readonly options: CompanionOptions) {
+		this.timing = { ...TIMING, ...options.timing };
+	}
 
 	private get log(): EventLog {
 		return this.options.log;
 	}
 
+	private get gameRunning(): boolean {
+		return this.pids.length > 0;
+	}
+
 	start(): void {
 		this.running = true;
 		this.startedAt = Date.now() - 1000;
-		this.log.add("companion", { pid: process.pid, platform: process.platform });
+		this.log.add("companion", {
+			pid: process.pid,
+			platform: process.platform,
+			timing: this.timing,
+		});
 		this.scan();
 		this.checkSaved();
+		this.scanWtf();
 		void this.checkGame();
 		this.every(1000, () => this.scan());
 		this.every(1000, () => this.checkSaved());
 		this.every(3000, () => void this.checkGame());
+		this.every(this.timing.wtfMs, () => this.scanWtf());
 		this.every(50, () => {
 			for (const entry of this.watched.values())
 				if (entry !== this.locked) this.check(entry);
+		});
+		this.every(this.timing.laneDMs, () => this.writeLaneD());
+		this.every(1000, () => {
+			this.refreshSlots();
+			this.ringBells();
 		});
 		this.every(10_000, () => this.reportPolling());
 		this.every(1000, () => this.log.flush());
@@ -137,7 +209,7 @@ export class Companion {
 		}
 		this.fastLoop();
 		this.log.say(
-			`Watching ${this.watched.size} AddOns.txt files. Start WoW and log in; the addon says hello in chat.`,
+			`Watching ${this.watched.size} AddOns.txt files. Start WoW and log in.`,
 		);
 	}
 
@@ -149,14 +221,17 @@ export class Companion {
 	}
 
 	status(): string {
-		const dl = this.downlink
-			? `downlink frame ${this.downlink.next + 1}/${this.downlink.frames.length}`
-			: "downlink idle";
-		return `${this.counts.sessions} sessions, ${this.counts.frames} frames, ${this.counts.signals} signals, ${this.counts.slots} slots, ${dl}`;
+		const c = this.counts;
+		return `${c.sessions} sessions; uplink: client wrote AddOns.txt ${c.clientWrites}×, ${c.frames} frames; lane D ${c.laneD} writes; slots ${c.slots} refreshes; doorbells ${c.bells} raised; ${c.wtf} other client file changes`;
 	}
 
 	private every(ms: number, fn: () => void): void {
 		this.timers.push(setInterval(fn, ms));
+	}
+
+	private error(where: string, error: unknown, data: object = {}): void {
+		if (this.errors++ < 200)
+			this.log.add("error", { where, message: String(error), ...data });
 	}
 
 	private fastLoop = (): void => {
@@ -165,7 +240,6 @@ export class Companion {
 		if (this.lastPoll) this.intervals.push(now - this.lastPoll);
 		this.lastPoll = now;
 		if (this.locked) this.check(this.locked);
-		this.tickDownlink();
 		setTimeout(this.fastLoop, this.options.pollMs ?? 2);
 	};
 
@@ -194,15 +268,18 @@ export class Companion {
 				mtime: 0,
 				size: -1,
 				retries: 0,
+				clientAt: 0,
+				readErrors: 0,
 			};
 			this.watched.set(file, entry);
 			try {
 				const stat = statSync(file);
-				// A file written before we started holds history, not requests. A newer one
+				// A file written before we started holds history, not news. A newer one
 				// (a character's first login) is read normally on the next poll.
 				if (stat.mtimeMs >= this.startedAt) continue;
-				const lane = readLane(readFileSync(file, "latin1"), "U");
-				const frame = lane && decodeFrame(lane);
+				const frame = decodeFrame(
+					readLane(readFileSync(file, "latin1"), "U").bytes,
+				);
 				if (frame) this.seen(frame.epoch).add(frame.seq);
 				entry.mtime = stat.mtimeMs;
 				entry.size = stat.size;
@@ -221,6 +298,7 @@ export class Companion {
 		return set;
 	}
 
+	/** Reads a client write of AddOns.txt and logs what it held, decodable or not. */
 	private check(entry: Watched): void {
 		let stat: ReturnType<typeof statSync>;
 		try {
@@ -238,23 +316,40 @@ export class Companion {
 		let text: string;
 		try {
 			text = readFileSync(entry.file, "latin1");
-		} catch {
+		} catch (error) {
 			entry.retries++;
+			if (entry.readErrors++ < 10)
+				this.log.add("read-error", {
+					file: entry.label,
+					code: (error as NodeJS.ErrnoException).code ?? String(error),
+				});
 			return;
 		}
 		const lane = readLane(text, "U");
-		const frame = lane && decodeFrame(lane);
-		if (!frame && entry.retries < 5) {
-			// Probably caught the client mid-write; read again on the next poll.
+		const frame = decodeFrame(lane.bytes);
+		if (!frame && readAt - stat.mtimeMs < MID_WRITE_MS) {
+			// Maybe caught the client mid-write; it does not replace the file atomically.
+			// Read again on the next poll and log only once the file has settled.
 			entry.retries++;
 			return;
 		}
 		entry.mtime = stat.mtimeMs;
 		entry.size = stat.size;
 		entry.retries = 0;
+		entry.clientAt = readAt;
+		this.counts.clientWrites++;
+		this.log.add("addons", {
+			file: entry.label,
+			mtime: stat.mtimeMs,
+			read: readAt,
+			size: stat.size,
+			rows: lane.rows,
+			on: lane.on,
+			dRows: readLane(text, "D").rows,
+			frame: frame ? `${frame.epoch}:${frame.seq}` : null,
+			duplicate: lane.duplicate || undefined,
+		});
 		if (frame) this.receive(entry, frame, stat.mtimeMs, readAt);
-		else if (lane?.some((b) => b !== 0))
-			this.log.add("bad-frame", { file: entry.label, mtime: stat.mtimeMs });
 	}
 
 	private receive(
@@ -284,7 +379,6 @@ export class Companion {
 			mtime,
 			read,
 		};
-
 		if (frame.kind === Kind.Data) {
 			const stream = p[0] ?? 0;
 			const index = u16(p, 1);
@@ -293,230 +387,209 @@ export class Companion {
 				ok = p[2 + j] === uplinkByte(stream, index, j);
 			this.log.add("frame", { ...base, kind: "data", stream, index, ok });
 			this.streams.get(`${frame.epoch}:${stream}`)?.add(index);
-		} else if (frame.kind === Kind.Ack) {
-			this.log.add("frame", { ...base, kind: "ack" });
-			if (op === "" && p[0] === 0x44)
-				this.onAck(frame.epoch, u16(p, 1), mtime, read);
-		} else if (frame.kind === Kind.Control) {
-			this.log.add("frame", { ...base, kind: "control", op });
-			this.control(entry, frame, op, mtime, read);
+			return;
 		}
-	}
-
-	private control(
-		entry: Watched,
-		frame: Frame,
-		op: string,
-		mtime: number,
-		read: number,
-	): void {
-		const p = frame.payload;
-		const epoch = frame.epoch;
-		// Any other request means the addon gave up on the downlink; stop rewriting the file.
-		if (
-			this.downlink &&
-			op !== "D" &&
-			(op === "H" || this.downlink.epoch === epoch)
-		)
-			this.finishDownlink("abandoned");
-		try {
-			switch (op) {
-				case "H": {
-					this.locked = entry;
-					this.counts.sessions++;
-					const reload = p[1] === 1;
-					this.log.add("hello", {
-						epoch,
-						nonce: u32(p, 6),
-						account: entry.account,
-						file: entry.label,
-						reload,
-						build: u32(p, 2),
-					});
-					this.log.say(
-						`Session ${epoch} on ${entry.label} (${reload ? "reload" : "login"}).`,
-					);
-					break;
-				}
-				case "S": {
-					const sig = u16(p, 1);
-					if (sig < 1 || sig > SIGNALS)
-						throw new Error(`signal ${sig} out of range`);
-					const { raised, ms } = this.raise(sig);
-					this.counts.signals++;
-					this.log.add("signal", { epoch, sig, mtime, read, raised, ms });
-					break;
-				}
-				case "L": {
-					const slot = p[1] ?? 0;
-					const size = u32(p, 2);
-					const sig = u16(p, 6);
-					const nonce = u32(p, 8);
-					if (
-						slot < 1 ||
-						slot > SLOTS ||
-						size > MAX_SLOT_BYTES ||
-						sig < 1 ||
-						sig > SIGNALS
-					)
-						throw new Error(
-							`slot request out of range (${slot}, ${size}, ${sig})`,
-						);
-					const source = slotSource(slot, nonce, size);
-					const started = performance.now();
-					atomicWrite(
-						join(this.options.paths.addons, slotFolder(slot), "data.lua"),
-						source,
-					);
-					const written = Date.now();
-					const writeMs = performance.now() - started;
-					const { raised } = this.raise(sig);
-					this.counts.slots++;
-					this.log.add("slot", {
-						epoch,
-						slot,
-						size,
-						sig,
-						nonce,
-						mtime,
-						read,
-						written,
-						writeMs,
-						raised,
-					});
-					break;
-				}
-				case "D":
-					this.startDownlink(entry, epoch, u16(p, 1), u32(p, 3));
-					break;
-				case "M": {
-					const stream = p[1] ?? 0;
-					this.streams.set(`${epoch}:${stream}`, new Set());
-					this.log.add("mark", { epoch, stream });
-					break;
-				}
-				case "E": {
-					const stream = p[1] ?? 0;
-					const count = u16(p, 2);
-					const got = this.streams.get(`${epoch}:${stream}`)?.size ?? 0;
-					this.log.add("end", { epoch, stream, count, got });
-					this.log.say(`Uplink stream ${stream}: ${got}/${count} frames seen.`);
-					break;
-				}
-			}
-		} catch (error) {
-			this.log.add("error", { where: `control ${op}`, message: String(error) });
-			this.log.say(`Error handling ${op}: ${String(error)}`);
+		if (frame.kind !== Kind.Control) return;
+		this.log.add("frame", { ...base, kind: "control", op });
+		if (op === "H") {
+			this.locked = entry;
+			this.counts.sessions++;
+			const reload = p[1] === 1;
+			this.log.add("hello", {
+				epoch: frame.epoch,
+				nonce: u32(p, 6),
+				account: entry.account,
+				file: entry.label,
+				reload,
+				build: u32(p, 2),
+			});
+			this.log.say(
+				`Session ${frame.epoch} on ${entry.label} (${reload ? "reload" : "login"}).`,
+			);
+		} else if (op === "M") {
+			this.streams.set(`${frame.epoch}:${p[1] ?? 0}`, new Set());
+		} else if (op === "E") {
+			const stream = p[1] ?? 0;
+			const count = u16(p, 2);
+			const got = this.streams.get(`${frame.epoch}:${stream}`)?.size ?? 0;
+			this.log.add("end", { epoch: frame.epoch, stream, count, got });
+			this.log.say(`Uplink stream ${stream}: ${got}/${count} frames seen.`);
 		}
-	}
-
-	private raise(sig: number): { raised: number; ms: number } {
-		const file = join(
-			this.options.paths.addons,
-			"FamiliarSpike",
-			"sig",
-			signalName(sig),
-		);
-		const started = performance.now();
-		atomicWrite(file, SILENT_WAV);
-		return { raised: Date.now(), ms: performance.now() - started };
 	}
 
 	// Lane D --------------------------------------------------------------------
 
-	private startDownlink(
-		entry: Watched,
-		epoch: number,
-		bytes: number,
-		nonce: number,
-	): void {
-		if (bytes < 1 || bytes > 8192)
-			throw new Error(`downlink size ${bytes} out of range`);
-		if (this.downlink) this.finishDownlink("replaced");
-		const frames = downlinkFrames(epoch, nonce, bytes);
-		this.downlink = {
-			entry,
-			epoch,
-			frames,
-			next: 0,
-			writtenAt: 0,
-			started: Date.now(),
-			rewrites: 0,
-		};
-		this.log.add("dl-start", { epoch, bytes, nonce, frames: frames.length });
-		this.log.say(`Downlink test: ${bytes} bytes in ${frames.length} frames.`);
-		this.writeDown();
-	}
-
 	/**
-	 * Rewrites lane D. If the game saves between our read and our rename, its row update is
-	 * lost; the addon then sends its ack again, and we write the frame again after a timeout.
+	 * Writes the next lane D frame into the active character's AddOns.txt, or into every
+	 * character's file while no hello said which one is active. A file the client wrote within
+	 * the quiet period is skipped, so our rewrite cannot drop one of its lane U frames.
 	 */
-	private writeDown(): void {
-		const job = this.downlink;
-		const frame = job?.frames[job.next];
-		if (!job || !frame) return;
-		try {
-			const text = readFileSync(job.entry.file, "latin1");
-			const started = performance.now();
-			const retries = atomicWrite(
-				job.entry.file,
-				Buffer.from(writeLane(text, "D", frame), "latin1"),
-			);
-			job.writtenAt = Date.now();
-			this.log.add("dl-write", {
-				epoch: job.epoch,
-				seq: job.next + 1,
-				at: job.writtenAt,
-				ms: performance.now() - started,
-				retries,
-			});
-		} catch (error) {
-			this.log.add("error", {
-				where: "downlink write",
-				message: String(error),
-			});
-			this.finishDownlink("write-failed");
+	private writeLaneD(): void {
+		if (!this.gameRunning) return;
+		const at = Date.now();
+		const counter = ++this.laneDCounter;
+		const frame = laneDFrame(this.laneDEpoch, counter, at);
+		const targets = this.locked ? [this.locked] : [...this.watched.values()];
+		let written = 0;
+		let busy = 0;
+		for (const entry of targets) {
+			this.check(entry); // take in a client write we have not read yet
+			if (
+				entry.retries > 0 ||
+				Date.now() - entry.clientAt < this.timing.quietMs
+			) {
+				busy++;
+				continue;
+			}
+			try {
+				const before = statSync(entry.file);
+				const text = readFileSync(entry.file, "latin1");
+				const next = Buffer.from(writeLane(text, "D", frame), "latin1");
+				const again = statSync(entry.file);
+				if (again.mtimeMs !== before.mtimeMs || again.size !== before.size) {
+					busy++;
+					continue;
+				}
+				atomicWrite(entry.file, next);
+				const after = statSync(entry.file);
+				entry.mtime = after.mtimeMs;
+				entry.size = after.size;
+				written++;
+			} catch (error) {
+				this.error("lane D", error, { file: entry.label });
+			}
 		}
+		if (written > 0) this.counts.laneD++;
+		this.log.add("lane-d", { counter, at, written, busy });
 	}
 
-	private onAck(epoch: number, seq: number, mtime: number, read: number): void {
-		const job = this.downlink;
-		if (!job || epoch !== job.epoch || seq !== job.next + 1) return;
-		this.log.add("dl-ack", { epoch, seq, mtime, read });
-		job.next++;
-		if (job.next >= job.frames.length) this.finishDownlink("ok");
-		else this.writeDown();
-	}
+	// Slots ---------------------------------------------------------------------
 
-	private tickDownlink(): void {
-		const job = this.downlink;
-		if (!job) return;
+	/** Rewrites every slot whose refresh interval has passed. Slots 5 and 6 are big and slower. */
+	private refreshSlots(): void {
+		if (!this.gameRunning) return;
 		const now = Date.now();
-		if (now - job.started > DOWNLINK_TIMEOUT_MS) this.finishDownlink("timeout");
-		else if (now - job.writtenAt > DOWNLINK_RETRY_MS) {
-			job.rewrites++;
-			this.writeDown();
+		const due: number[] = [];
+		for (let k = 1; k <= SLOTS; k++) {
+			const every =
+				slotSize(k) >= 131072 ? this.timing.bigSlotMs : this.timing.slotMs;
+			if (now - (this.slotWritten.get(k) ?? 0) >= every) due.push(k);
+		}
+		if (due.length === 0) return;
+		const refresh = ++this.slotRefresh;
+		const started = performance.now();
+		let written = 0;
+		for (const k of due) {
+			const size = slotSize(k);
+			const every = size >= 131072 ? this.timing.bigSlotMs : this.timing.slotMs;
+			try {
+				atomicWrite(
+					join(this.options.paths.addons, slotFolder(k), "data.lua"),
+					slotSource({ slot: k, refresh, written: Date.now(), every, size }),
+				);
+				this.slotWritten.set(k, now);
+				written++;
+			} catch (error) {
+				this.error("slot", error, { slot: k });
+			}
+		}
+		this.counts.slots++;
+		this.log.add("slots", {
+			refresh,
+			at: now,
+			written,
+			ms: performance.now() - started,
+		});
+	}
+
+	// Doorbells -----------------------------------------------------------------
+
+	private signalFile(n: number): string {
+		return join(
+			this.options.paths.addons,
+			"FamiliarSpike",
+			"sig",
+			signalName(n),
+		);
+	}
+
+	/** Raises every doorbell that is due: the first a minute after WoW starts, then one every 30 s. */
+	private ringBells(): void {
+		if (!this.gameRunning || this.gameStartedAt === undefined) return;
+		const due = Math.min(
+			SIGNALS,
+			Math.floor(
+				(Date.now() - this.gameStartedAt - this.timing.bellStartMs) /
+					this.timing.bellEveryMs,
+			) + 1,
+		);
+		while (this.nextBell <= due) {
+			const n = this.nextBell++;
+			try {
+				atomicWrite(this.signalFile(n), LONG_WAV);
+				this.counts.bells++;
+				this.log.add("bell", { n, raised: Date.now() });
+			} catch (error) {
+				this.error("doorbell", error, { n });
+			}
 		}
 	}
 
-	private finishDownlink(result: string): void {
-		const job = this.downlink;
-		if (!job) return;
-		this.downlink = undefined;
-		const finished = Date.now();
-		this.log.add("dl-done", {
-			epoch: job.epoch,
-			result,
-			acked: job.next,
-			frames: job.frames.length,
-			started: job.started,
-			finished,
-			rewrites: job.rewrites,
-		});
-		this.log.say(
-			`Downlink test ${result}: ${job.next}/${job.frames.length} frames in ${((finished - job.started) / 1000).toFixed(1)} s.`,
-		);
+	/** After a companion restart next to a running game: continue after the last raised file. */
+	private firstUnraised(): number {
+		let n = 1;
+		while (n <= SIGNALS && (statSizeOf(this.signalFile(n)) ?? 0) > 0) n++;
+		return n;
+	}
+
+	// Client files ----------------------------------------------------------------
+
+	/** Logs every file under WTF the client adds, changes or removes, except AddOns.txt. */
+	private scanWtf(): void {
+		const root = dirname(this.options.paths.accounts);
+		const now = new Map<string, string>();
+		const walk = (dir: string, depth: number) => {
+			if (depth > 6 || now.size >= MAX_WTF_FILES) return;
+			let entries: import("node:fs").Dirent[];
+			try {
+				entries = readdirSync(dir, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				const path = join(dir, entry.name);
+				if (entry.isDirectory()) walk(path, depth + 1);
+				else if (entry.isFile() && entry.name !== "AddOns.txt") {
+					try {
+						const stat = statSync(path);
+						now.set(relative(root, path), `${stat.size}:${stat.mtimeMs}`);
+					} catch {
+						// Removed while we looked.
+					}
+				}
+			}
+		};
+		walk(root, 0);
+		const before = this.wtf;
+		this.wtf = now;
+		if (!before) {
+			this.log.add("wtf-start", { files: now.size });
+			return;
+		}
+		for (const [path, value] of now) {
+			const old = before.get(path);
+			if (old === value) continue;
+			const [size, mtime] = value.split(":").map(Number);
+			this.counts.wtf++;
+			this.log.add("wtf", {
+				path,
+				change: old === undefined ? "added" : "changed",
+				size,
+				mtime,
+			});
+		}
+		for (const path of before.keys())
+			if (!now.has(path)) this.log.add("wtf", { path, change: "removed" });
 	}
 
 	// Saved results and game lifecycle -------------------------------------------
@@ -540,12 +613,16 @@ export class Companion {
 				);
 				this.options.onSaved?.();
 			} catch (error) {
-				this.log.add("error", {
-					where: "savedvariables",
-					message: String(error),
-				});
+				this.error("savedvariables", error);
 			}
 		}
+	}
+
+	private reset(): { signals: number; slots: number } {
+		this.nextBell = 1;
+		this.slotWritten.clear();
+		this.locked = undefined;
+		return resetVolatile(this.options.paths);
 	}
 
 	async checkGame(): Promise<void> {
@@ -554,28 +631,40 @@ export class Companion {
 			this.firstGameCheck = false;
 			this.pids = pids;
 			this.log.add("game", { pids, initial: true });
-			if (pids.length === 0)
-				this.log.add("reset", resetVolatile(this.options.paths));
+			if (pids.length === 0) this.log.add("reset", this.reset());
+			else {
+				// The game was already running: its files cannot be reset safely.
+				this.gameStartedAt = Date.now();
+				this.nextBell = this.firstUnraised();
+			}
 			return;
 		}
 		const started = pids.filter((pid) => !this.pids.includes(pid));
 		const closed = this.pids.length > 0 && pids.length === 0;
 		if (started.length === 0 && pids.length === this.pids.length) return;
-		// A new client process reads the signal files fresh, so they can be reused. A second
-		// process next to a running client is left alone: a reset would drop a signal the
+		// A new client process reads the doorbell files fresh, so they can be reused. A second
+		// process next to a running client is left alone: a reset would drop a doorbell the
 		// running client has not heard yet.
 		const restarted =
 			started.length > 0 && !pids.some((pid) => this.pids.includes(pid));
 		this.pids = pids;
 		this.log.add("game", { pids });
 		if (restarted || closed) {
-			const reset = resetVolatile(this.options.paths);
-			this.log.add("reset", reset);
+			this.log.add("reset", this.reset());
+			this.gameStartedAt = restarted ? Date.now() : undefined;
 			this.log.say(
 				closed
-					? "WoW closed. Signal and slot files reset."
-					: `WoW started (pid ${started.join(", ")}). Signal and slot files reset.`,
+					? "WoW closed. Doorbell and slot files reset."
+					: `WoW started (pid ${started.join(", ")}). Doorbell and slot files reset.`,
 			);
 		}
+	}
+}
+
+function statSizeOf(file: string): number | undefined {
+	try {
+		return statSync(file).size;
+	} catch {
+		return undefined;
 	}
 }

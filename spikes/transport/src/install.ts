@@ -14,14 +14,16 @@ import { atomicWrite } from "./files.ts";
 import {
 	LANE_BITS,
 	type Lane,
+	LONG_WAV,
 	laneFolder,
 	placeholderSource,
+	SHORT_WAV,
 	SIGNALS,
-	SILENT_WAV,
 	SLOTS,
 	signalName,
 	slotFolder,
 } from "./protocol.ts";
+import { VERSION } from "./version.ts";
 import {
 	accountNames,
 	addonsFiles,
@@ -42,7 +44,7 @@ function mainToc(iface: number): string {
 		"## Title: Familiar Spike",
 		"## Notes: Measures transport channels for Familiar (FAM-15). Temporary.",
 		"## Author: Familiar",
-		"## Version: 0.1.0",
+		`## Version: ${VERSION}`,
 		"## SavedVariables: FamiliarSpikeDB",
 		MARKER,
 		"",
@@ -148,8 +150,15 @@ export function install(paths: WowPaths, iface: number): InstallResult {
 	mkdirSync(join(main, "ctl"), { recursive: true });
 	for (let n = 1; n <= SIGNALS; n++)
 		write(join(main, "sig", signalName(n)), "", false);
+	// The sound probe compares an empty, a short, a long and a missing file.
 	write(join(main, "ctl", "empty.wav"), "");
-	write(join(main, "ctl", "valid.wav"), SILENT_WAV);
+	write(join(main, "ctl", "valid.wav"), SHORT_WAV);
+	write(join(main, "ctl", "long.wav"), LONG_WAV);
+	const missing = join(main, "ctl", "missing.wav");
+	if (existsSync(missing)) {
+		rmSync(missing);
+		result.updated++;
+	}
 
 	for (const lane of ["U", "D"] as Lane[])
 		for (let i = 0; i < LANE_BITS; i++) {

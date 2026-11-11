@@ -31,6 +31,7 @@ local function newSession(isReload)
 		reload = isReload and true or false,
 		build = tostring(version) .. "." .. tostring(build),
 		interface = interface,
+		bells = {},
 		soak = {},
 		events = {},
 		errors = {},
@@ -52,6 +53,11 @@ frame:SetScript("OnEvent", function(_, event, ...)
 	if event == "ADDON_LOADED" and ... == addonName then
 		FamiliarSpikeDB = FamiliarSpikeDB or {}
 		local db = FamiliarSpikeDB
+		-- Results of another version use other formats.
+		local version = C_AddOns.GetAddOnMetadata(addonName, "Version")
+		if db.version ~= version then
+			db.sessions, db.version = {}, version
+		end
 		db.sessions = db.sessions or {}
 		db.nextSignal = db.nextSignal or 1
 		if db.soak == nil then
@@ -65,13 +71,13 @@ frame:SetScript("OnEvent", function(_, event, ...)
 			return
 		end
 		if isInitialLogin then
-			-- A new client process: the companion has reset all signal files.
+			-- A new client process: the companion has reset all doorbell files.
 			ns.db.nextSignal = 1
 		end
 		ns.session = newSession(isReloadingUi)
 		Probe.Setup(UnitGUID("player"), ns.session)
 		Probe.Event("session", isReloadingUi and "reload" or "login")
-		Probe.Spawn("hello", Probe.Hello, isReloadingUi)
+		Probe.Spawn("start", Probe.Start, isReloadingUi)
 		Probe.Spawn("soak", Probe.Soak)
 	elseif event == "PLAYER_LOGOUT" and ns.session then
 		Probe.Store(ns.session)
@@ -93,8 +99,8 @@ SLASH_FAMILIARSPIKE1 = "/fspike"
 SlashCmdList.FAMILIARSPIKE = function(input)
 	local command = (input or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 	if command == "bench" then
-		if not ns.session then
-			ns.Say("Not ready yet.")
+		if not ns.session or not ns.session.selftest then
+			ns.Say("Not ready yet; the self-test is still running.")
 		elseif InCombatLockdown() then
 			ns.Say("Leave combat first.")
 		elseif Probe.benchRunning then
