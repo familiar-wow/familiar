@@ -15,7 +15,7 @@ Team members add the key of the team's internal tracker to titles, such as `(FAM
 
 ## Working with an AI agent
 
-Most of Familiar is written by an agent, and yours is welcome too. Point it at [AGENTS.md](AGENTS.md).
+Most of Familiar is written by an agent, and yours is welcome too. Many agents, Codex and Claude Code among them, read [AGENTS.md](AGENTS.md) on their own; otherwise point yours at it. Claude Code skips it when a `CLAUDE.md` exists in the repository folder or any folder above it; `/config` → Project instructions changes that.
 
 - A person is responsible for every issue and pull request. Read what your agent wrote before you send it.
 - Name the agent in the pull request.

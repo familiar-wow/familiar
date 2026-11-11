@@ -50,7 +50,7 @@ These protect players and the project. Don't trade them for speed.
 
 ## How we work
 
-- The maintainers are @Smidelis, who decides, and his agent @hermes-smidelis.
+- The maintainers are @Smidelis, who decides, and everyone he gave write access to this repository, such as his agent @hermes-smidelis.
 - Changes start from an issue, or for the team from a ticket. Small fixes can go straight to a pull request; for anything bigger, agree on the approach with @Smidelis in the issue first.
 - One topic per branch and pull request. Branch names: `feat/…`, `fix/…`, `docs/…`, `chore/…`, `ci/…`, `spike/…`.
 - Write [Conventional Commits](https://www.conventionalcommits.org/). Team members add their ticket key: `feat(addon): item links (FAM-12)`.
