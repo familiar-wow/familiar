@@ -9,7 +9,7 @@ Familiar is pre-alpha and changes quickly. Bug reports and ideas are welcome as 
 1. Fork the repository and create a branch such as `feat/item-links` or `fix/chat-scroll`. Team members with write access branch in the repository itself.
 2. Write [Conventional Commits](https://www.conventionalcommits.org/).
 3. Open a pull request and fill in the template. The title becomes the squash commit on `main`, so it follows the same format, for example `feat(addon): item links`.
-4. Once CI is green and @Smidelis has given his go, the pull request is squash-merged: by its author with write access, otherwise by a maintainer.
+4. Once CI is green and @Smidelis has given his go, a maintainer squash-merges it. Team members with write access merge their own pull requests after the go.
 
 Team members add the key of the team's internal tracker to titles, such as `(FAM-12)`. You don't need one. Larger design decisions are recorded as [ADRs](docs/adr), proposed as a pull request.
 
