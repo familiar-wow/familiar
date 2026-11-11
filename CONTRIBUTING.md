@@ -11,7 +11,7 @@ Familiar is pre-alpha and changes quickly. Bug reports and ideas are welcome as 
 3. Open a pull request and fill in the template. The title becomes the squash commit on `main`, so it follows the same format, for example `feat(addon): item links`.
 4. Once CI is green and @Smidelis has given his go, a maintainer squash-merges it.
 
-Maintainers add the key of their internal tracker to titles, such as `(FAM-12)`. You don't need one. Larger design decisions are recorded as [ADRs](docs/adr), proposed as a pull request.
+Team members add the key of the team's internal tracker to titles, such as `(FAM-12)`. You don't need one. Larger design decisions are recorded as [ADRs](docs/adr), proposed as a pull request.
 
 ## Working with an AI agent
 
