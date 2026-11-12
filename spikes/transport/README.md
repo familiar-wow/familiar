@@ -5,13 +5,13 @@ which channels can carry Familiar's traffic between the addon and the companion 
 actually play? The addon sandbox has no sockets and no file access, so every channel is a
 side effect the client happens to persist or reload.
 
-| Channel           | Direction         | How it works                                                                                                                                         |
-| ----------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AddOns.txt lane U | addon → companion | The addon flips the enable state of 256 empty helper addons and calls `C_AddOns.SaveAddOns()`. The companion reads `AddOns.txt`. 20 bytes per frame. |
-| AddOns.txt lane D | companion → addon | The companion rewrites a second lane; the addon calls `C_AddOns.ResetAddOns()` and reads it back. Works only if that call re-reads the file.         |
-| Slot              | companion → addon | Pre-installed load-on-demand addons. The companion keeps their `data.lua` fresh; the addon calls `LoadAddOn`. Large payloads, 64 per UI session.     |
-| Doorbell          | companion → addon | Pre-installed empty `.wav` files. The companion writes a silent sound into one; the addon notices with `PlaySoundFile`. One bit, no payload.         |
-| Font bank         | companion → addon | 256 pre-installed fonts. The companion writes bytes into the glyph widths; the addon sets a font and measures them. 490 bytes per font, no code.     |
+| Channel           | Direction         | How it works                                                                                                                                          |
+| ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AddOns.txt lane U | addon → companion | The addon flips the enable state of 256 empty helper addons and calls `C_AddOns.SaveAddOns()`. The companion reads `AddOns.txt`. 20 bytes per frame.  |
+| AddOns.txt lane D | companion → addon | The companion rewrites a second lane; the addon calls `C_AddOns.ResetAddOns()` and reads it back. Works only if that call re-reads the file.          |
+| Slot              | companion → addon | Pre-installed load-on-demand addons. The companion keeps their `data.lua` fresh; the addon calls `LoadAddOn`. Large payloads, 64 per UI session.      |
+| Doorbell          | companion → addon | Pre-installed empty `.wav` files. The companion writes a silent sound into one; the addon notices with `PlaySoundFile`. One bit, no payload.          |
+| Font bank         | companion → addon | 256 pre-installed fonts. The companion writes bytes into the glyph widths; the addon sets a font and measures them. 490 bytes per font, no code.      |
 | Screenshot        | addon → companion | The addon paints a block of cells into a corner for a moment and calls `Screenshot()`; the companion decodes the picture. 256 B to 24 KB per picture. |
 
 Doorbells and slots are the downlink that [wow-ai](https://github.com/chelinho139/wow-ai) and
