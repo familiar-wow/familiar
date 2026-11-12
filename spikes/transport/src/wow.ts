@@ -54,6 +54,11 @@ export function wowPaths(client: string): WowPaths {
 	};
 }
 
+/** The client creates this folder with its first screenshot, so look it up every time. */
+export function screenshotsDir(paths: WowPaths): string {
+	return entry(paths.client, "Screenshots");
+}
+
 export function isClientFolder(dir: string): boolean {
 	return ["Wow.exe", "WTF", "Interface"].some((name) =>
 		existsSync(entry(dir, name)),

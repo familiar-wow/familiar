@@ -1,6 +1,6 @@
 -- Entry point: sessions, events, OnUpdate driver and the /fspike command.
 local addonName, ns = ...
-local Probe = ns.Probe
+local Probe, Font, Shot = ns.Probe, ns.Font, ns.Shot
 
 function ns.Say(text)
 	print("|cff8fd1ffFamiliar Spike:|r " .. text)
@@ -33,9 +33,13 @@ local function newSession(isReload)
 		interface = interface,
 		bells = {},
 		soak = {},
+		shots = {},
 		events = {},
 		errors = {},
 	}
+	-- 1 when this is the first session of a client process: the font bank starts over.
+	session.fontRestart = Font.Begin(db) and 1 or 0
+	session.fontProcess, session.fontFirst = db.fontProcess, db.fontNext
 	db.sessions[#db.sessions + 1] = session
 	while #db.sessions > 12 do
 		table.remove(db.sessions, 1)
@@ -62,6 +66,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		db.nextSignal = db.nextSignal or 1
 		if db.soak == nil then
 			db.soak = true
+		end
+		-- A screenshot run that did not finish leaves the player's format behind.
+		if db.shotFormat and Shot.SetFormat(db.shotFormat) then
+			db.shotFormat = nil
 		end
 		ns.db = db
 	elseif event == "PLAYER_ENTERING_WORLD" then
@@ -94,15 +102,17 @@ end)
 SLASH_FAMILIARSPIKE1 = "/fspike"
 SlashCmdList.FAMILIARSPIKE = function(input)
 	local command = (input or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-	if command == "bench" then
+	if command == "bench" or command == "shots" then
 		if not ns.session or not ns.session.selftest then
 			ns.Say("Not ready yet; the self-test is still running.")
 		elseif InCombatLockdown() then
 			ns.Say("Leave combat first.")
-		elseif Probe.benchRunning then
-			ns.Say("The benchmark is already running.")
-		else
+		elseif Probe.benchRunning or Probe.shotsRunning then
+			ns.Say("A test is already running.")
+		elseif command == "bench" then
 			Probe.Spawn("bench", Probe.Bench)
+		else
+			Probe.Spawn("shots", Probe.Shots)
 		end
 	elseif command == "soak on" or command == "soak off" then
 		ns.db.soak = command == "soak on"

@@ -10,7 +10,13 @@
 --   reload                       /reload: save, then start a fresh UI
 --   logout                       fire PLAYER_LOGOUT and write SavedVariables
 --   login <character>            log out, then log in another character in the same process
--- Chat output is written as lines starting with "chat ".
+--   screenshot                   the player presses Print Screen
+-- Chat output is written as lines starting with "chat ". A screenshot is rendered as an
+-- uncompressed TGA and announced as "shot <tga> <final path> <format>"; the runner encodes it
+-- the way the client would.
+--
+-- Fonts are read from the real files, once per process like the real client, and are usable
+-- two frames after SetFont. The screen is 1280 x 720 with a UI scale of 0.9.
 --
 -- AddOns.txt behaves as measured on build 70888 (FAM-15): a character's file holds rows only
 -- for the addons set for that character, and the client keeps one enable state for the whole
@@ -56,8 +62,13 @@ local sounds = {} -- length in ms of every file that played, cached per process 
 local absent = {} -- emptyplays: a file that was missing stays missing
 local playing = {} -- sound handle -> end time in ms
 local wallMs, preciseMs, lastPreciseMs = os.time() * 1000, 0, nil
+local processStart = wallMs
 local listShown, inCombat = false, false
 local soundHandle = 0
+local fonts = {} -- parsed font files, read once per process
+local cvars = { screenshotFormat = "jpeg", screenshotQuality = "3" }
+local frameCount, shotRequested, shotPending = 0, false, false
+local SCREEN_W, SCREEN_H, UI_SCALE = 1280, 720, 0.9
 
 local function readFile(path)
 	local f = io.open(path, "rb")
@@ -194,6 +205,245 @@ end
 -- One UI session ----------------------------------------------------------------
 local env, frames, loaded
 
+-- Fonts -------------------------------------------------------------------------
+local function u16(data, at)
+	return data:byte(at + 1) * 256 + data:byte(at + 2)
+end
+
+-- Advance widths and a format 4 cmap with idDelta mappings: what the spike's fonts use.
+local function parseFont(data)
+	local tables = {}
+	for i = 0, u16(data, 4) - 1 do
+		local at = 12 + 16 * i
+		tables[data:sub(at + 1, at + 4)] = u16(data, at + 8) * 65536 + u16(data, at + 10)
+	end
+	local font = { upem = u16(data, tables.head + 18), advance = {}, segments = {} }
+	for gid = 0, u16(data, tables.hhea + 34) - 1 do
+		font.advance[gid] = u16(data, tables.hmtx + 4 * gid)
+	end
+	local cmap = tables.cmap
+	local sub = cmap + u16(data, cmap + 8) * 65536 + u16(data, cmap + 10)
+	local count = u16(data, sub + 6) / 2
+	for k = 0, count - 1 do
+		font.segments[#font.segments + 1] = {
+			last = u16(data, sub + 14 + 2 * k),
+			first = u16(data, sub + 16 + 2 * count + 2 * k),
+			delta = u16(data, sub + 16 + 4 * count + 2 * k),
+		}
+	end
+	return font
+end
+
+local function codes(text)
+	local list, i = {}, 1
+	while i <= #text do
+		local c = text:byte(i)
+		if c < 0x80 then
+			list[#list + 1], i = c, i + 1
+		elseif c < 0xE0 then
+			list[#list + 1], i = (c - 0xC0) * 64 + text:byte(i + 1) - 0x80, i + 2
+		else
+			list[#list + 1], i = ((c - 0xE0) * 64 + text:byte(i + 1) - 0x80) * 64 + text:byte(i + 2) - 0x80, i + 3
+		end
+	end
+	return list
+end
+
+local function glyphWidth(font, code)
+	for _, s in ipairs(font.segments) do
+		if code >= s.first and code <= s.last then
+			return font.advance[(code + s.delta) % 65536] or 0
+		end
+	end
+	return font.advance[0]
+end
+
+local fontMethods = {}
+fontMethods.__index = fontMethods
+for _, name in ipairs({ "SetPoint", "SetAlpha", "SetWordWrap", "SetNonSpaceWrap" }) do
+	fontMethods[name] = function() end
+end
+function fontMethods:SetFontObject(object)
+	self.path, self.size, self.font = object.path, object.size, nil
+end
+function fontMethods:SetFont(path, size, flags)
+	local file = client .. "/" .. path:gsub("\\", "/")
+	if not fonts[file] then
+		local data = readFile(file)
+		if not data then
+			return false
+		end
+		fonts[file] = parseFont(data)
+		fonts[file].ready = frameCount + 2
+	end
+	self.path, self.size, self.flags, self.font = path, size, flags, fonts[file]
+	return true
+end
+function fontMethods:GetFont()
+	return self.path, self.size, self.flags
+end
+function fontMethods:SetText(text)
+	self.text = tostring(text or "")
+end
+function fontMethods:GetStringWidth()
+	local list, font = codes(self.text or ""), self.font
+	if not font or frameCount < font.ready then
+		return #list * self.size * 0.55 -- the standard font
+	end
+	local width = 0
+	for _, code in ipairs(list) do
+		width = width + glyphWidth(font, code) * self.size / font.upem
+	end
+	return width
+end
+
+-- Frames and textures -------------------------------------------------------------
+local textureMethods = {}
+textureMethods.__index = textureMethods
+for _, name in ipairs({ "SetSnapToPixelGrid", "SetTexelSnappingBias" }) do
+	textureMethods[name] = function() end
+end
+function textureMethods:SetPoint(_, _, _, x, y)
+	self.x, self.y = x or 0, y or 0
+end
+function textureMethods:SetSize(w, h)
+	self.w, self.h = w, h
+end
+function textureMethods:SetColorTexture(r, g, b)
+	local function byte(v)
+		return math.floor(v * 255 + 0.5)
+	end
+	self.pixel = string.char(byte(b), byte(g), byte(r))
+end
+
+local frameMethods = {}
+frameMethods.__index = frameMethods
+for _, name in ipairs({ "SetFrameStrata", "SetAlpha" }) do
+	frameMethods[name] = function() end
+end
+function frameMethods:RegisterEvent(event)
+	self.events[event] = true
+end
+function frameMethods:UnregisterEvent(event)
+	self.events[event] = nil
+end
+function frameMethods:SetScript(script, handler)
+	self.scripts[script] = handler
+end
+function frameMethods:Show()
+	self.shown = true
+end
+function frameMethods:Hide()
+	self.shown = false
+end
+function frameMethods:SetIgnoreParentScale(on)
+	self.ignoreParentScale = on
+end
+function frameMethods:SetScale(scale)
+	self.scale = scale
+end
+function frameMethods:GetEffectiveScale()
+	local parent = self.parent and not self.ignoreParentScale and self.parent:GetEffectiveScale() or 1
+	return parent * self.scale
+end
+-- Only TOPLEFT to the parent's TOPLEFT, which is all the spike uses.
+function frameMethods:SetPoint(_, _, _, x, y)
+	self.x, self.y = x or 0, y or 0
+end
+function frameMethods:SetSize(w, h)
+	self.w, self.h = w, h
+end
+function frameMethods:CreateTexture()
+	local texture = setmetatable({ x = 0, y = 0, w = 0, h = 0 }, textureMethods)
+	self.textures[#self.textures + 1] = texture
+	return texture
+end
+function frameMethods:CreateFontString()
+	return setmetatable({ size = 12, text = "" }, fontMethods)
+end
+
+local function newFrame(parent, scale)
+	return setmetatable({
+		events = {},
+		scripts = {},
+		textures = {},
+		parent = parent,
+		scale = scale or 1,
+		shown = true,
+		x = 0,
+		y = 0,
+	}, frameMethods)
+end
+
+-- Screenshots ---------------------------------------------------------------------
+local BACKGROUND = string.char(60, 120, 90)
+
+-- Renders the shown textures; the block is a grid, so rows come in bands.
+local function render()
+	local bands, keys = {}, {}
+	for _, frame in ipairs(frames) do
+		if frame.shown and #frame.textures > 0 then
+			local k = frame:GetEffectiveScale() * SCREEN_H / 768
+			for _, t in ipairs(frame.textures) do
+				if t.pixel then
+					local x1 = math.floor((frame.x + t.x) * k + 0.5)
+					local x2 = math.floor((frame.x + t.x + t.w) * k + 0.5)
+					local y1 = math.floor(-(frame.y + t.y) * k + 0.5)
+					local y2 = math.floor((t.h - frame.y - t.y) * k + 0.5)
+					local key = y1 * 65536 + y2
+					if not bands[key] then
+						bands[key], keys[#keys + 1] = { y1 = y1, y2 = y2 }, key
+					end
+					local band = bands[key]
+					band[#band + 1] = { x1, x2, t.pixel }
+				end
+			end
+		end
+	end
+	local rowAt = {}
+	for _, key in ipairs(keys) do
+		local band = bands[key]
+		table.sort(band, function(a, b)
+			return a[1] < b[1]
+		end)
+		local parts, x = {}, 0
+		for _, r in ipairs(band) do
+			local x1, x2 = math.max(r[1], x), math.min(r[2], SCREEN_W)
+			if x1 > x then
+				parts[#parts + 1] = BACKGROUND:rep(x1 - x)
+			end
+			if x2 > x1 then
+				parts[#parts + 1] = r[3]:rep(x2 - x1)
+				x = x2
+			end
+		end
+		parts[#parts + 1] = BACKGROUND:rep(SCREEN_W - x)
+		local row = table.concat(parts)
+		for y = math.max(0, band.y1), math.min(band.y2, SCREEN_H) - 1 do
+			rowAt[y] = row
+		end
+	end
+	local plain = BACKGROUND:rep(SCREEN_W)
+	local out = {
+		string.char(0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+		string.char(SCREEN_W % 256, math.floor(SCREEN_W / 256), SCREEN_H % 256, math.floor(SCREEN_H / 256), 24, 0x20),
+	}
+	for y = 0, SCREEN_H - 1 do
+		out[#out + 1] = rowAt[y] or plain
+	end
+	return table.concat(out)
+end
+
+local EXTENSIONS = { jpeg = "jpg", png = "png", tga = "tga" }
+
+local function takeScreenshot()
+	local format = cvars.screenshotFormat
+	local name = "WoWScrnShot_" .. os.date("%m%d%y_%H%M%S", math.floor(wallMs / 1000))
+	local tga = client .. "/.shot-" .. name .. ".tga"
+	writeFile(tga, render())
+	io.write("shot ", tga, " ", client, "/Screenshots/", name, ".", EXTENSIONS[format] or "jpg", " ", format, "\n")
+end
+
 local function say(...)
 	local parts = {}
 	for i = 1, select("#", ...) do
@@ -302,16 +552,35 @@ local function newEnvironment()
 			return ends ~= nil and preciseMs < ends
 		end,
 	}
-	env.CreateFrame = function()
-		local frame = { events = {}, scripts = {} }
-		function frame:RegisterEvent(event)
-			self.events[event] = true
-		end
-		function frame:SetScript(script, handler)
-			self.scripts[script] = handler
-		end
+	env.UIParent = newFrame(nil, UI_SCALE)
+	env.CreateFrame = function(_, _, parent)
+		local frame = newFrame(parent or env.UIParent)
 		frames[#frames + 1] = frame
 		return frame
+	end
+	env.GameFontNormal = { path = "Fonts\\FRIZQT__.TTF", size = 12 }
+	env.GetPhysicalScreenSize = function()
+		return SCREEN_W, SCREEN_H
+	end
+	env.GetSessionTime = function()
+		return math.floor((wallMs - processStart) / 1000)
+	end
+	env.C_CVar = {
+		GetCVar = function(name)
+			return cvars[name]
+		end,
+		SetCVar = function(name, value)
+			cvars[name] = tostring(value)
+			return true
+		end,
+	}
+	env.Screenshot = function()
+		shotRequested = true
+	end
+	-- Blizzard's "Screen captured" message.
+	env.ActionStatus = env.CreateFrame("Frame")
+	for _, event in ipairs({ "SCREENSHOT_STARTED", "SCREENSHOT_SUCCEEDED", "SCREENSHOT_FAILED" }) do
+		env.ActionStatus:RegisterEvent(event)
 	end
 	-- The client takes an addon's name or its index, like the real API (uiAddon).
 	local function addon(nameOrIndex)
@@ -410,12 +679,27 @@ local commands = {
 		wallMs, preciseMs = tonumber(wall), tonumber(precise)
 		local elapsed = lastPreciseMs and (preciseMs - lastPreciseMs) / 1000 or 0.016
 		lastPreciseMs = preciseMs
+		frameCount = frameCount + 1
+		-- The picture of the previous frame is on disk now.
+		if shotPending then
+			shotPending = false
+			fire("SCREENSHOT_SUCCEEDED")
+		end
 		for _, frame in ipairs(frames) do
 			local handler = frame.scripts.OnUpdate
 			if handler then
 				handler(frame, elapsed)
 			end
 		end
+		-- The client captures the frame it has just drawn.
+		if shotRequested then
+			shotRequested, shotPending = false, true
+			fire("SCREENSHOT_STARTED")
+			takeScreenshot()
+		end
+	end,
+	screenshot = function()
+		shotRequested = true
 	end,
 	slash = function(...)
 		slash(table.concat({ ... }, " "))

@@ -4,16 +4,23 @@
 //   lane D    rewrites lane D every 2 s with a counter and the time
 //   slots     keeps every slot's data.lua fresh
 //   doorbells raises the next sig\NNNN.wav every 30 s, starting a minute after WoW starts
+//   fonts     rewrites the font bank one file at a time, round-robin
+//   shots     reads new screenshots; ours are decoded, kept as a crop and removed
 // It also logs every other file the client writes under WTF, which shows when it saves what.
 import {
 	type FSWatcher,
+	mkdirSync,
 	readdirSync,
 	readFileSync,
+	rmSync,
 	statSync,
 	watch,
+	writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { atomicWrite } from "./files.ts";
+import { FONTS, fontFile, fontName, fontPacket } from "./font.ts";
+import { encodePng, type Raster, readImage } from "./image.ts";
 import { resetVolatile } from "./install.ts";
 import type { EventLog } from "./log.ts";
 import {
@@ -38,14 +45,20 @@ import {
 	parseSavedVariables,
 	table,
 } from "./savedvars.ts";
+import { FORMATS, readShot, type ShotRead } from "./shot.ts";
 import {
 	accountNames,
 	addonsFiles,
 	clientProcesses,
 	mtimeOf,
 	savedVariablesFile,
+	screenshotsDir,
 	type WowPaths,
 } from "./wow.ts";
+
+const SHOT_FILE = /^WoWScrnShot_.*\.(jpe?g|png|tga)$/i;
+/** Image rows to decode: the block is 34 cells of up to 6 pixels. */
+const SHOT_ROWS = 240;
 
 interface Watched {
 	file: string;
@@ -68,6 +81,9 @@ export interface Timing {
 	bellStartMs: number;
 	bellEveryMs: number;
 	wtfMs: number;
+	/** One font file per tick: 2 per second refresh the bank of 256 every 128 s. */
+	fontMs: number;
+	shotMs: number;
 }
 
 export const TIMING: Timing = {
@@ -78,6 +94,8 @@ export const TIMING: Timing = {
 	bellStartMs: 60_000,
 	bellEveryMs: 30_000,
 	wtfMs: 2000,
+	fontMs: 500,
+	shotMs: 250,
 };
 
 /** For the simulator, which plays for seconds instead of hours. */
@@ -89,11 +107,15 @@ export const FAST_TIMING: Timing = {
 	bellStartMs: 3000,
 	bellEveryMs: 3000,
 	wtfMs: 1000,
+	fontMs: 100,
+	shotMs: 250,
 };
 
 export interface CompanionOptions {
 	paths: WowPaths;
 	log: EventLog;
+	/** Where crops of our screenshots go, in a "shots" folder. */
+	dataDir?: string;
 	processes?: () => Promise<number[]>;
 	onSaved?: () => void;
 	pollMs?: number;
@@ -138,9 +160,21 @@ export class Companion {
 	private pids: number[] = [];
 	private gameStartedAt?: number;
 	private nextBell = 1;
-	private readonly laneDEpoch = 1 + Math.floor(Math.random() * 255);
+	/** Marks this companion run in lane D frames and font packets. */
+	private readonly runEpoch = 1 + Math.floor(Math.random() * 255);
 	private laneDCounter = 0;
 	private slotRefresh = 0;
+	private nextFont = 1;
+	private fontCounter = 0;
+	private fontWrites: number[][] = [];
+	private fontFailures: (number | string)[][] = [];
+	private readonly shotsDone = new Set<string>();
+	private readonly shotTries = new Map<string, number>();
+	/** "size:mtime" of each new picture at the last poll: read it once it stops changing. */
+	private readonly shotStat = new Map<string, string>();
+	/** Our pictures that could not be removed yet (locked by the client or a virus scanner). */
+	private readonly shotRemove = new Map<string, number>();
+	private shotBusy = false;
 	private intervals: number[] = [];
 	private lastPoll = 0;
 	private errors = 0;
@@ -151,6 +185,8 @@ export class Companion {
 		laneD: 0,
 		slots: 0,
 		bells: 0,
+		fonts: 0,
+		shots: 0,
 		wtf: 0,
 	};
 
@@ -191,7 +227,12 @@ export class Companion {
 			this.refreshSlots();
 			this.ringBells();
 		});
-		this.every(10_000, () => this.reportPolling());
+		this.every(this.timing.fontMs, () => this.writeFont());
+		this.every(this.timing.shotMs, () => void this.checkShots());
+		this.every(10_000, () => {
+			this.reportPolling();
+			this.flushFonts();
+		});
 		this.every(1000, () => this.log.flush());
 		try {
 			this.watcher = watch(
@@ -218,12 +259,13 @@ export class Companion {
 		this.running = false;
 		for (const timer of this.timers) clearInterval(timer);
 		this.watcher?.close();
+		this.flushFonts();
 		this.log.flush();
 	}
 
 	status(): string {
 		const c = this.counts;
-		return `${c.sessions} sessions; uplink: client wrote AddOns.txt ${c.clientWrites}×, ${c.frames} frames; lane D ${c.laneD} writes; slots ${c.slots} refreshes; doorbells ${c.bells} raised; ${c.wtf} other client file changes`;
+		return `${c.sessions} sessions; uplink: client wrote AddOns.txt ${c.clientWrites}×, ${c.frames} frames; lane D ${c.laneD} writes; slots ${c.slots} refreshes; doorbells ${c.bells} raised; fonts ${c.fonts} written; screenshots ${c.shots} read; ${c.wtf} other client file changes`;
 	}
 
 	private every(ms: number, fn: () => void): void {
@@ -432,7 +474,7 @@ export class Companion {
 		if (!this.gameRunning) return;
 		const at = Date.now();
 		const counter = ++this.laneDCounter;
-		const frame = laneDFrame(this.laneDEpoch, counter, at);
+		const frame = laneDFrame(this.runEpoch, counter, at);
 		const targets = this.active ? [this.active] : [...this.watched.values()];
 		let written = 0;
 		let busy = 0;
@@ -546,6 +588,174 @@ export class Companion {
 		return n;
 	}
 
+	// Fonts -----------------------------------------------------------------------
+
+	/**
+	 * Rewrites the next font of the bank, round-robin, so every font the client has not loaded
+	 * yet holds recent data. A font the client has loaded keeps what it read first.
+	 */
+	private writeFont(): void {
+		if (!this.gameRunning) return;
+		const slot = this.nextFont;
+		this.nextFont = (slot % FONTS) + 1;
+		const counter = ++this.fontCounter;
+		const wallMs = Date.now();
+		try {
+			atomicWrite(
+				join(
+					this.options.paths.addons,
+					"FamiliarSpike",
+					"fonts",
+					fontName(slot),
+				),
+				fontFile(
+					fontPacket({ epoch: this.runEpoch, slot, counter, wallMs }),
+					slot,
+				),
+			);
+			this.fontWrites.push([slot, counter, wallMs]);
+			this.counts.fonts++;
+		} catch (error) {
+			// On Windows a font the client holds open cannot be replaced: a finding, not a fault.
+			this.fontFailures.push([
+				slot,
+				(error as NodeJS.ErrnoException).code ?? String(error),
+			]);
+		}
+	}
+
+	/** Font writes are logged in batches; the report needs every one to judge freshness. */
+	private flushFonts(): void {
+		if (this.fontWrites.length === 0 && this.fontFailures.length === 0) return;
+		this.log.add("fonts", {
+			epoch: this.runEpoch,
+			writes: this.fontWrites,
+			failed: this.fontFailures,
+		});
+		this.fontWrites = [];
+		this.fontFailures = [];
+	}
+
+	// Screenshots -----------------------------------------------------------------
+
+	private async checkShots(): Promise<void> {
+		if (this.shotBusy) return;
+		this.shotBusy = true;
+		try {
+			for (const [file, tries] of this.shotRemove) {
+				try {
+					rmSync(file, { force: true });
+					this.shotRemove.delete(file);
+				} catch (error) {
+					this.shotRemove.set(file, tries + 1);
+					if (tries + 1 === 40) {
+						this.shotRemove.delete(file);
+						this.error("screenshot", error, { file });
+					}
+				}
+			}
+			const dir = screenshotsDir(this.options.paths);
+			let names: string[];
+			try {
+				names = readdirSync(dir);
+			} catch {
+				return; // No screenshot taken yet.
+			}
+			for (const name of names) {
+				const kind = SHOT_FILE.exec(name)?.[1];
+				if (kind && !this.shotsDone.has(name))
+					await this.readShotFile(join(dir, name), name, kind);
+			}
+		} finally {
+			this.shotBusy = false;
+		}
+	}
+
+	/**
+	 * A screenshot with our block is ours: logged, kept as a crop, removed. Any other picture
+	 * is the player's and stays untouched.
+	 */
+	private async readShotFile(
+		file: string,
+		name: string,
+		kind: string,
+	): Promise<void> {
+		let stat: ReturnType<typeof statSync>;
+		try {
+			stat = statSync(file);
+		} catch {
+			return;
+		}
+		if (stat.mtimeMs < this.startedAt) {
+			this.shotsDone.add(name);
+			return;
+		}
+		// The client may still be writing it.
+		const now = `${stat.size}:${stat.mtimeMs}`;
+		if (this.shotStat.get(name) !== now) {
+			this.shotStat.set(name, now);
+			return;
+		}
+		const seen = Date.now();
+		const started = performance.now();
+		let image: Raster | undefined;
+		let read: ShotRead | undefined;
+		let problem: string | undefined;
+		try {
+			image = await readImage(readFileSync(file), kind, SHOT_ROWS);
+			read = readShot(image);
+		} catch (error) {
+			problem = String(error);
+		}
+		// A file that is still being written reads as broken: give it a few more polls.
+		const tries = (this.shotTries.get(name) ?? 0) + 1;
+		if (!read?.found && tries < 4 && seen - stat.mtimeMs < 3000) {
+			this.shotTries.set(name, tries);
+			return;
+		}
+		this.shotTries.delete(name);
+		this.shotStat.delete(name);
+		this.shotsDone.add(name);
+		this.counts.shots++;
+		const frame = read?.frame;
+		this.log.add("shot", {
+			file: name,
+			size: stat.size,
+			mtime: stat.mtimeMs,
+			seen,
+			decodeMs: performance.now() - started,
+			width: image?.width,
+			height: image?.height,
+			found: read?.found ?? false,
+			ok: read?.ok ?? false,
+			variant: read?.variant,
+			epoch: frame?.epoch,
+			seq: frame?.seq,
+			format: frame ? FORMATS[frame.format] : undefined,
+			drawn: frame?.wallMs,
+			bitErrors: read?.bitErrors,
+			bits: read?.bits,
+			black: read?.black,
+			white: read?.white,
+			pitch: read?.grid?.pitchX,
+			problem,
+		});
+		if (!read?.found || !image) return;
+		try {
+			if (this.options.dataDir) {
+				const dir = join(this.options.dataDir, "shots");
+				mkdirSync(dir, { recursive: true });
+				writeFileSync(
+					join(dir, `${name.replace(/\.\w+$/, "")}.png`),
+					encodePng(image, 1100, SHOT_ROWS),
+				);
+			}
+		} catch (error) {
+			this.error("screenshot crop", error, { file: name });
+		}
+		this.shotRemove.set(file, 0);
+	}
+
 	// Client files ----------------------------------------------------------------
 
 	/** Logs every file under WTF the client adds, changes or removes, except AddOns.txt. */
@@ -624,6 +834,8 @@ export class Companion {
 
 	private reset(): { signals: number; slots: number } {
 		this.nextBell = 1;
+		// A new client process reads the bank from the start again.
+		this.nextFont = 1;
 		this.slotWritten.clear();
 		this.active = undefined;
 		return resetVolatile(this.options.paths);

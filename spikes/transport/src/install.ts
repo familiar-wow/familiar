@@ -1,4 +1,4 @@
-// Installs and removes the spike addon, its lane helpers, slots and signal files.
+// Installs and removes the spike addon, its lane helpers, slots, signal files and fonts.
 import {
 	existsSync,
 	mkdirSync,
@@ -11,6 +11,7 @@ import {
 import { join } from "node:path";
 import { ADDON_FILES } from "./assets.ts";
 import { atomicWrite } from "./files.ts";
+import { FONTS, fontName, placeholderFont } from "./font.ts";
 import {
 	LANE_BITS,
 	type Lane,
@@ -48,9 +49,7 @@ function mainToc(iface: number): string {
 		"## SavedVariables: FamiliarSpikeDB",
 		MARKER,
 		"",
-		"Wire.lua",
-		"Probe.lua",
-		"Spike.lua",
+		...Object.keys(ADDON_FILES),
 	]);
 }
 
@@ -158,6 +157,12 @@ export function install(paths: WowPaths, iface: number): InstallResult {
 	if (existsSync(missing)) {
 		rmSync(missing);
 		result.updated++;
+	}
+	// The client finds only fonts that exist when it starts; the companion fills them later.
+	mkdirSync(join(main, "fonts"), { recursive: true });
+	for (let slot = 1; slot <= FONTS; slot++) {
+		const file = join(main, "fonts", fontName(slot));
+		if (!existsSync(file)) write(file, placeholderFont(slot));
 	}
 
 	for (const lane of ["U", "D"] as Lane[])

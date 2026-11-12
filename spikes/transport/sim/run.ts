@@ -1,14 +1,16 @@
 // End-to-end run without the game: the real addon (in sim/wow.lua) talks to the real companion
 // through real files. Needs Lua 5.1 with the bit library, or LuaJIT (set LUA=/path/to/lua).
 //
-// Every run logs in, benchmarks, reloads, then switches to a second character and back; the
-// client keeps addon states across the switch the way build 70888 does (see sim/wow.lua).
+// Every run logs in, benchmarks, takes a screenshot of its own, reloads, switches to a second
+// character and back, then restarts the client; the client keeps addon states across the
+// switch the way build 70888 does (see sim/wow.lua). Screenshots are encoded as JPEG at
+// quality 50 or as PNG, standing in for the client's encoder.
 //
 //   bun sim/run.ts               an older client: an empty .wav does not play
 //   bun sim/run.ts --emptyplays  build 70888 as Sven saw it: an empty .wav "plays", a missing
 //                                one stays missing; doorbells must switch to the sound length
 //   bun sim/run.ts --noreset     ResetAddOns keeps memory; lane D must fail, the rest not
-//   bun sim/run.ts --binary dist/familiar-spike-0.3.1-linux-x64/familiar-spike
+//   bun sim/run.ts --binary dist/familiar-spike-0.4.0-linux-x64/familiar-spike
 //                                the built Linux program instead of the source. The game is a
 //                                copy of Lua named Wow.exe, which is how Wine processes look.
 import {
@@ -19,17 +21,19 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Companion, FAST_TIMING } from "../src/companion.ts";
+import { decodeTga, encodePng } from "../src/image.ts";
 import { install } from "../src/install.ts";
 import { EventLog } from "../src/log.ts";
 import { buildReport } from "../src/report.ts";
-import { savedVariablesFile, wowPaths } from "../src/wow.ts";
+import { savedVariablesFile, screenshotsDir, wowPaths } from "../src/wow.ts";
 
 const { values: options } = parseArgs({
 	args: Bun.argv.slice(2),
@@ -118,11 +122,29 @@ async function waitFor(
 	return true;
 }
 
+/** Encodes a rendered screenshot the way the client would and puts it in place at once. */
+async function develop(announced: string): Promise<void> {
+	const [tga = "", target = "", format = ""] = announced.split(" ");
+	const raw = readFileSync(tga);
+	const png = encodePng(decodeTga(raw));
+	const data =
+		format === "png"
+			? png
+			: format === "tga"
+				? raw
+				: await new Bun.Image(png).jpeg({ quality: 50 }).bytes();
+	mkdirSync(dirname(target), { recursive: true });
+	writeFileSync(`${target}.part`, data);
+	renameSync(`${target}.part`, target);
+	rmSync(tga);
+}
+
 // Client side ---------------------------------------------------------------------
 class Client {
 	private readonly proc;
 	private buffer = "";
 	private lines: string[] = [];
+	private shots: string[] = [];
 	private waiting?: () => void;
 	readonly chat: string[] = [];
 	private readonly decoder = new TextDecoder();
@@ -157,7 +179,8 @@ class Client {
 				if (line.startsWith("chat ")) {
 					this.chat.push(line.slice(5));
 					console.log(`  [game] ${line.slice(5)}`);
-				} else this.lines.push(line);
+				} else if (line.startsWith("shot ")) this.shots.push(line.slice(5));
+				else this.lines.push(line);
 				at = this.buffer.indexOf("\n");
 			}
 			this.waiting?.();
@@ -187,6 +210,7 @@ class Client {
 		this.proc.stdin.write(`${command}\n`);
 		this.proc.stdin.flush();
 		await this.reply();
+		for (const shot of this.shots.splice(0)) await develop(shot);
 	}
 
 	/** Renders frames at about 60 fps until `until` returns true. */
@@ -225,11 +249,14 @@ console.log(
 );
 
 let client: Client;
+/** Quits the client and starts it again: a new process with empty caches. */
+let restart: () => Promise<void>;
 let finish: () => Promise<string>;
 
 if (binary) {
 	const output: string[] = [];
-	const said = (text: string) => output.some((line) => line.includes(text));
+	const times = (text: string) =>
+		output.filter((line) => line.includes(text)).length;
 	const program = Bun.spawn(
 		[binary, "--wow", paths.client, "--data", dataDir],
 		{
@@ -241,7 +268,7 @@ if (binary) {
 	);
 	void collect(program.stdout, output, "  [companion] ");
 	expect(
-		await waitFor(() => said("Ctrl+C stops"), 30),
+		await waitFor(() => times("Ctrl+C stops") > 0, 30),
 		"program installs the addon and starts",
 	);
 	const exe = join(root, "Wow.exe");
@@ -250,9 +277,21 @@ if (binary) {
 	client = new Client(exe);
 	await client.ready();
 	expect(
-		await waitFor(() => said("WoW started"), 10),
+		await waitFor(() => times("WoW started") >= 1, 10),
 		"program finds the game process",
 	);
+	restart = async () => {
+		expect(
+			await waitFor(() => times("WoW closed") >= 1, 10),
+			"program notices the game closing",
+		);
+		client = new Client(exe);
+		await client.ready();
+		expect(
+			await waitFor(() => times("WoW started") >= 2, 10),
+			"program finds the restarted game",
+		);
+	};
 	finish = async () => {
 		const saved = join(dataDir, `savedvariables-${ACCOUNT}.lua`);
 		expect(
@@ -260,8 +299,8 @@ if (binary) {
 			"program picked up SavedVariables",
 		);
 		expect(
-			await waitFor(() => said("WoW closed"), 10),
-			"program notices the game closing",
+			await waitFor(() => times("WoW closed") >= 2, 10),
+			"program notices the game closing again",
 		);
 		program.kill("SIGINT");
 		expect((await program.exited) === 0, "Ctrl+C ends the program cleanly");
@@ -274,6 +313,7 @@ if (binary) {
 	const companion = new Companion({
 		paths,
 		log: new EventLog(join(dataDir, "companion-sim.jsonl")),
+		dataDir,
 		processes: async () => pids,
 		onSaved: () => saved++,
 		timing: FAST_TIMING,
@@ -283,6 +323,14 @@ if (binary) {
 	client = new Client(lua);
 	await client.ready();
 	await companion.checkGame();
+	restart = async () => {
+		pids = [];
+		await companion.checkGame();
+		pids = [4243];
+		client = new Client(lua);
+		await client.ready();
+		await companion.checkGame();
+	};
 	finish = async () => {
 		// The old file at start, then the writes at /reload and at logout.
 		expect(
@@ -321,7 +369,15 @@ expect(
 	await client.play(180, () => client.said("Benchmark done")),
 	"benchmark finishes",
 );
+expect(client.said("Fonts done: 4 of 4 decoded."), "benchmark reads 4 fonts");
+expect(
+	client.said("Screenshot test done: 6 pictures."),
+	"benchmark takes 6 screenshots",
+);
 
+console.log("The player takes a screenshot: it must stay where it is");
+await client.send("screenshot");
+await client.play(2);
 console.log("Soak: open the addon list, fight, reload, play on");
 await client.send("list open");
 await client.play(2);
@@ -348,6 +404,17 @@ for (const who of [SECOND, CHARACTER]) {
 	);
 	await client.play(15);
 }
+console.log(
+	"Restart the client: a new process reads the font bank from the start",
+);
+await client.send("logout");
+await client.close();
+await restart();
+expect(
+	await client.play(15, () => client.said("Self-test:")),
+	"the restarted client logs in",
+);
+await client.play(8);
 await client.send("logout");
 await client.close();
 
@@ -366,6 +433,27 @@ expect(
 );
 expect(pending("load-on-demand slot", "6/6 fresh"), "slots: all fresh");
 expect(pending("Doorbell:", "raise → heard"), "doorbells heard");
+expect(
+	pending("Downlink: font bank", "4/4 decoded and current"),
+	"fonts: benchmark passes, soak pending",
+);
+expect(
+	report.includes("First font after a client restart: current"),
+	"fonts: a new process reads the bank from the start",
+);
+expect(
+	verdict("Uplink: screenshot").startsWith("| ✔") &&
+		verdict("Uplink: screenshot").includes("png: C 1/1, E 1/1"),
+	"screenshots: every variant decodes",
+);
+const pictures = readdirSync(screenshotsDir(paths)).filter((name) =>
+	name.startsWith("WoWScrnShot_"),
+);
+expect(
+	pictures.length === 1 &&
+		report.includes("1 screenshot without the block was left alone"),
+	"screenshots: ours are removed, the player's stays",
+);
 if (options.noreset) {
 	expect(
 		verdict("lane D (ResetAddOns)").startsWith("| ✘") &&
@@ -381,7 +469,7 @@ if (options.noreset) {
 	expect(report.includes("No failures."), "soak has no failures");
 }
 expect(
-	report.includes("4 addon session(s)") && !report.includes("from 0.2.0"),
+	report.includes("5 addon session(s)") && !report.includes("from 0.2.0"),
 	"results of 0.2.0 are dropped",
 );
 expect(!report.includes("## Addon errors"), "no addon errors");

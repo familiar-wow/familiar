@@ -157,6 +157,7 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 	const companion = new Companion({
 		paths,
 		log,
+		dataDir,
 		// Set only by the simulator.
 		timing: process.env.FAMILIAR_SPIKE_FAST ? FAST_TIMING : undefined,
 		onSaved: () => {

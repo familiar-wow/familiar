@@ -49,6 +49,10 @@ function Wire.U32(n)
 	return char(n % 256, floor(n / 256) % 256, floor(n / 65536) % 256, floor(n / 16777216) % 256)
 end
 
+function Wire.U48(n)
+	return Wire.U32(n % 4294967296) .. Wire.U16(floor(n / 4294967296))
+end
+
 function Wire.ReadU16(s, i)
 	local a, b = byte(s, i, i + 1)
 	return a + b * 256

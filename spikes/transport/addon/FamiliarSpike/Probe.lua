@@ -6,11 +6,15 @@
 --   lane D    the companion rewrites lane D every 2 s; the addon calls ResetAddOns and reads it
 --   slots     the companion keeps every slot's data.lua fresh; the addon loads one on a timer
 --   doorbells the companion makes sig\NNNN.wav "ring" every 30 s; the addon polls the next one
+--   fonts     the companion rewrites the font bank round-robin; the addon reads one font after
+--             login and one every 2 minutes
+--   shots     the addon takes screenshots in the benchmark or on /fspike shots; the companion
+--             reads the Screenshots folder
 --
 -- Records are compact strings so SavedVariables stay small. The companion's report parses
 -- them; the formats are listed next to the functions that build them.
 local _, ns = ...
-local Wire = ns.Wire
+local Wire, Font, Shot = ns.Wire, ns.Font, ns.Shot
 
 local char, format, floor, max = string.char, string.format, math.floor, math.max
 local concat, sort = table.concat, table.sort
@@ -170,6 +174,9 @@ local function runTasks(now)
 			if not ok then
 				table.remove(tasks, i)
 				ns.Fail(task.name, delay)
+				if Probe.shotsRunning then
+					Probe.EndShots()
+				end
 			elseif coroutine.status(task.co) == "dead" then
 				table.remove(tasks, i)
 			else
@@ -197,6 +204,7 @@ function Probe.Frame(now, elapsedMs)
 	frameNo = frameNo + 1
 	updateClock(now)
 	recordFrame(elapsedMs)
+	Probe.lastFrameMs = elapsedMs
 	Probe.spent = 0
 	local open = Probe.ListOpen()
 	if open ~= listOpen then
@@ -569,6 +577,110 @@ function Probe.Bells()
 	end
 end
 
+-- Fonts -----------------------------------------------------------------------
+local fontBusy, fontsRead = false, 0
+
+-- Reads the next font of the bank. Returns the record and its result, or nil and a reason
+-- when another read is running or the bank is used up for this client process.
+local function fontRound()
+	if fontBusy then
+		return nil, "busy"
+	end
+	local slot = Font.Next(ns.db)
+	if not slot then
+		return nil, "exhausted"
+	end
+	fontBusy = true
+	local r = Font.Read(slot, sleep, Probe.Charge)
+	fontBusy = false
+	fontsRead = fontsRead + 1
+	if r.result == "ok" then
+		noteCompanion("font")
+	end
+	return Font.Format(r), r.result
+end
+
+-- Reads `count` fonts back to back. Format: Font.Format records separated by ";".
+local function fontPhase(count)
+	Probe.phase = "fonts"
+	local rows, ok = {}, 0
+	for _ = 1, count do
+		local record, result = fontRound()
+		if not record then
+			break
+		end
+		rows[#rows + 1] = record
+		ok = ok + (result == "ok" and 1 or 0)
+	end
+	Probe.phase = "idle"
+	ns.Say(format("Fonts done: %d of %d decoded.", ok, #rows))
+	return concat(rows, ";")
+end
+
+-- Screenshots -------------------------------------------------------------------
+local SHOTS = { first = { "A", "B", "C", "D", "A", "B" }, png = { "C", "D", "E", "E" } }
+local SHOTS_FAST = { first = { "A", "B", "C", "D" }, png = { "C", "E" } }
+
+-- One run: screenshots in the player's format, then in PNG if the client lets an addon
+-- switch the format, which is restored right after. Never two in the same second, since the
+-- file names count seconds. Format of run.shots: Shot.Take records separated by ";".
+function Probe.Shots()
+	local session = ns.session
+	local run = { started = Probe.WallMs() }
+	session.shots[#session.shots + 1] = run
+	if type(Screenshot) ~= "function" then
+		run.result = "Screenshot missing"
+		return
+	end
+	Probe.shotsRunning = true
+	local plan = fast() and SHOTS_FAST or SHOTS
+	ns.Say(format("Screenshot test: the top-left corner flashes %d times.", #plan.first + #plan.png))
+	Probe.phase = "shots"
+	run.geometry = Shot.Build(sleep)
+	run.format, run.quality = Shot.CVar("screenshotFormat"), Shot.CVar("screenshotQuality")
+	run.quiet = Shot.Quiet(true) and 1 or 0
+	local rows, second = {}, nil
+	local function series(list, formatName)
+		for _, name in ipairs(list) do
+			while time() == second do
+				sleep(0.05)
+			end
+			session.shotSeq = (session.shotSeq or 0) + 1
+			rows[#rows + 1] = Shot.Take(name, session.epoch, session.shotSeq, formatName, sleep)
+			second = time()
+		end
+	end
+	series(plan.first, run.format)
+	if run.format == "png" then
+		run.png = "already"
+		series(plan.png, "png")
+	elseif run.format then
+		-- Remembered in case the client stops before the format is back.
+		ns.db.shotFormat = run.format
+		if Shot.SetFormat("png") then
+			run.png = "switched"
+			series(plan.png, "png")
+		else
+			run.png = "denied"
+		end
+	end
+	Probe.EndShots()
+	run.restored = ns.db.shotFormat == nil and 1 or 0
+	run.shots, run.finished = concat(rows, ";"), Probe.WallMs()
+	ns.Say(format("Screenshot test done: %d pictures.", #rows))
+end
+
+-- Also runs when a screenshot run fails halfway: block off, message back, format back.
+function Probe.EndShots()
+	Shot.Hide()
+	Shot.Quiet(false)
+	if ns.db.shotFormat and Shot.SetFormat(ns.db.shotFormat) then
+		ns.db.shotFormat = nil
+	end
+	Probe.phase = "idle"
+	Probe.shotsRunning = false
+end
+
 -- Benchmark -------------------------------------------------------------------
 local function checkSetup()
 	local problems = {}
@@ -586,6 +698,11 @@ local function checkSetup()
 	if missing > 0 then
 		problems[#problems + 1] = missing .. " helper addons missing: quit WoW completely and start it again"
 	end
+	for _, name in ipairs({ "Screenshot", "GetPhysicalScreenSize", "GetSessionTime" }) do
+		if type(_G[name]) ~= "function" then
+			problems[#problems + 1] = name .. " missing"
+		end
+	end
 	return #problems == 0 and "ok" or concat(problems, "; ")
 end
 
@@ -599,7 +716,7 @@ function Probe.Bench()
 		doorbell = session.doorbell,
 	}
 	session.bench = bench
-	ns.Say("Benchmark running, about two minutes. Please stay where you are and out of combat.")
+	ns.Say("Benchmark running, about three minutes. Please stay where you are and out of combat.")
 	Probe.phase = "baseline"
 	sleep(quick and 1 or 10)
 	Probe.phase = "idle"
@@ -620,6 +737,8 @@ function Probe.Bench()
 		ns.Say(format("Lane D done: %d new frames.", seen))
 	end
 	bench.slots = slotPhase()
+	bench.fonts = fontPhase(quick and 4 or 8)
+	Probe.Shots()
 	bench.finished = Probe.WallMs()
 	Probe.benchRunning = false
 	ns.Say(
@@ -635,6 +754,7 @@ end
 --   U  an uplink frame on stream 9; detail is its index
 --   D  a lane D read; detail "counter,writtenMs", or "-" if no new frame had arrived
 --   L  a slot load; detail as in slotRound
+--   F  a font read; detail as in Font.Format
 --   X  a skipped round; detail is the reason
 local function soakRecord(kind, detail, at)
 	local soak = ns.session.soak
@@ -648,13 +768,14 @@ end
 function Probe.Soak()
 	waitClock()
 	local quick = fast()
-	local every, slotEvery = quick and 4 or 30, quick and 6 or 180
+	local every, slotEvery, fontEvery = quick and 4 or 30, quick and 6 or 180, quick and 5 or 120
 	local nextUp = Probe.Now() + (quick and 1 or 20)
 	local nextD, nextSlot = nextUp + every / 2, Probe.Now() + (quick and 4 or 90)
+	local nextFont, fontsDone = Probe.Now() + (quick and 3 or 60), false
 	local index = 0
 	while true do
 		local now = Probe.Now()
-		if ns.db.soak and not Probe.benchRunning then
+		if ns.db.soak and not Probe.benchRunning and not Probe.shotsRunning then
 			if writer and now >= nextUp then
 				nextUp = now + every
 				if Probe.ListOpen() then
@@ -684,13 +805,25 @@ function Probe.Soak()
 					soakRecord("L", (slotRound(k)))
 					Probe.phase = "idle"
 				end
+			elseif now >= nextFont and not fontsDone then
+				nextFont = now + fontEvery
+				Probe.phase = "soak"
+				local record, result = fontRound()
+				Probe.phase = "idle"
+				if record then
+					soakRecord("F", record)
+				elseif result == "exhausted" then
+					soakRecord("X", "fonts used up")
+					fontsDone = true
+				end
 			end
 		end
 		sleep(0.25)
 	end
 end
 
--- Login: self-test, hello on lane U, then one slot to see whether the companion is there.
+-- Login: self-test, hello on lane U, then one slot and one font to see whether the companion
+-- is there.
 function Probe.Start(isReload)
 	sleep(1)
 	waitClock()
@@ -718,6 +851,10 @@ function Probe.Start(isReload)
 			ns.Say(format("No fresh data in a slot (%s). Is familiar-spike running? The measurements go on; this is a result too.", result))
 		end
 	end
+	local record = fontRound()
+	if record then
+		soakRecord("F", record)
+	end
 end
 
 function Probe.Status()
@@ -728,13 +865,17 @@ function Probe.Status()
 		end
 	end
 	return format(
-		"doorbells %s, %d heard; lane D %d new frames in %d reads; slots %d/%d used; uplink %s; soak %s%s",
+		"doorbells %s, %d heard; lane D %d new frames in %d reads; slots %d/%d used; fonts %d read, next %d of %d; screenshot runs %d; uplink %s; soak %s%s",
 		describeDoorbell(),
 		#ns.session.bells,
 		laneD.seen,
 		laneD.reads,
 		used,
 		SLOTS,
+		fontsRead,
+		ns.db.fontNext or 1,
+		Font.BANK,
+		#ns.session.shots,
 		writer and (seq .. " frames sent") or "off",
 		ns.db.soak and "on" or "off",
 		Probe.benchRunning and "; benchmark running" or ""
@@ -752,5 +893,6 @@ function Probe.Store(session)
 	session.hitches = concat(hitches, ";")
 	session.clock = { offset = clock.offset, edges = clock.edges }
 	session.nextSignal = ns.db.nextSignal
+	session.fontNext = ns.db.fontNext
 	session.ended = Probe.WallMs()
 end
