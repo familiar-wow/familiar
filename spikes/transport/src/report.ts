@@ -540,6 +540,11 @@ interface FontRead {
 	written: number;
 	result: string;
 	dev: number;
+	/** Calibration widths; 48 and 303 when one UI unit is one pixel. Since 0.4.1. */
+	low?: number;
+	high?: number;
+	/** The slot named in the packet header, -1 without a header. Since 0.4.1. */
+	header?: number;
 }
 
 /** A Font.Format record. */
@@ -562,6 +567,9 @@ function fontRead(record: string, where: string, context = "-"): FontRead {
 		written: n(11),
 		result: f[12] ?? "?",
 		dev: n(13),
+		low: numOrUndefined(f[14]),
+		high: numOrUndefined(f[15]),
+		header: numOrUndefined(f[16]),
 	};
 }
 
@@ -671,7 +679,7 @@ function fontSection(
 	return {
 		title: "Downlink: font bank",
 		body: [
-			"The companion rewrites the 256 fonts in `FamiliarSpike/fonts` one after another, two per second; each holds 512 bytes in the widths of its glyphs. The addon sets a font it has not used in this client process and measures every glyph: eight in a row in the benchmark, one after every login and one every 2 minutes while you play. *Font ready* is how long the client took until the font measured right, *cost per frame* the longest our measuring took in one frame. *Deviation* is how far a measured byte was from a whole number; up to 0.5 still reads correctly. *Data age* is how old the data was when the addon began.",
+			"The companion rewrites the 256 fonts in `FamiliarSpike/fonts` one after another, two per second; each holds 512 bytes in the widths of its glyphs. The addon sets a font it has not used in this client process on a fresh font string and measures every glyph: eight in a row in the benchmark, one after every login and one every 2 minutes while you play. *Font ready* is how long the client took until the font measured right, *cost per frame* the longest our measuring took in one frame. *Calibration* are the widths of the two reference glyphs: 48 and 303 when one unit is one screen pixel. *Deviation* is how far a measured byte was from a whole number; up to 0.5 still reads correctly. *Data age* is how old the data was when the addon began. A failed read that names another font in its header was partly measured in that font.",
 			"",
 			reads.length
 				? tableMd(
@@ -684,23 +692,35 @@ function fontSection(
 							"Font ready",
 							"Measuring",
 							"Cost per frame",
+							"Calibration",
 							"Deviation",
 							"Data age",
 						],
-						reads
-							.slice(-40)
-							.map((r) => [
+						reads.slice(-40).map((r) => {
+							const status = judgeFont(r, writes);
+							const header =
+								status !== "ok" &&
+								r.header !== undefined &&
+								r.header >= 0 &&
+								r.header !== r.slot
+									? ` (header of font ${r.header})`
+									: "";
+							return [
 								time(r.start),
 								r.where,
 								r.context,
 								r.slot,
-								judgeFont(r, writes),
+								`${status}${header}`,
 								`${ms(r.ready)} / ${nFrames(r.readyFrames)}`,
 								`${ms(r.decode)} / ${nFrames(r.decodeFrames)}`,
 								ms(r.cost, 2),
+								r.low !== undefined && r.high !== undefined
+									? `${r.low.toFixed(1)}–${r.high.toFixed(1)}`
+									: "–",
 								r.dev.toFixed(3),
 								r.result === "ok" ? ms(r.start - r.written) : "–",
-							]),
+							];
+						}),
 					)
 				: "No font read yet.",
 			"",
@@ -721,7 +741,12 @@ interface ShotTake {
 	called: number;
 	done: number | undefined;
 	result: string;
-	drawCost: number;
+	/** Frames after the call's frame after which the data went; undefined: when saved. */
+	hide: number | undefined;
+	/** Painting the data: in total, the most in one frame, and over how many frames. */
+	paint: number;
+	paintMax: number;
+	paintFrames: number;
 	frames: number;
 	worst: number;
 	file?: LogEvent;
@@ -732,9 +757,10 @@ interface ShotRun {
 	takes: ShotTake[];
 }
 
-/** A Shot.Take record. */
+/** A Shot.Take record; 0.4.0 records end after the worst frame and painted in one frame. */
 function shotTake(record: string, epoch: number): ShotTake {
 	const f = record.split(",");
+	const paint = Number(f[8]);
 	return {
 		epoch,
 		seq: Number(f[0]),
@@ -743,7 +769,10 @@ function shotTake(record: string, epoch: number): ShotTake {
 		called: Number(f[4]),
 		done: numOrUndefined(f[6]),
 		result: f[7] ?? "?",
-		drawCost: Number(f[8]),
+		hide: numOrUndefined(f[11]),
+		paint,
+		paintMax: numOrUndefined(f[12]) ?? paint,
+		paintFrames: numOrUndefined(f[13]) ?? 1,
 		frames: Number(f[9]),
 		worst: Number(f[10]),
 	};
@@ -796,6 +825,7 @@ function shotRunsOf(
 }
 
 const decoded = (take: ShotTake) => take.file?.ok === true;
+const early = (take: ShotTake) => take.hide !== undefined;
 
 /** "jpeg: A 2/2, B 1/2; png: E 2/2" in the order the formats were taken. */
 function shotSummary(takes: ShotTake[]): string {
@@ -814,6 +844,19 @@ function shotSummary(takes: ShotTake[]): string {
 		.join("; ");
 }
 
+/** "after 0 frames 0/1, after 1 frame 1/1": pictures whose data went early, still decoded. */
+function earlySummary(takes: ShotTake[]): string {
+	const hides = [...new Set(takes.map((t) => t.hide ?? 0))].sort(
+		(a, b) => a - b,
+	);
+	return hides
+		.map((h) => {
+			const of = takes.filter((t) => t.hide === h);
+			return `after ${nFrames(h)} ${of.filter(decoded).length}/${of.length}`;
+		})
+		.join(", ");
+}
+
 function shotBench(runs: ShotRun[]): { ok: boolean | undefined; text: string } {
 	const takes = runs.flatMap((run) => run.takes);
 	if (takes.length === 0)
@@ -829,19 +872,23 @@ function shotBench(runs: ShotRun[]): { ok: boolean | undefined; text: string } {
 			text: `no screenshot reached the companion (client said: ${[...new Set(takes.map((t) => t.result))].join(", ")})`,
 		};
 	// The player's own format decides; PNG is a setting we could ask players to change.
-	const own = text(runs.at(-1)?.data.format) ?? takes[0]?.format;
-	const mine = takes.filter((t) => t.format === own);
+	// Pictures whose data went early only show when the client captures.
+	const full = takes.filter((t) => !early(t));
+	const own = text(runs.at(-1)?.data.format) ?? full[0]?.format;
+	const mine = full.filter((t) => t.format === own);
 	const variants = [...new Set(mine.map((t) => t.variant))];
 	const ok = variants.some((v) =>
 		mine.filter((t) => t.variant === v).every(decoded),
 	);
 	const latency = stats(
-		takes.flatMap((t) => (t.file ? [Number(t.file.mtime) - t.called] : [])),
+		full.flatMap((t) => (t.file ? [Number(t.file.mtime) - t.called] : [])),
 	);
 	const worst = stats(takes.map((t) => t.worst));
+	const painting = Math.max(0, ...takes.map((t) => t.paintMax));
+	const hidden = takes.filter(early);
 	return {
 		ok,
-		text: `${shotSummary(takes)}; call → file p95 ${ms(latency?.p95)}, worst frame p95 ${ms(worst?.p95)}`,
+		text: `${shotSummary(full)}${hidden.length ? `; data hidden early, still decoded: ${earlySummary(hidden)}` : ""}; call → file p95 ${ms(latency?.p95)}, worst frame p95 ${ms(worst?.p95)}, painting at most ${ms(painting, 1)} per frame`,
 	};
 }
 
@@ -856,6 +903,7 @@ function shotSection(
 		if (!f) return "no file";
 		if (f.ok) return "✔";
 		if (!f.found) return `✘ block not found, kept as ${f.file}`;
+		if (early(t) && f.bitErrors === undefined) return "✘ data not captured";
 		return f.bitErrors === undefined
 			? "✘ header unreadable"
 			: `✘ ${f.bitErrors} of ${f.bits} bits wrong`;
@@ -863,7 +911,7 @@ function shotSection(
 	return {
 		title: "Uplink: screenshots",
 		body: [
-			"The addon draws a block of 258 × 34 cells of 4 pixels into the top-left corner, calls `Screenshot()` and hides the block once the client reports the file saved. The companion decodes the picture, keeps the corner in `shots/` of the data folder and deletes the picture; screenshots without the block stay untouched. First in your own format, then in PNG if the addon may switch the format (it switches back right after). *A* has cells of 8 px, black or white (256 B); *B* 4 px, black or white (1 KB); *C* 4 grey levels (2 KB); *D* 8 grey levels (3 KB); *E* one byte per colour (24 KB, PNG only). *Shown* counts the frames the block stayed up after the call, *worst frame* is the longest frame from the call until a second after. *File → read* includes a quarter second in which the companion waits for the file to stop changing.",
+			"The addon paints a block of 258 × 34 cells of 4 pixels while it is hidden, a few hundred cells per frame, shows it in the top-left corner and calls `Screenshot()`. The companion decodes the picture, keeps the corner in `shots/` of the data folder and deletes the picture; screenshots without the block stay untouched. First in your own format, then in PNG if the addon may switch the format (it switches back right after). *A* has cells of 8 px, black or white (256 B); *B* 4 px, black or white (1 KB); *C* 4 grey levels (2 KB); *D* 8 grey levels (3 KB); *E* one byte per colour (24 KB, PNG only). Normally the block stays until the client reports the file saved. Some pictures hide the data 0, 1 or 2 frames after the call and keep only the border: whether their data still decodes shows when the client captures the picture. *Data on screen* counts the frames the data was visible, the one before the call included; *worst frame* is the longest frame from the call until a second after. *File → read* includes a quarter second in which the companion waits for the file to stop changing.",
 			"",
 			...runs.map((run) => {
 				const d = run.data;
@@ -876,25 +924,27 @@ function shotSection(
 							"Picture",
 							"Variant",
 							"Format",
+							"Data on screen",
 							"Client",
 							"Decoded",
 							"Call → file",
 							"File → read",
-							"Shown",
 							"Worst frame",
-							"Drawing",
+							"Painting",
 						],
 						takes.map((t) => [
 							t.seq,
 							t.variant,
 							t.format,
+							early(t)
+								? `${nFrames((t.hide ?? 0) + 1)}, hidden early`
+								: nFrames(t.frames + 1),
 							t.result,
 							result(t),
 							t.file ? ms(Number(t.file.mtime) - t.called) : "–",
 							t.file ? ms(Number(t.file.seen) - Number(t.file.mtime)) : "–",
-							nFrames(t.frames),
 							ms(t.worst),
-							ms(t.drawCost, 1),
+							`${ms(t.paint, 1)} in ${nFrames(t.paintFrames)}, at most ${ms(t.paintMax, 1)}`,
 						]),
 					)
 				: "No screenshots yet.",
@@ -1280,7 +1330,7 @@ const soakText = (t: Tally, unit: string) =>
 function unsavedNote(sessions: Session[], events: LogEvent[]): string[] {
 	const saved = new Set(sessions.map((s) => num(s.data.nonce)));
 	const hellos = events.filter((e) => e.ev === "hello");
-	const lines = hellos.flatMap((hello, k) => {
+	const unsaved = hellos.flatMap((hello, k) => {
 		if (saved.has(Number(hello.nonce))) return [];
 		const until = hellos[k + 1]?.t ?? Number.POSITIVE_INFINITY;
 		const frames = events.filter(
@@ -1294,14 +1344,25 @@ function unsavedNote(sessions: Session[], events: LogEvent[]): string[] {
 		const last = Math.max(1, ...seqs);
 		const end = frames.at(-1)?.t ?? hello.t;
 		return [
-			`- Session ${hello.epoch} on ${hello.file} (${hello.reload ? "reload" : "login"}, ${time(hello.t)}–${time(end)}): ${seqs.size} uplink frames arrived, ${last - seqs.size} of 1–${last} missing.`,
+			{
+				last: k === hellos.length - 1,
+				ms: end - hello.t,
+				line: `- Session ${hello.epoch} on ${hello.file} (${hello.reload ? "reload" : "login"}, ${time(hello.t)}–${time(end)}): ${seqs.size} uplink frames arrived, ${last - seqs.size} of 1–${last} missing.`,
+			},
 		];
 	});
-	if (lines.length === 0) return [];
+	if (unsaved.length === 0) return [];
+	const [only] = unsaved;
+	// The session a final /reload starts is never saved if the tool stops while WoW runs.
+	if (unsaved.length === 1 && only?.last && only.ms < 120_000)
+		return [
+			`Not saved: the last session, ${Math.round(only.ms / 1000)} s after the final /reload or login. That is expected when the tool stops while WoW still runs; log out or quit WoW first to avoid it.`,
+			"",
+		];
 	return [
 		"⚠ **Results not saved yet.** The companion saw these sessions, but the game has not written their results. WoW writes them on `/reload` or logout: type `/reload` in game, then run `familiar-spike report`.",
 		"",
-		...lines,
+		...unsaved.map((u) => u.line),
 		"",
 	];
 }
@@ -1457,7 +1518,7 @@ export function buildReport(dataDir: string, now = new Date()): string {
 			]),
 		),
 		"",
-		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; every font read decoded and current, cost per frame p95 < 2 ms; doorbell raise → heard p95 < 1 s once the addon listens after login; no failures in a soak of at least 60 minutes. Screenshots run on demand only and are judged on the benchmark: one variant decodes in every picture in your own format. \`?\` means not enough data yet.`,
+		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; every font read decoded and current, cost per frame p95 < 2 ms; doorbell raise → heard p95 < 1 s once the addon listens after login; no failures in a soak of at least 60 minutes. Screenshots run on demand only and are judged on the benchmark: one variant decodes in every picture in your own format; pictures whose data was hidden early do not count. \`?\` means not enough data yet.`,
 		"",
 	);
 	for (const section of sections)

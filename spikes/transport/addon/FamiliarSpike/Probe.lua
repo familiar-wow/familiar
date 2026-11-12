@@ -618,8 +618,10 @@ local function fontPhase(count)
 end
 
 -- Screenshots -------------------------------------------------------------------
-local SHOTS = { first = { "A", "B", "C", "D", "A", "B" }, png = { "C", "D", "E", "E" } }
-local SHOTS_FAST = { first = { "A", "B", "C", "D" }, png = { "C", "E" } }
+-- A letter is a variant kept up until the file is saved; a digit after it hides the data that
+-- many frames after the call, which shows when the client captures the picture.
+local SHOTS = { first = { "A", "B", "C", "D", "B0", "B1", "B2", "A" }, png = { "C", "D", "E", "E" } }
+local SHOTS_FAST = { first = { "A", "B", "C", "D", "B0", "B1" }, png = { "C", "E" } }
 
 -- One run: screenshots in the player's format, then in PNG if the client lets an addon
 -- switch the format, which is restored right after. Never two in the same second, since the
@@ -641,12 +643,19 @@ function Probe.Shots()
 	run.quiet = Shot.Quiet(true) and 1 or 0
 	local rows, second = {}, nil
 	local function series(list, formatName)
-		for _, name in ipairs(list) do
+		for _, entry in ipairs(list) do
 			while time() == second do
 				sleep(0.05)
 			end
 			session.shotSeq = (session.shotSeq or 0) + 1
-			rows[#rows + 1] = Shot.Take(name, session.epoch, session.shotSeq, formatName, sleep)
+			rows[#rows + 1] = Shot.Take(
+				entry:sub(1, 1),
+				tonumber(entry:sub(2)),
+				session.epoch,
+				session.shotSeq,
+				formatName,
+				sleep
+			)
 			second = time()
 		end
 	end

@@ -10,7 +10,7 @@
 //   bun sim/run.ts --emptyplays  build 70888 as Sven saw it: an empty .wav "plays", a missing
 //                                one stays missing; doorbells must switch to the sound length
 //   bun sim/run.ts --noreset     ResetAddOns keeps memory; lane D must fail, the rest not
-//   bun sim/run.ts --binary dist/familiar-spike-0.4.0-linux-x64/familiar-spike
+//   bun sim/run.ts --binary dist/familiar-spike-0.4.1-linux-x64/familiar-spike
 //                                the built Linux program instead of the source. The game is a
 //                                copy of Lua named Wow.exe, which is how Wine processes look.
 import {
@@ -371,8 +371,8 @@ expect(
 );
 expect(client.said("Fonts done: 4 of 4 decoded."), "benchmark reads 4 fonts");
 expect(
-	client.said("Screenshot test done: 6 pictures."),
-	"benchmark takes 6 screenshots",
+	client.said("Screenshot test done: 8 pictures."),
+	"benchmark takes 8 screenshots",
 );
 
 console.log("The player takes a screenshot: it must stay where it is");
@@ -434,8 +434,13 @@ expect(
 expect(pending("load-on-demand slot", "6/6 fresh"), "slots: all fresh");
 expect(pending("Doorbell:", "raise → heard"), "doorbells heard");
 expect(
-	pending("Downlink: font bank", "4/4 decoded and current"),
-	"fonts: benchmark passes, soak pending",
+	pending("Downlink: font bank", "4/4 decoded and current") &&
+		verdict("Downlink: font bank").includes("largest deviation 0.000"),
+	"fonts: benchmark passes, soak pending, widths on whole pixels",
+);
+expect(
+	report.includes("| 48.0–303.0 |"),
+	"fonts: one UI unit is one pixel where the addon measures",
 );
 expect(
 	report.includes("First font after a client restart: current"),
@@ -445,6 +450,13 @@ expect(
 	verdict("Uplink: screenshot").startsWith("| ✔") &&
 		verdict("Uplink: screenshot").includes("png: C 1/1, E 1/1"),
 	"screenshots: every variant decodes",
+);
+// The simulated client captures at the end of the frame that calls Screenshot().
+expect(
+	verdict("Uplink: screenshot").includes(
+		"still decoded: after 0 frames 0/1, after 1 frame 1/1",
+	),
+	"screenshots: data hidden in the call's frame is missed, one frame later it is in",
 );
 const pictures = readdirSync(screenshotsDir(paths)).filter((name) =>
 	name.startsWith("WoWScrnShot_"),

@@ -1,6 +1,12 @@
 -- Screenshot uplink, addon -> companion: the addon paints a block of cells into the top-left
--- corner, calls Screenshot() and hides the block once the client reports the file saved. The
--- companion reads the file from the Screenshots folder. Layout and variants: src/shot.ts.
+-- corner, calls Screenshot() and hides the block again; the companion reads the file from the
+-- Screenshots folder. Layout and variants: src/shot.ts.
+--
+-- The block has two layers: the sync border (row 0 and column 0) and the data cells. The data
+-- is painted while the block is hidden, a few hundred cells per frame. A take keeps the data
+-- up until the client reports the file saved, or hides it a given number of frames after the
+-- call: that shows when the client captures the picture. The border stays until the file is
+-- saved either way, so the companion can tell every one of our pictures from the player's.
 local _, ns = ...
 local Wire = ns.Wire
 
@@ -12,6 +18,7 @@ ns.Shot = Shot
 
 local COLS, ROWS, CELL_PX = 258, 34, 4
 local DATA_COLS, DATA_ROWS = 256, 32
+local PAINT_BATCH = 512 -- cells painted per frame
 Shot.VARIANTS = {
 	A = { id = 1, cell = 2, bits = 1 },
 	B = { id = 2, cell = 1, bits = 1 },
@@ -22,7 +29,7 @@ Shot.VARIANTS = {
 local FORMATS = { jpeg = 1, jpg = 1, png = 2, tga = 3 }
 local STATUS_EVENTS = { "SCREENSHOT_STARTED", "SCREENSHOT_SUCCEEDED", "SCREENSHOT_FAILED" }
 
-local block, cells, geometry
+local sync, data, cells, geometry
 local heard = {}
 
 local listener = CreateFrame("Frame")
@@ -66,24 +73,30 @@ end
 
 -- Creates the block once: 258 x 34 textures on the physical pixel grid, spread over frames.
 function Shot.Build(sleep)
-	if block then
+	if sync then
 		return geometry
 	end
-	local frame = CreateFrame("Frame", nil, UIParent)
-	frame:Hide()
-	frame:SetFrameStrata("TOOLTIP")
-	pcall(frame.SetIgnoreParentScale, frame, true)
-	pcall(frame.SetScale, frame, 1)
+	local layers = {}
+	for k = 1, 2 do
+		local frame = CreateFrame("Frame", nil, UIParent)
+		frame:Hide()
+		frame:SetFrameStrata("TOOLTIP")
+		pcall(frame.SetIgnoreParentScale, frame, true)
+		pcall(frame.SetScale, frame, 1)
+		frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
+		layers[k] = frame
+	end
+	local border, body = layers[1], layers[2]
 	local width, height = GetPhysicalScreenSize()
-	local pixel = 768 / height / frame:GetEffectiveScale()
-	local size = CELL_PX * pixel
-	frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
-	frame:SetSize(COLS * size, ROWS * size)
+	local size = CELL_PX * 768 / height / body:GetEffectiveScale()
+	border:SetSize(COLS * size, ROWS * size)
+	body:SetSize(COLS * size, ROWS * size)
 	cells = {}
 	for r = 0, ROWS - 1 do
 		for c = 0, COLS - 1 do
-			local t = frame:CreateTexture(nil, "OVERLAY")
-			t:SetPoint("TOPLEFT", frame, "TOPLEFT", c * size, -r * size)
+			local parent = (r == 0 or c == 0) and border or body
+			local t = parent:CreateTexture(nil, "OVERLAY")
+			t:SetPoint("TOPLEFT", parent, "TOPLEFT", c * size, -r * size)
 			t:SetSize(size, size)
 			if t.SetSnapToPixelGrid then
 				t:SetSnapToPixelGrid(true)
@@ -102,14 +115,15 @@ function Shot.Build(sleep)
 			sleep(0)
 		end
 	end
-	block = frame
-	geometry = format("%dx%d px, block scale %.4f", width, height, frame:GetEffectiveScale())
+	sync, data = border, body
+	geometry = format("%dx%d px, block scale %.4f", width, height, body:GetEffectiveScale())
 	return geometry
 end
 
 function Shot.Hide()
-	if block then
-		block:Hide()
+	if sync then
+		sync:Hide()
+		data:Hide()
 	end
 end
 
@@ -129,13 +143,23 @@ local function frameBytes(v, epoch, seq, formatCode, wallMs)
 	return body .. Wire.U32(Wire.Crc32(body))
 end
 
--- Paints a frame: bits MSB first, data cells row by row.
-local function paint(v, bytes)
+-- Paints a frame while the block is hidden: bits MSB first, data cells row by row, at most
+-- PAINT_BATCH cells per frame. Returns the time in total, the most in one frame, and frames.
+local function paint(v, bytes, sleep)
 	local cell, bits = v.cell, v.bits
 	local levels = 2 ^ bits - 1
 	local acc, have, pos = 0, 0, 1
+	local total, most, frames, painted = 0, 0, 1, 0
+	local batchStarted = debugprofilestop()
 	for lr = 0, DATA_ROWS / cell - 1 do
 		for lc = 0, DATA_COLS / cell - 1 do
+			if painted >= PAINT_BATCH then
+				local spent = debugprofilestop() - batchStarted
+				ns.Probe.Charge(spent)
+				total, most = total + spent, max(most, spent)
+				sleep(0)
+				frames, painted, batchStarted = frames + 1, 0, debugprofilestop()
+			end
 			while have < bits do
 				acc, have, pos = acc * 256 + bytes:byte(pos), have + 8, pos + 1
 			end
@@ -155,33 +179,43 @@ local function paint(v, bytes)
 					cells[row + dx]:SetColorTexture(red, green, blue, 1)
 				end
 			end
+			painted = painted + cell * cell
 		end
 	end
+	local spent = debugprofilestop() - batchStarted
+	ns.Probe.Charge(spent)
+	return total + spent, max(most, spent), frames
 end
 
--- Takes one screenshot. Returns the record
--- "seq,variant,format,drawnMs,calledMs,startedMs|-,doneMs|-,result,drawCostMs,frames,worstFrameMs"
--- where frames counts the frames the block stayed up after the call and worstFrameMs is the
--- longest frame from the call until a second after the block is gone.
-function Shot.Take(name, epoch, seq, formatName, sleep)
+-- Takes one screenshot. `hide` is nil to keep the data up until the file is saved, or the
+-- number of frames after the call's frame after which the data goes. Returns the record
+-- "seq,variant,format,drawnMs,calledMs,startedMs|-,doneMs|-,result,paintMs,frames,
+-- worstFrameMs,hide|-,paintMaxMs,paintFrames" where frames counts the frames the border stayed
+-- up after the call and worstFrameMs is the longest frame from the call until a second after.
+function Shot.Take(name, hide, epoch, seq, formatName, sleep)
 	local v = Shot.VARIANTS[name]
 	local Probe = ns.Probe
 	local drawn = Probe.WallMs()
-	local started = debugprofilestop()
-	paint(v, frameBytes(v, epoch, seq, FORMATS[formatName or ""] or 0, drawn))
-	local drawCost = debugprofilestop() - started
-	Probe.Charge(drawCost)
-	block:Show()
+	local paintMs, paintMax, paintFrames =
+		paint(v, frameBytes(v, epoch, seq, FORMATS[formatName or ""] or 0, drawn), sleep)
+	sync:Show()
+	data:Show()
 	sleep(0) -- one rendered frame with the block before the call
 	heard = {}
 	local called = Probe.WallMs()
 	local ok = pcall(Screenshot)
-	local frames, worst, deadline = 0, 0, Probe.Now() + 3
+	if hide == 0 then
+		data:Hide()
+	end
+	local frames, worst, deadline = 0, 0, Probe.Now() + 5
 	while ok and not (heard.SCREENSHOT_SUCCEEDED or heard.SCREENSHOT_FAILED) and Probe.Now() < deadline do
 		sleep(0)
 		frames, worst = frames + 1, max(worst, Probe.lastFrameMs or 0)
+		if frames == hide then
+			data:Hide()
+		end
 	end
-	block:Hide()
+	Shot.Hide()
 	local after = Probe.Now() + 1
 	while Probe.Now() < after do
 		sleep(0)
@@ -195,7 +229,7 @@ function Shot.Take(name, epoch, seq, formatName, sleep)
 		return t and format("%.0f", t) or "-"
 	end
 	return format(
-		"%d,%s,%s,%.0f,%.0f,%s,%s,%s,%.2f,%d,%.1f",
+		"%d,%s,%s,%.0f,%.0f,%s,%s,%s,%.2f,%d,%.1f,%s,%.2f,%d",
 		seq,
 		name,
 		formatName or "?",
@@ -204,8 +238,11 @@ function Shot.Take(name, epoch, seq, formatName, sleep)
 		stamp(heard.SCREENSHOT_STARTED),
 		stamp(heard.SCREENSHOT_SUCCEEDED or heard.SCREENSHOT_FAILED),
 		result,
-		drawCost,
+		paintMs,
 		frames,
-		worst
+		worst,
+		hide and tostring(hide) or "-",
+		paintMax,
+		paintFrames
 	)
 end

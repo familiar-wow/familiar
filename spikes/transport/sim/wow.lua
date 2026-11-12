@@ -16,7 +16,9 @@
 -- the way the client would.
 --
 -- Fonts are read from the real files, once per process like the real client, and are usable
--- two frames after SetFont. The screen is 1280 x 720 with a UI scale of 0.9.
+-- two frames after SetFont; until then a font string shows the font it had, and advances are
+-- rounded to whole pixels. The screen is 1280 x 720 with a UI scale of 0.9, so one UI unit of
+-- UIParent is less than a pixel.
 --
 -- AddOns.txt behaves as measured on build 70888 (FAM-15): a character's file holds rows only
 -- for the addons set for that character, and the client keeps one enable state for the whole
@@ -68,7 +70,8 @@ local soundHandle = 0
 local fonts = {} -- parsed font files, read once per process
 local cvars = { screenshotFormat = "jpeg", screenshotQuality = "3" }
 local frameCount, shotRequested, shotPending = 0, false, false
-local SCREEN_W, SCREEN_H, UI_SCALE = 1280, 720, 0.9
+-- The UI scale makes one UI unit smaller than a pixel here; FAMILIAR_SIM_UISCALE changes it.
+local SCREEN_W, SCREEN_H, UI_SCALE = 1280, 720, tonumber(os.getenv("FAMILIAR_SIM_UISCALE")) or 0.9
 
 local function readFile(path)
 	local f = io.open(path, "rb")
@@ -258,43 +261,57 @@ local function glyphWidth(font, code)
 	return font.advance[0]
 end
 
+-- What build 70888 showed: after SetFont, a font string keeps measuring with the font it has
+-- until the new one is loaded, and GetFont names the font it measures with. The rest is a
+-- model: a font object does not replace an explicit font, and advances are whole pixels.
 local fontMethods = {}
 fontMethods.__index = fontMethods
-for _, name in ipairs({ "SetPoint", "SetAlpha", "SetWordWrap", "SetNonSpaceWrap" }) do
+for _, name in ipairs({ "SetPoint", "SetAlpha", "SetWordWrap", "SetNonSpaceWrap", "Show", "Hide" }) do
 	fontMethods[name] = function() end
 end
+local function shown(self)
+	local pending = self.pending
+	if pending and frameCount >= pending.font.ready then
+		self.current, self.pending = pending, nil
+	end
+	return self.current
+end
 function fontMethods:SetFontObject(object)
-	self.path, self.size, self.font = object.path, object.size, nil
+	self.object = object
 end
 function fontMethods:SetFont(path, size, flags)
 	local file = client .. "/" .. path:gsub("\\", "/")
 	if not fonts[file] then
 		local data = readFile(file)
 		if not data then
-			return false
+			return
 		end
 		fonts[file] = parseFont(data)
 		fonts[file].ready = frameCount + 2
 	end
-	self.path, self.size, self.flags, self.font = path, size, flags, fonts[file]
-	return true
+	self.pending = { font = fonts[file], path = path, size = size, flags = flags }
 end
 function fontMethods:GetFont()
-	return self.path, self.size, self.flags
+	local current = shown(self) or self.object
+	if current then
+		return current.path, current.size, current.flags
+	end
 end
 function fontMethods:SetText(text)
 	self.text = tostring(text or "")
 end
 function fontMethods:GetStringWidth()
-	local list, font = codes(self.text or ""), self.font
-	if not font or frameCount < font.ready then
-		return #list * self.size * 0.55 -- the standard font
+	local list, current = codes(self.text or ""), shown(self)
+	if not current then
+		return #list * (self.object and self.object.size or 12) * 0.55 -- the standard font
 	end
-	local width = 0
+	-- Pixels per unit of this font string.
+	local k = (self.parent and self.parent:GetEffectiveScale() or 1) * SCREEN_H / 768
+	local pixels = 0
 	for _, code in ipairs(list) do
-		width = width + glyphWidth(font, code) * self.size / font.upem
+		pixels = pixels + math.floor(glyphWidth(current.font, code) * current.size / current.font.upem * k + 0.5)
 	end
-	return width
+	return pixels / k
 end
 
 -- Frames and textures -------------------------------------------------------------
@@ -359,7 +376,7 @@ function frameMethods:CreateTexture()
 	return texture
 end
 function frameMethods:CreateFontString()
-	return setmetatable({ size = 12, text = "" }, fontMethods)
+	return setmetatable({ text = "", parent = self }, fontMethods)
 end
 
 local function newFrame(parent, scale)

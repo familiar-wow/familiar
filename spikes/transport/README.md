@@ -23,8 +23,15 @@ The font bank follows what [wow-forever-codex](https://github.com/0xInuarashi/wo
 measured on build 69913: the client reads a font file once per process, only files that
 existed when it started, and again after a full restart. The fonts are files, not addons, so
 they do not show up in the addon list. The screenshot channel is new: it needs no screen
-capture, so it should also work minimized and under Wayland. Neither is proven on build 70888;
-that is what 0.4.0 measures.
+capture, so it should also work minimized and under Wayland.
+
+On build 70888 both work, with two findings from 0.4.0. After `SetFont`, a font string that
+already shows one of our fonts keeps measuring with it at first, and `GetFont` does not name
+the new file yet. And widths came out close to half a byte off, which fits glyph advances
+rounded to whole screen pixels. Since 0.4.1 every font read uses a fresh font string, waits
+until `GetFont` names the new file and measures in a frame scaled to one pixel per unit. The
+screenshot block is painted while hidden, a few hundred cells per frame, and some pictures
+hide the data right after the call to find out when the client captures.
 
 Every channel is measured on its own schedule, so one that does not work on a client cannot
 hide the others. On build 1.60.1.70888 an empty `.wav` already "plays"; the addon then tells a
@@ -52,8 +59,8 @@ starts with _Select_, press Esc.
 a terminal:
 
 ```sh
-tar xzf familiar-spike-0.4.0-linux-x64.tar.gz
-cd familiar-spike-0.4.0-linux-x64
+tar xzf familiar-spike-0.4.1-linux-x64.tar.gz
+cd familiar-spike-0.4.1-linux-x64
 ./familiar-spike check    # shows which client it found and changes nothing
 ./familiar-spike
 ```
@@ -69,7 +76,7 @@ Then, on both systems:
 2. Log in. Chat shows the self-test, whether doorbells work on this client and, a few seconds
    later, _Companion seen via …_.
 3. Stand somewhere quiet, out of combat, and type `/fspike bench`. It takes about three
-   minutes. At the end the top-left corner flashes ten times: those are the screenshots.
+   minutes. At the end the top-left corner flashes twelve times: those are the screenshots.
    Your screenshot format is switched to PNG for a few seconds and back.
 4. Type `/reload` once, so the client saves the results.
 5. Play as usual for at least an hour: questing, dungeons, combat. Somewhere in that hour,
@@ -77,10 +84,11 @@ Then, on both systems:
    character, then come back. Every `/reload` or logout adds results.
 6. Quit WoW completely once, start it again and log in: a new client process reads the font
    bank from the start, which shows whether fonts can be used again.
-7. Type `/reload` (or log out) once more: WoW writes the addon's results only then.
+7. At the end, log out to the character list or quit WoW: WoW writes the addon's results
+   only then. A `/reload` saves too, but starts a new session that is not saved.
 8. Press Ctrl+C in the tool's window. `familiar-spike-data/report.md` is the result; send the
    whole `familiar-spike-data` folder. If the report starts with _Results not saved yet_,
-   type `/reload` in game and run `familiar-spike report`.
+   log out in game and run `familiar-spike report`.
 
 Keep the game sound on, at any volume: doorbells rely on `PlaySoundFile`. `/fspike` shows the
 status in game, `/fspike shots` repeats the screenshot test, `/fspike soak off` pauses the
@@ -123,7 +131,7 @@ bun run sim                   # real addon + real companion, files in a temp fol
 bun sim/run.ts --emptyplays   # build 70888: an empty .wav plays, a missing one stays missing
 bun sim/run.ts --noreset      # ResetAddOns keeps memory: lane D must fail, the rest not
 bun run build                 # dist/familiar-spike-<version>-{windows-x64.zip,linux-x64.tar.gz}
-bun sim/run.ts --binary dist/familiar-spike-0.4.0-linux-x64/familiar-spike
+bun sim/run.ts --binary dist/familiar-spike-0.4.1-linux-x64/familiar-spike
 ```
 
 `sim/wow.lua` stands in for the client: it runs the addon files and backs the API calls with
