@@ -1,6 +1,6 @@
 # ADR 0005: Transport — AddOns.txt lane up, font bank and doorbell down
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-14)
 - **Date:** 2026-11-13
 - **Deciders:** @Smidelis, @hermes-smidelis
 
@@ -64,7 +64,8 @@ The transport stays behind its interface, and copy and paste remains the fallbac
 
 - Players see and hear nothing of the transport while they play. Sending works in combat and did not change the mean frame time on Windows.
 - The addon list shows Familiar and one collapsed category; opened, it lists 256 helpers. The client keeps the collapsed state per machine, and it stayed collapsed across `/reload` on Windows. We did not check the character list after a full restart and leave that to feedback from players.
-- Familiar has to install the helpers, the font bank and the doorbell files, and the client finds new files only after a full restart. Whether the CurseForge package or the companion installs them is decided later.
+- The CurseForge package and the GitHub releases contain only the main addon, so players get its updates like any other addon. The desktop app installs what the transport needs: the 256 helpers, the font bank and the doorbell files. The companion rewrites fonts and doorbell files while the game runs, so they live outside the main addon, where an update would reset them; whether the client reads them from there is still to be confirmed. The app can also install the main addon for players without CurseForge.
+- The client finds new files only after a full restart, so the setup ends with one.
 - Up, the lane carries at most about 0.9 KB/s (29 bytes every 33 ms). Messages stay small, and the brain pulls everything else through tools ([ADR 0001](0001-architecture-addon-companion-and-brains.md)).
 - Fonts and doorbell files work once per game session. The tool's 256 fonts hold about 125 KB, or about 50 replies of 2 KB, and one hour of testing used 135 of them. Familiar needs a larger bank, for example many file names as hard links to a few files, as wow-forever-codex does, or a denser reply format. Not measured yet.
 - Familiar needs the game sound switched on; master volume 0 is enough. The addon's self-test at login tells players who switched it off, and the user docs say so. A trigger without sound, such as a font that the addon reads at fixed intervals, would spend a font on every check and is not planned.
