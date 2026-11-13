@@ -1,16 +1,16 @@
 // End-to-end run without the game: the real addon (in sim/wow.lua) talks to the real companion
 // through real files. Needs Lua 5.1 with the bit library, or LuaJIT (set LUA=/path/to/lua).
 //
-// Every run logs in, benchmarks, takes a screenshot of its own, reloads, switches to a second
-// character and back, then restarts the client; the client keeps addon states across the
-// switch the way build 70888 does (see sim/wow.lua). Screenshots are encoded as JPEG at
-// quality 50 or as PNG, standing in for the client's encoder.
+// Every run logs in, benchmarks, says four things, takes a screenshot of its own, soaks with
+// combat and the addon list open, reloads, switches to a second character and back, then
+// restarts the client; the client keeps addon states across the switch the way build 70888
+// does (see sim/wow.lua). Screenshots are encoded as JPEG at quality 50, standing in for the
+// client's encoder.
 //
 //   bun sim/run.ts               an older client: an empty .wav does not play
-//   bun sim/run.ts --emptyplays  build 70888 as Sven saw it: an empty .wav "plays", a missing
+//   bun sim/run.ts --emptyplays  build 70888 as measured: an empty .wav "plays", a missing
 //                                one stays missing; doorbells must switch to the sound length
-//   bun sim/run.ts --noreset     ResetAddOns keeps memory; lane D must fail, the rest not
-//   bun sim/run.ts --binary dist/familiar-spike-0.4.1-linux-x64/familiar-spike
+//   bun sim/run.ts --binary dist/familiar-spike-0.5.0-linux-x64/familiar-spike
 //                                the built Linux program instead of the source. The game is a
 //                                copy of Lua named Wow.exe, which is how Wine processes look.
 import {
@@ -31,22 +31,20 @@ import { parseArgs } from "node:util";
 import { Companion, FAST_TIMING } from "../src/companion.ts";
 import { decodeTga, encodePng } from "../src/image.ts";
 import { install } from "../src/install.ts";
-import { EventLog } from "../src/log.ts";
-import { buildReport } from "../src/report.ts";
+import { EventLog, readLogs } from "../src/log.ts";
+import { buildReport, loadSaved } from "../src/report.ts";
+import { list, table, text } from "../src/savedvars.ts";
 import { savedVariablesFile, screenshotsDir, wowPaths } from "../src/wow.ts";
 
 const { values: options } = parseArgs({
 	args: Bun.argv.slice(2),
 	options: {
-		noreset: { type: "boolean" },
 		emptyplays: { type: "boolean" },
 		keep: { type: "boolean" },
 		binary: { type: "string" },
 	},
 });
-const flags = (["noreset", "emptyplays"] as const).filter(
-	(flag) => options[flag],
-);
+const flags = options.emptyplays ? ["emptyplays"] : [];
 const binary = options.binary ? resolve(options.binary) : undefined;
 const root = mkdtempSync(join(tmpdir(), "familiar-sim-"));
 const paths = wowPaths(join(root, "_forever_"));
@@ -57,10 +55,11 @@ const [ACCOUNT, REALM, CHARACTER, SECOND] = [
 	"Spike",
 	"Bank",
 ];
+const home = join(paths.accounts, ACCOUNT, REALM, CHARACTER);
 
 for (const dir of [
 	paths.addons,
-	join(paths.accounts, ACCOUNT, REALM, CHARACTER),
+	home,
 	join(paths.accounts, ACCOUNT, REALM, SECOND),
 	join(paths.accounts, ACCOUNT, "SavedVariables"),
 	dataDir,
@@ -70,6 +69,18 @@ for (const dir of [
 writeFileSync(
 	savedVariablesFile(paths, ACCOUNT),
 	'FamiliarSpikeDB = { ["sessions"] = { { ["epoch"] = 7, ["started"] = 1, ["soak"] = { "S|-|1,2,3,4,0.1" }, ["bench"] = { ["selftest"] = "from 0.2.0" } } }, ["nextSignal"] = 601 }\n',
+);
+// Helpers of 0.4.x that the installer must remove, with their AddOns.txt rows.
+for (const name of ["FamiliarSpike_D000", "FamiliarSpike_L01"]) {
+	mkdirSync(join(paths.addons, name), { recursive: true });
+	writeFileSync(
+		join(paths.addons, name, `${name}.toc`),
+		"## Title: old\n## X-Familiar-Spike: 1\n",
+	);
+}
+writeFileSync(
+	join(home, "AddOns.txt"),
+	"FamiliarSpike_D000: enabled\nFamiliarSpike_L01: disabled\n",
 );
 
 function findLua(): string {
@@ -307,7 +318,11 @@ if (binary) {
 		return readFileSync(join(dataDir, "report.md"), "utf8");
 	};
 } else {
-	install(paths, 16001);
+	const result = install(paths, 16001);
+	expect(
+		result.removed === 2 && result.rows === 2,
+		"install removes the helpers of 0.4.x and their rows",
+	);
 	let pids: number[] = [];
 	let saved = 0;
 	const companion = new Companion({
@@ -332,7 +347,7 @@ if (binary) {
 		await companion.checkGame();
 	};
 	finish = async () => {
-		// The old file at start, then the writes at /reload and at logout.
+		// The old file at start, then the writes at /reload, the logins and at logout.
 		expect(
 			await waitFor(() => saved >= 3, 5),
 			"companion picked up SavedVariables",
@@ -348,6 +363,10 @@ if (binary) {
 	};
 }
 
+expect(
+	!readdirSync(paths.addons).some((name) => /_(D|L)\d+$/.test(name)),
+	"no lane D or slot helper is left",
+);
 const doorbellMode = options.emptyplays
 	? "sound length"
 	: "PlaySoundFile result";
@@ -361,29 +380,62 @@ expect(
 	`doorbells use the ${doorbellMode}`,
 );
 expect(
-	await client.play(15, () => client.said("Companion seen")),
-	"addon sees the companion",
+	await client.play(15, () => client.said("Companion answered")),
+	"the companion answers the hello",
 );
 await client.send("slash /fspike bench");
 expect(
-	await client.play(180, () => client.said("Benchmark done")),
+	await client.play(240, () => client.said("Benchmark done")),
 	"benchmark finishes",
 );
-expect(client.said("Fonts done: 4 of 4 decoded."), "benchmark reads 4 fonts");
+expect(client.said("Lane U done."), "benchmark sends over lane U");
+expect(client.said("Doorbell normal: heard."), "doorbell heard");
 expect(
-	client.said("Screenshot test done: 8 pictures."),
-	"benchmark takes 8 screenshots",
+	client.said("Doorbell soundoff:0: not heard while set."),
+	"doorbell silent while the sound is off",
+);
+expect(
+	client.said("Round trip via lane U: ") &&
+		client.said("Round trip via screenshot (bright, 1 frame): "),
+	"round trips over both paths",
 );
 
+console.log(
+	"/fspike say, four times: lane, screenshot, lane, muted screenshot",
+);
+for (let n = 1; n <= 4; n++) {
+	const from = client.chat.length;
+	await client.send(
+		`slash /fspike say Hello Familiar ${n}, where is the bank?`,
+	);
+	expect(
+		await client.play(20, () => client.said(`#${n} answered in`, from)),
+		`say #${n} is answered`,
+	);
+	expect(
+		client.said(`heard: Hello Familiar ${n}, where is the bank?`, from),
+		`say #${n} reply carries the text`,
+	);
+}
+expect(
+	client.said("#2 via screenshot (bright, 1 frame)") &&
+		client.said("#4 via screenshot (muted, 1 frame)"),
+	"say alternates the paths and cycles the styles",
+);
+
+// With the soak paused, so the player's picture cannot share a second with one of ours.
 console.log("The player takes a screenshot: it must stay where it is");
+await client.send("slash /fspike soak off");
+await client.play(2);
 await client.send("screenshot");
 await client.play(2);
+await client.send("slash /fspike soak on");
 console.log("Soak: open the addon list, fight, reload, play on");
 await client.send("list open");
 await client.play(2);
 await client.send("list close");
 await client.send("combat on");
-await client.play(8);
+await client.play(14);
 await client.send("combat off");
 const before = client.chat.length;
 await client.send("reload");
@@ -402,7 +454,7 @@ for (const who of [SECOND, CHARACTER]) {
 		await client.play(15, () => client.said("Self-test:", from)),
 		`login as ${who} starts a new session`,
 	);
-	await client.play(15);
+	await client.play(10);
 }
 console.log(
 	"Restart the client: a new process reads the font bank from the start",
@@ -411,10 +463,15 @@ await client.send("logout");
 await client.close();
 await restart();
 expect(
-	await client.play(15, () => client.said("Self-test:")),
-	"the restarted client logs in",
+	await client.play(15, () => client.said("Companion answered")),
+	"the restarted client logs in and hears the companion",
 );
-await client.play(8);
+await client.send("slash /fspike say After the restart");
+expect(
+	await client.play(20, () => client.said("#5 answered in")),
+	"say works after a restart, from the first font again",
+);
+await client.play(4);
 await client.send("logout");
 await client.close();
 
@@ -422,69 +479,66 @@ await client.close();
 const report = await finish();
 console.log(`\n${report}`);
 
-const verdict = (channel: string) =>
-	report.split("\n").find((line) => line.includes(channel)) ?? "";
-// The sim plays for minutes, not the 60 the verdict needs: "?" is the best possible mark.
-const pending = (channel: string, text: string) =>
-	verdict(channel).startsWith("| ?") && verdict(channel).includes(text);
+const verdict = (check: string) =>
+	report.split("\n").find((line) => line.includes(`| ${check} |`)) ?? "";
+const passed = (check: string) => verdict(check).startsWith("| ✔ |");
+for (const check of [
+	"Lane U: every message arrives",
+	"Addon list: lane category stays collapsed (in game)",
+	"Screenshot: every style decodes",
+	"Screenshot: picture settings at their limits",
+	"Screenshot soak: every message arrives",
+	"Screenshot: block shown for one frame is in the picture",
+	"Round trip with a 2 KB reply",
+	"Doorbell with normal sound, volume 0, sound off",
+	"Font bank: replies read",
+])
+	expect(passed(check), `report: ${check}`);
 expect(
-	pending("lane U (SaveAddOns)", "no loss at ≥33 ms spacing"),
-	"uplink: benchmark passes, soak pending",
+	verdict("Screenshot: picture settings at their limits").includes(
+		"bright all",
+	) &&
+		verdict("Screenshot: picture settings at their limits").includes(
+			"muted fails at Gamma:0.3",
+		),
+	"report: the made-up curve breaks muted blocks at Gamma 0.3 only",
 );
-expect(pending("load-on-demand slot", "6/6 fresh"), "slots: all fresh");
-expect(pending("Doorbell:", "raise → heard"), "doorbells heard");
 expect(
-	pending("Downlink: font bank", "4/4 decoded and current") &&
-		verdict("Downlink: font bank").includes("largest deviation 0.000"),
-	"fonts: benchmark passes, soak pending, widths on whole pixels",
-);
-expect(
-	report.includes("| 48.0–303.0 |"),
-	"fonts: one UI unit is one pixel where the addon measures",
-);
-expect(
-	report.includes("First font after a client restart: current"),
-	"fonts: a new process reads the bank from the start",
-);
-expect(
-	verdict("Uplink: screenshot").startsWith("| ✔") &&
-		verdict("Uplink: screenshot").includes("png: C 1/1, E 1/1"),
-	"screenshots: every variant decodes",
-);
-// The simulated client captures at the end of the frame that calls Screenshot().
-expect(
-	verdict("Uplink: screenshot").includes(
-		"still decoded: after 0 frames 0/1, after 1 frame 1/1",
+	verdict("Screenshot: interface hidden (Alt+Z)").includes(
+		"ui parent not in it, world parent in the picture",
 	),
-	"screenshots: data hidden in the call's frame is missed, one frame later it is in",
+	"report: with the interface hidden only the WorldFrame block is in the picture",
 );
+expect(
+	verdict("Doorbell with normal sound, volume 0, sound off").includes(
+		"normal heard, volume0 heard, soundoff not heard",
+	),
+	"report: doorbell rings at volume 0, not with the sound off",
+);
+// Our pictures with a block are removed; the player's and ours without a block stay.
 const pictures = readdirSync(screenshotsDir(paths)).filter((name) =>
 	name.startsWith("WoWScrnShot_"),
 );
+const blank = readLogs(dataDir).filter((e) => e.ev === "shot" && !e.found);
 expect(
-	pictures.length === 1 &&
-		report.includes("1 screenshot without the block was left alone"),
-	"screenshots: ours are removed, the player's stays",
+	pictures.length === blank.length && pictures.length >= 2,
+	`screenshots: ${pictures.length} left, the ${blank.length} without a block`,
 );
-if (options.noreset) {
-	expect(
-		verdict("lane D (ResetAddOns)").startsWith("| ✘") &&
-			verdict("lane D (ResetAddOns)").includes("does not pick up the file"),
-		"lane D fails without re-read",
-	);
-	expect(
-		/Failures: lane D frame not seen ×\d+\./.test(report),
-		"only lane D fails in the soak",
-	);
-} else {
-	expect(pending("lane D (ResetAddOns)", "frames seen"), "lane D works");
-	expect(report.includes("No failures."), "soak has no failures");
-}
 expect(
 	report.includes("5 addon session(s)") && !report.includes("from 0.2.0"),
 	"results of 0.2.0 are dropped",
 );
-expect(!report.includes("## Addon errors"), "no addon errors");
+// The session after /reload runs in the same client process as the benchmark.
+const settings = list(loadSaved(dataDir)[0]?.db.sessions).map((s) =>
+	text(table(s)?.settings),
+);
+expect(
+	settings.length >= 2 &&
+		settings[0] === settings[1] &&
+		(settings[0] ?? "").includes("Gamma=1.0;Brightness=50;Contrast=50"),
+	"the benchmark puts every setting back",
+);
+expect(report.includes("No addon errors."), "no addon errors");
 expect(report.includes("No companion errors."), "no companion errors");
 
 if (!options.keep) rmSync(root, { recursive: true, force: true });

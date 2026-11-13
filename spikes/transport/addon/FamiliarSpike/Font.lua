@@ -1,7 +1,8 @@
 -- Font bank, companion -> addon: the companion writes bytes into the glyph widths of TrueType
 -- fonts the client has not loaded yet; the addon sets such a font on a hidden font string and
 -- measures every data glyph. Nothing in the file runs. The client reads a font file only on its
--- first use per process, so every file carries one packet per process. Format: src/font.ts.
+-- first use per process, so every file carries one packet per process: a reply fills the
+-- fonts from the next unused one, which the addon names in its message. Format: src/font.ts.
 --
 -- Two findings from build 70888 shape the reader. After SetFont, a font string that already
 -- shows one of our fonts keeps measuring with it at first, and GetFont does not name the new
@@ -85,22 +86,26 @@ function Font.Begin(db)
 end
 
 -- The next unused file, or nil when the bank is used up for this process.
-function Font.Next(db)
+function Font.Peek(db)
 	local slot = db.fontNext or 1
-	if slot > Font.BANK then
-		return nil
+	return slot <= Font.BANK and slot or nil
+end
+
+-- A file read in this process cannot carry anything new until the client restarts.
+function Font.Used(db, slot)
+	if slot >= (db.fontNext or 1) then
+		db.fontNext = slot + 1
 	end
-	db.fontNext = slot + 1
-	return slot
 end
 
 -- Reads one font. `sleep` yields to the next frame, `charge` books our time in a frame.
 -- Results: ok, placeholder (never written by the companion), other (the packet names another
 -- slot), corrupt (checksum), unstable (checksum, and the calibration changed while measuring),
--- unreadable (a width outside the byte range), timeout (the font never became usable).
+-- unreadable (a width outside the byte range), timeout (the font never became usable). An ok
+-- read has the packet's part number and payload.
 function Font.Read(slot, sleep, charge)
 	local m, path = newMeter(), Font.Path(slot)
-	local r = { slot = slot, start = ns.Probe.WallMs(), counter = 0, epoch = 0, written = 0, header = -1 }
+	local r = { slot = slot, start = ns.Probe.WallMs(), part = 0, epoch = 0, written = 0, header = -1 }
 	local started = debugprofilestop()
 	local ok, set = pcall(m.SetFont, m, path, SIZE, "")
 	r.set = ok and (set and 1 or 0) or -1
@@ -180,18 +185,20 @@ function Font.Read(slot, sleep, charge)
 		r.result = stable and "corrupt" or "unstable"
 	else
 		r.epoch = packet:byte(4)
-		r.counter = Wire.ReadU32(packet, 7)
+		r.part = Wire.ReadU32(packet, 7)
 		r.written = Wire.ReadU48(packet, 11)
+		r.payload = packet:sub(19, 18 + math.min(Wire.ReadU16(packet, 17), Font.PACKET - 22))
 		r.result = r.header == slot and "ok" or "other"
 	end
 	return r
 end
 
 -- Format: "slot,startMs,set,matched,readyMs,readyFrames,decodeMs,decodeFrames,worstFrameMs,
--- epoch,counter,writtenMs,result,maxDeviation,low,high,headerSlot". set is 1 or 0 as SetFont
+-- epoch,part,writtenMs,result,maxDeviation,low,high,headerSlot". set is 1 or 0 as SetFont
 -- returned, -1 if it raised; maxDeviation is the largest distance of a measured byte from its
--- integer; low and high are the calibration widths (48 and 303 at one pixel per unit);
--- headerSlot is the slot named in the packet header, -1 without a header.
+-- integer; low and high are the calibration widths, which on build 70888 end at the visible
+-- edge of "~", not at its advance; headerSlot is the slot named in the packet header, -1
+-- without a header.
 function Font.Format(r)
 	return format(
 		"%d,%.0f,%d,%d,%.1f,%d,%.1f,%d,%.3f,%d,%d,%.0f,%s,%.3f,%.3f,%.3f,%d",
@@ -205,7 +212,7 @@ function Font.Format(r)
 		r.decodeFrames or 0,
 		r.cost or 0,
 		r.epoch or 0,
-		r.counter or 0,
+		r.part or 0,
 		r.written or 0,
 		r.result or "?",
 		r.dev or 0,

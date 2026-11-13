@@ -1,12 +1,7 @@
-// The measuring companion. Every channel runs on its own schedule, so a channel that does not
-// work cannot stall the others:
-//   lane U    decodes the addon's frames from every client write of AddOns.txt
-//   lane D    rewrites lane D every 2 s with a counter and the time
-//   slots     keeps every slot's data.lua fresh
-//   doorbells raises the next sig\NNNN.wav every 30 s, starting a minute after WoW starts
-//   fonts     rewrites the font bank one file at a time, round-robin
-//   shots     reads new screenshots; ours are decoded, kept as a crop and removed
-// It also logs every other file the client writes under WTF, which shows when it saves what.
+// The measuring companion. It takes the addon's messages from lane U (every client write of
+// AddOns.txt) and from screenshots, answers in the font bank where the message asks for it,
+// and raises the next doorbell (sig\NNNN.wav) once the answer is in place. It also logs every
+// other file the client writes under WTF, which shows when it saves what.
 import {
 	type FSWatcher,
 	mkdirSync,
@@ -19,25 +14,24 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { atomicWrite } from "./files.ts";
-import { FONTS, fontFile, fontName, fontPacket } from "./font.ts";
+import { FONTS, fontFile, fontName, replyPackets } from "./font.ts";
 import { encodePng, type Raster, readImage } from "./image.ts";
 import { resetVolatile } from "./install.ts";
 import type { EventLog } from "./log.ts";
 import {
-	decodeFrame,
-	type Frame,
+	decodeLaneFrame,
+	decodeMessage,
+	encodeReply,
+	KIND_NAMES,
 	Kind,
 	LONG_WAV,
-	laneDFrame,
+	type Message,
+	messageLength,
+	Path,
 	readLane,
+	replyBody,
 	SIGNALS,
-	SLOTS,
 	signalName,
-	slotFolder,
-	slotSize,
-	slotSource,
-	uplinkByte,
-	writeLane,
 } from "./protocol.ts";
 import {
 	type LuaTable,
@@ -45,7 +39,7 @@ import {
 	parseSavedVariables,
 	table,
 } from "./savedvars.ts";
-import { FORMATS, readShot, type ShotRead } from "./shot.ts";
+import { type Found, readShot } from "./shot.ts";
 import {
 	accountNames,
 	addonsFiles,
@@ -57,8 +51,20 @@ import {
 } from "./wow.ts";
 
 const SHOT_FILE = /^WoWScrnShot_.*\.(jpe?g|png|tga)$/i;
-/** Image rows to decode: the block is 34 cells of up to 6 pixels. */
-const SHOT_ROWS = 240;
+/** A file without a valid frame that changed more recently than this may still be written. */
+const MID_WRITE_MS = 200;
+const MAX_WTF_FILES = 5000;
+
+/** Frames of one message on its way in, per AddOns.txt. */
+interface Assembly {
+	code: number;
+	next: number;
+	chunks: Uint8Array[];
+	length: number;
+	frames: number;
+	firstMtime: number;
+	lastMtime: number;
+}
 
 interface Watched {
 	file: string;
@@ -67,49 +73,20 @@ interface Watched {
 	mtime: number;
 	size: number;
 	retries: number;
-	/** When the client last wrote this file, for lane D's quiet period. */
-	clientAt: number;
 	readErrors: number;
+	/** The last frame read, to skip a client write that repeats it. */
+	last?: string;
+	assembly?: Assembly;
 }
 
 export interface Timing {
-	laneDMs: number;
-	/** Lane D leaves a file alone this long after the client wrote it. */
-	quietMs: number;
-	slotMs: number;
-	bigSlotMs: number;
-	bellStartMs: number;
-	bellEveryMs: number;
 	wtfMs: number;
-	/** One font file per tick: 2 per second refresh the bank of 256 every 128 s. */
-	fontMs: number;
 	shotMs: number;
 }
 
-export const TIMING: Timing = {
-	laneDMs: 2000,
-	quietMs: 3000,
-	slotMs: 5000,
-	bigSlotMs: 30_000,
-	bellStartMs: 60_000,
-	bellEveryMs: 30_000,
-	wtfMs: 2000,
-	fontMs: 500,
-	shotMs: 250,
-};
-
+export const TIMING: Timing = { wtfMs: 2000, shotMs: 100 };
 /** For the simulator, which plays for seconds instead of hours. */
-export const FAST_TIMING: Timing = {
-	laneDMs: 500,
-	quietMs: 600,
-	slotMs: 1000,
-	bigSlotMs: 3000,
-	bellStartMs: 3000,
-	bellEveryMs: 3000,
-	wtfMs: 1000,
-	fontMs: 100,
-	shotMs: 250,
-};
+export const FAST_TIMING: Timing = { wtfMs: 1000, shotMs: 100 };
 
 export interface CompanionOptions {
 	paths: WowPaths;
@@ -122,15 +99,6 @@ export interface CompanionOptions {
 	timing?: Partial<Timing>;
 }
 
-const MAX_WTF_FILES = 5000;
-/** A file without a valid frame that changed more recently than this may still be written. */
-const MID_WRITE_MS = 200;
-
-const u16 = (bytes: Uint8Array, at: number) =>
-	(bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8);
-const u32 = (bytes: Uint8Array, at: number) =>
-	(u16(bytes, at) + u16(bytes, at + 2) * 65536) >>> 0;
-
 function percentile(values: number[], q: number): number {
 	if (values.length === 0) return 0;
 	const sorted = [...values].sort((a, b) => a - b);
@@ -139,16 +107,18 @@ function percentile(values: number[], q: number): number {
 	);
 }
 
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+const firstLine = (body: Uint8Array) =>
+	(new TextDecoder().decode(body).split("\n")[0] ?? "").slice(0, 80);
+
 export class Companion {
 	/** Parsed FamiliarSpikeDB per account, refreshed whenever the game saves it. */
 	readonly saved = new Map<string, LuaTable>();
 	private readonly timing: Timing;
 	private readonly watched = new Map<string, Watched>();
-	private readonly handled = new Map<number, Set<number>>();
-	private readonly hellos = new Map<number, number>();
-	private readonly streams = new Map<string, Set<number>>();
+	/** epoch:id of every message answered, so a second picture is not answered twice. */
+	private readonly answered = new Set<string>();
 	private readonly savedMtimes = new Map<string, number>();
-	private readonly slotWritten = new Map<number, number>();
 	private readonly timers: ReturnType<typeof setInterval>[] = [];
 	private wtf?: Map<string, string>;
 	/** The logged-in character's AddOns.txt: the one the client wrote last. */
@@ -158,19 +128,10 @@ export class Companion {
 	private startedAt = 0;
 	private firstGameCheck = true;
 	private pids: number[] = [];
-	private gameStartedAt?: number;
 	private nextBell = 1;
-	/** Marks this companion run in lane D frames and font packets. */
-	private readonly runEpoch = 1 + Math.floor(Math.random() * 255);
-	private laneDCounter = 0;
-	private slotRefresh = 0;
-	private nextFont = 1;
-	private fontCounter = 0;
-	private fontWrites: number[][] = [];
-	private fontFailures: (number | string)[][] = [];
 	private readonly shotsDone = new Set<string>();
 	private readonly shotTries = new Map<string, number>();
-	/** "size:mtime" of each new picture at the last poll: read it once it stops changing. */
+	/** "size:mtime" of each new picture at the last poll. */
 	private readonly shotStat = new Map<string, string>();
 	/** Our pictures that could not be removed yet (locked by the client or a virus scanner). */
 	private readonly shotRemove = new Map<string, number>();
@@ -180,13 +141,13 @@ export class Companion {
 	private errors = 0;
 	private counts = {
 		sessions: 0,
+		lane: 0,
+		shot: 0,
+		replies: 0,
+		bells: 0,
 		frames: 0,
 		clientWrites: 0,
-		laneD: 0,
-		slots: 0,
-		bells: 0,
-		fonts: 0,
-		shots: 0,
+		pictures: 0,
 		wtf: 0,
 	};
 
@@ -222,17 +183,8 @@ export class Companion {
 			for (const entry of this.watched.values())
 				if (entry !== this.active) this.check(entry);
 		});
-		this.every(this.timing.laneDMs, () => this.writeLaneD());
-		this.every(1000, () => {
-			this.refreshSlots();
-			this.ringBells();
-		});
-		this.every(this.timing.fontMs, () => this.writeFont());
 		this.every(this.timing.shotMs, () => void this.checkShots());
-		this.every(10_000, () => {
-			this.reportPolling();
-			this.flushFonts();
-		});
+		this.every(10_000, () => this.reportPolling());
 		this.every(1000, () => this.log.flush());
 		try {
 			this.watcher = watch(
@@ -259,13 +211,12 @@ export class Companion {
 		this.running = false;
 		for (const timer of this.timers) clearInterval(timer);
 		this.watcher?.close();
-		this.flushFonts();
 		this.log.flush();
 	}
 
 	status(): string {
 		const c = this.counts;
-		return `${c.sessions} sessions; uplink: client wrote AddOns.txt ${c.clientWrites}×, ${c.frames} frames; lane D ${c.laneD} writes; slots ${c.slots} refreshes; doorbells ${c.bells} raised; fonts ${c.fonts} written; screenshots ${c.shots} read; ${c.wtf} other client file changes`;
+		return `${c.sessions} sessions; messages: ${c.lane} via lane U (${c.frames} frames in ${c.clientWrites} client writes), ${c.shot} via screenshot (${c.pictures} pictures read); ${c.replies} replies, ${c.bells} doorbells; ${c.wtf} other client file changes`;
 	}
 
 	private every(ms: number, fn: () => void): void {
@@ -311,7 +262,6 @@ export class Companion {
 				mtime: 0,
 				size: -1,
 				retries: 0,
-				clientAt: 0,
 				readErrors: 0,
 			};
 			this.watched.set(file, entry);
@@ -320,25 +270,13 @@ export class Companion {
 				// A file written before we started holds history, not news. A newer one
 				// (a character's first login) is read normally on the next poll.
 				if (stat.mtimeMs >= this.startedAt) continue;
-				const frame = decodeFrame(
-					readLane(readFileSync(file, "latin1"), "U").bytes,
-				);
-				if (frame) this.seen(frame.epoch).add(frame.seq);
 				entry.mtime = stat.mtimeMs;
 				entry.size = stat.size;
+				entry.last = hex(readLane(readFileSync(file, "latin1")).bytes);
 			} catch {
 				// Read again on the next change.
 			}
 		}
-	}
-
-	private seen(epoch: number): Set<number> {
-		let set = this.handled.get(epoch);
-		if (!set) {
-			set = new Set();
-			this.handled.set(epoch, set);
-		}
-		return set;
 	}
 
 	/** Reads a client write of AddOns.txt and logs what it held, decodable or not. */
@@ -368,22 +306,25 @@ export class Companion {
 				});
 			return;
 		}
-		const lane = readLane(text, "U");
-		const frame = decodeFrame(lane.bytes);
-		if (!frame && readAt - stat.mtimeMs < MID_WRITE_MS) {
-			// Maybe caught the client mid-write; it does not replace the file atomically.
-			// Read again on the next poll and log only once the file has settled.
+		const lane = readLane(text);
+		const frame = decodeLaneFrame(lane.bytes);
+		if ((!frame || frame === "rest") && readAt - stat.mtimeMs < MID_WRITE_MS) {
+			// Maybe caught the client mid-write; it does not replace the file atomically, and a
+			// file cut short reads as all helpers off. Read again on the next poll and log only
+			// once the file has settled.
 			entry.retries++;
 			return;
 		}
 		entry.mtime = stat.mtimeMs;
 		entry.size = stat.size;
 		entry.retries = 0;
-		entry.clientAt = readAt;
 		// The client writes only the logged-in character's file, so its last write tells us who
 		// plays, even when the frame in it does not decode.
 		this.active = entry;
 		this.counts.clientWrites++;
+		const key = hex(lane.bytes);
+		const repeat = key === entry.last;
+		entry.last = key;
 		this.log.add("addons", {
 			file: entry.label,
 			mtime: stat.mtimeMs,
@@ -391,164 +332,174 @@ export class Companion {
 			size: stat.size,
 			rows: lane.rows,
 			on: lane.on,
-			dRows: readLane(text, "D").rows,
-			frame: frame ? `${frame.epoch}:${frame.seq}` : null,
+			frame:
+				frame === "rest"
+					? "rest"
+					: frame
+						? `${frame.code}:${frame.first ? "F" : ""}${frame.seq}`
+						: null,
+			repeat: repeat || undefined,
 			duplicate: lane.duplicate || undefined,
 		});
-		if (frame) this.receive(entry, frame, stat.mtimeMs, readAt);
-	}
-
-	private receive(
-		entry: Watched,
-		frame: Frame,
-		mtime: number,
-		read: number,
-	): void {
-		const p = frame.payload;
-		const op =
-			frame.kind === Kind.Control ? String.fromCharCode(p[0] ?? 0) : "";
-		if (op === "H") {
-			const nonce = u32(p, 6);
-			if (this.hellos.get(frame.epoch) !== nonce) {
-				this.hellos.set(frame.epoch, nonce);
-				this.handled.set(frame.epoch, new Set());
-			}
-		}
-		const seen = this.seen(frame.epoch);
-		if (seen.has(frame.seq)) return;
-		seen.add(frame.seq);
-		this.counts.frames++;
-		const base = {
-			file: entry.label,
-			epoch: frame.epoch,
-			seq: frame.seq,
-			mtime,
-			read,
-		};
-		if (frame.kind === Kind.Data) {
-			const stream = p[0] ?? 0;
-			const index = u16(p, 1);
-			let ok = p.length === 20;
-			for (let j = 1; ok && j <= 17; j++)
-				ok = p[2 + j] === uplinkByte(stream, index, j);
-			this.log.add("frame", { ...base, kind: "data", stream, index, ok });
-			this.streams.get(`${frame.epoch}:${stream}`)?.add(index);
+		if (repeat || !frame) return;
+		if (frame === "rest") {
+			if (entry.assembly)
+				this.log.add("lane-broken", {
+					file: entry.label,
+					why: "rest",
+					frames: entry.assembly.frames,
+				});
+			entry.assembly = undefined;
 			return;
 		}
-		if (frame.kind !== Kind.Control) return;
-		this.log.add("frame", { ...base, kind: "control", op });
-		if (op === "H") {
-			this.active = entry;
-			this.counts.sessions++;
-			const reload = p[1] === 1;
-			this.log.add("hello", {
-				epoch: frame.epoch,
-				nonce: u32(p, 6),
-				account: entry.account,
+		this.counts.frames++;
+		const a = entry.assembly;
+		if (frame.first) {
+			if (a)
+				this.log.add("lane-broken", {
+					file: entry.label,
+					why: "new message",
+					frames: a.frames,
+				});
+			entry.assembly = {
+				code: frame.code,
+				next: (frame.seq + 1) % 32,
+				chunks: [frame.chunk],
+				length: frame.chunk.length,
+				frames: 1,
+				firstMtime: stat.mtimeMs,
+				lastMtime: stat.mtimeMs,
+			};
+		} else if (!a) {
+			return; // the rest of a message that started before we looked
+		} else if (frame.seq !== a.next || frame.code !== a.code) {
+			this.log.add("lane-broken", {
 				file: entry.label,
-				reload,
-				build: u32(p, 2),
+				why: "gap",
+				expected: a.next,
+				got: frame.seq,
+				frames: a.frames,
 			});
-			this.log.say(
-				`Session ${frame.epoch} on ${entry.label} (${reload ? "reload" : "login"}).`,
-			);
-		} else if (op === "M") {
-			this.streams.set(`${frame.epoch}:${p[1] ?? 0}`, new Set());
-		} else if (op === "E") {
-			const stream = p[1] ?? 0;
-			const count = u16(p, 2);
-			const got = this.streams.get(`${frame.epoch}:${stream}`)?.size ?? 0;
-			this.log.add("end", { epoch: frame.epoch, stream, count, got });
-			this.log.say(`Uplink stream ${stream}: ${got}/${count} frames seen.`);
+			entry.assembly = undefined;
+			return;
+		} else {
+			a.chunks.push(frame.chunk);
+			a.length += frame.chunk.length;
+			a.frames++;
+			a.next = (frame.seq + 1) % 32;
+			a.lastMtime = stat.mtimeMs;
 		}
+		const current = entry.assembly;
+		if (!current) return;
+		const bytes = Buffer.concat(current.chunks);
+		const length = messageLength(bytes);
+		if (length === undefined || bytes.length < length) return;
+		entry.assembly = undefined;
+		const message = decodeMessage(bytes);
+		if (!message) {
+			this.log.add("lane-broken", {
+				file: entry.label,
+				why: "checksum",
+				frames: current.frames,
+			});
+			return;
+		}
+		this.counts.lane++;
+		this.receive(message, readAt, {
+			file: entry.label,
+			account: entry.account,
+			code: current.code,
+			frames: current.frames,
+			firstMtime: current.firstMtime,
+			lastMtime: current.lastMtime,
+		});
 	}
 
-	// Lane D --------------------------------------------------------------------
+	// Messages --------------------------------------------------------------------
 
-	/**
-	 * Writes the next lane D frame into the active character's AddOns.txt, or into every
-	 * character's file until the client has written one. A file the client wrote within
-	 * the quiet period is skipped, so our rewrite cannot drop one of its lane U frames.
-	 */
-	private writeLaneD(): void {
-		if (!this.gameRunning) return;
-		const at = Date.now();
-		const counter = ++this.laneDCounter;
-		const frame = laneDFrame(this.runEpoch, counter, at);
-		const targets = this.active ? [this.active] : [...this.watched.values()];
-		let written = 0;
-		let busy = 0;
-		for (const entry of targets) {
-			this.check(entry); // take in a client write we have not read yet
-			if (
-				entry.retries > 0 ||
-				Date.now() - entry.clientAt < this.timing.quietMs
-			) {
-				busy++;
-				continue;
-			}
-			try {
-				const before = statSync(entry.file);
-				const text = readFileSync(entry.file, "latin1");
-				const next = Buffer.from(writeLane(text, "D", frame), "latin1");
-				const again = statSync(entry.file);
-				if (again.mtimeMs !== before.mtimeMs || again.size !== before.size) {
-					busy++;
-					continue;
-				}
-				atomicWrite(entry.file, next);
-				const after = statSync(entry.file);
-				entry.mtime = after.mtimeMs;
-				entry.size = after.size;
-				written++;
-			} catch (error) {
-				this.error("lane D", error, { file: entry.label });
-			}
-		}
-		if (written > 0) this.counts.laneD++;
-		this.log.add("lane-d", { counter, at, written, busy });
+	/** Logs a message, then answers it: reply fonts first, the doorbell last. */
+	private receive(
+		m: Message,
+		received: number,
+		via: Record<string, unknown>,
+	): void {
+		const key = `${m.epoch}:${m.id}`;
+		const duplicate = this.answered.has(key);
+		this.log.add("message", {
+			path: m.path === Path.Shot ? "shot" : "lane",
+			kind: KIND_NAMES[m.kind] ?? m.kind,
+			epoch: m.epoch,
+			id: m.id,
+			attempt: m.attempt,
+			wallMs: m.wallMs,
+			retryOf: m.retryOf || undefined,
+			fontNext: m.fontNext,
+			replyBytes: m.replyBytes,
+			style: m.style,
+			bytes: m.body.length,
+			received,
+			duplicate: duplicate || undefined,
+			...via,
+		});
+		if (duplicate) return;
+		this.answered.add(key);
+		const how =
+			m.path === Path.Shot ? `screenshot, style ${m.style}` : "lane U";
+		if (m.kind === Kind.Hello) {
+			this.counts.sessions++;
+			this.log.say(`Session ${m.epoch} on ${via.file ?? "?"} said hello.`);
+		} else if (m.kind === Kind.Say)
+			this.log.say(`say via ${how}: "${firstLine(m.body)}"`);
+		else if (m.kind === Kind.Trip) this.log.say(`Round trip via ${how}.`);
+		if (m.fontNext > 0 && m.replyBytes > 0) this.reply(m, received);
+		if (m.fontNext > 0 || m.kind === Kind.Bell || m.kind === Kind.Hello)
+			this.ring(m);
 	}
 
-	// Slots ---------------------------------------------------------------------
-
-	/** Rewrites every slot whose refresh interval has passed. Slots 5 and 6 are big and slower. */
-	private refreshSlots(): void {
-		if (!this.gameRunning) return;
-		const now = Date.now();
-		const due: number[] = [];
-		for (let k = 1; k <= SLOTS; k++) {
-			const every =
-				slotSize(k) >= 131072 ? this.timing.bigSlotMs : this.timing.slotMs;
-			if (now - (this.slotWritten.get(k) ?? 0) >= every) due.push(k);
-		}
-		if (due.length === 0) return;
-		const refresh = ++this.slotRefresh;
+	private reply(m: Message, received: number): void {
 		const started = performance.now();
-		let written = 0;
-		for (const k of due) {
-			const size = slotSize(k);
-			const every = size >= 131072 ? this.timing.bigSlotMs : this.timing.slotMs;
+		const written = Date.now();
+		const body = replyBody(m.body, m.replyBytes).subarray(0, m.replyBytes);
+		const bytes = encodeReply({
+			epoch: m.epoch,
+			id: m.id,
+			attempt: m.attempt,
+			receivedMs: received,
+			writtenMs: written,
+			path: m.path,
+			body,
+		});
+		const packets = replyPackets(bytes, m.fontNext, m.epoch, written);
+		let fonts = 0;
+		for (const { slot, packet } of packets) {
+			if (slot > FONTS) break;
 			try {
-				atomicWrite(
-					join(this.options.paths.addons, slotFolder(k), "data.lua"),
-					slotSource({ slot: k, refresh, written: Date.now(), every, size }),
-				);
-				this.slotWritten.set(k, now);
-				written++;
+				atomicWrite(this.fontFile(slot), fontFile(packet, slot));
+				fonts++;
 			} catch (error) {
-				this.error("slot", error, { slot: k });
+				this.error("font", error, { slot });
 			}
 		}
-		this.counts.slots++;
-		this.log.add("slots", {
-			refresh,
-			at: now,
+		this.counts.replies++;
+		this.log.add("reply", {
+			epoch: m.epoch,
+			id: m.id,
+			first: m.fontNext,
+			fonts,
+			bytes: bytes.length,
 			written,
 			ms: performance.now() - started,
 		});
 	}
 
-	// Doorbells -----------------------------------------------------------------
+	private fontFile(slot: number): string {
+		return join(
+			this.options.paths.addons,
+			"FamiliarSpike",
+			"fonts",
+			fontName(slot),
+		);
+	}
 
 	private signalFile(n: number): string {
 		return join(
@@ -559,25 +510,18 @@ export class Companion {
 		);
 	}
 
-	/** Raises every doorbell that is due: the first a minute after WoW starts, then one every 30 s. */
-	private ringBells(): void {
-		if (!this.gameRunning || this.gameStartedAt === undefined) return;
-		const due = Math.min(
-			SIGNALS,
-			Math.floor(
-				(Date.now() - this.gameStartedAt - this.timing.bellStartMs) /
-					this.timing.bellEveryMs,
-			) + 1,
-		);
-		while (this.nextBell <= due) {
-			const n = this.nextBell++;
-			try {
-				atomicWrite(this.signalFile(n), LONG_WAV);
-				this.counts.bells++;
-				this.log.add("bell", { n, raised: Date.now() });
-			} catch (error) {
-				this.error("doorbell", error, { n });
-			}
+	private ring(m: Message): void {
+		const n = this.nextBell++;
+		if (n > SIGNALS) {
+			this.error("doorbell", "all doorbells used; restart WoW", { n });
+			return;
+		}
+		try {
+			atomicWrite(this.signalFile(n), LONG_WAV);
+			this.counts.bells++;
+			this.log.add("bell", { n, raised: Date.now(), epoch: m.epoch, id: m.id });
+		} catch (error) {
+			this.error("doorbell", error, { n });
 		}
 	}
 
@@ -586,54 +530,6 @@ export class Companion {
 		let n = 1;
 		while (n <= SIGNALS && (statSizeOf(this.signalFile(n)) ?? 0) > 0) n++;
 		return n;
-	}
-
-	// Fonts -----------------------------------------------------------------------
-
-	/**
-	 * Rewrites the next font of the bank, round-robin, so every font the client has not loaded
-	 * yet holds recent data. A font the client has loaded keeps what it read first.
-	 */
-	private writeFont(): void {
-		if (!this.gameRunning) return;
-		const slot = this.nextFont;
-		this.nextFont = (slot % FONTS) + 1;
-		const counter = ++this.fontCounter;
-		const wallMs = Date.now();
-		try {
-			atomicWrite(
-				join(
-					this.options.paths.addons,
-					"FamiliarSpike",
-					"fonts",
-					fontName(slot),
-				),
-				fontFile(
-					fontPacket({ epoch: this.runEpoch, slot, counter, wallMs }),
-					slot,
-				),
-			);
-			this.fontWrites.push([slot, counter, wallMs]);
-			this.counts.fonts++;
-		} catch (error) {
-			// On Windows a font the client holds open cannot be replaced: a finding, not a fault.
-			this.fontFailures.push([
-				slot,
-				(error as NodeJS.ErrnoException).code ?? String(error),
-			]);
-		}
-	}
-
-	/** Font writes are logged in batches; the report needs every one to judge freshness. */
-	private flushFonts(): void {
-		if (this.fontWrites.length === 0 && this.fontFailures.length === 0) return;
-		this.log.add("fonts", {
-			epoch: this.runEpoch,
-			writes: this.fontWrites,
-			failed: this.fontFailures,
-		});
-		this.fontWrites = [];
-		this.fontFailures = [];
 	}
 
 	// Screenshots -----------------------------------------------------------------
@@ -672,8 +568,8 @@ export class Companion {
 	}
 
 	/**
-	 * A screenshot with our block is ours: logged, kept as a crop, removed. Any other picture
-	 * is the player's and stays untouched.
+	 * A screenshot with our block is ours: decoded, kept as a crop of the block, removed. Any
+	 * other picture is the player's and stays untouched; nothing of it is kept.
 	 */
 	private async readShotFile(
 		file: string,
@@ -690,70 +586,105 @@ export class Companion {
 			this.shotsDone.add(name);
 			return;
 		}
-		// The client may still be writing it.
-		const now = `${stat.size}:${stat.mtimeMs}`;
-		if (this.shotStat.get(name) !== now) {
-			this.shotStat.set(name, now);
-			return;
-		}
 		const seen = Date.now();
 		const started = performance.now();
 		let image: Raster | undefined;
-		let read: ShotRead | undefined;
 		let problem: string | undefined;
+		let read: ReturnType<typeof readShot> | undefined;
 		try {
-			image = await readImage(readFileSync(file), kind, SHOT_ROWS);
+			image = await readImage(readFileSync(file), kind);
 			read = readShot(image);
 		} catch (error) {
 			problem = String(error);
 		}
-		// A file that is still being written reads as broken: give it a few more polls.
-		const tries = (this.shotTries.get(name) ?? 0) + 1;
-		if (!read?.found && tries < 4 && seen - stat.mtimeMs < 3000) {
+		// A file the client is still writing reads as broken. While it changes, look again on
+		// the next poll; once it holds still, give it two more reads.
+		const state = `${stat.size}:${stat.mtimeMs}`;
+		const settled = this.shotStat.get(name) === state;
+		this.shotStat.set(name, state);
+		const tries = (this.shotTries.get(name) ?? 0) + (settled ? 1 : 0);
+		if (!read?.message && tries < 3 && seen - stat.mtimeMs < 10_000) {
 			this.shotTries.set(name, tries);
 			return;
 		}
 		this.shotTries.delete(name);
 		this.shotStat.delete(name);
 		this.shotsDone.add(name);
-		this.counts.shots++;
-		const frame = read?.frame;
+		this.counts.pictures++;
+		const found = read?.found;
+		const message = read?.message;
 		this.log.add("shot", {
 			file: name,
 			size: stat.size,
 			mtime: stat.mtimeMs,
 			seen,
+			tries,
 			decodeMs: performance.now() - started,
 			width: image?.width,
 			height: image?.height,
-			found: read?.found ?? false,
-			ok: read?.ok ?? false,
-			variant: read?.variant,
-			epoch: frame?.epoch,
-			seq: frame?.seq,
-			format: frame ? FORMATS[frame.format] : undefined,
-			drawn: frame?.wallMs,
-			bitErrors: read?.bitErrors,
-			bits: read?.bits,
-			black: read?.black,
-			white: read?.white,
-			pitch: read?.grid?.pitchX,
+			found: found ? true : undefined,
+			ok: message ? true : undefined,
+			x: found?.x,
+			y: found?.y,
+			pitch: found?.pitchX,
+			cols: found?.cols,
+			rows: found?.rows,
+			on: found?.on,
+			off: found?.off,
+			epoch: message?.epoch,
+			id: message?.id,
+			attempt: message?.attempt,
 			problem,
 		});
-		if (!read?.found || !image) return;
+		if (!found || !image) return;
+		this.keepCrop(image, found, name);
+		this.shotRemove.set(file, 0);
+		if (message) {
+			this.counts.shot++;
+			this.receive(message, Date.now(), {
+				file: name,
+				picture: stat.mtimeMs,
+				x: found.x,
+				y: found.y,
+				pitch: found.pitchX,
+				on: found.on,
+				off: found.off,
+			});
+		}
+	}
+
+	private keepCrop(image: Raster, found: Found, name: string): void {
+		if (!this.options.dataDir) return;
 		try {
-			if (this.options.dataDir) {
-				const dir = join(this.options.dataDir, "shots");
-				mkdirSync(dir, { recursive: true });
-				writeFileSync(
-					join(dir, `${name.replace(/\.\w+$/, "")}.png`),
-					encodePng(image, 1100, SHOT_ROWS),
+			const margin = Math.round(4 * found.pitchX);
+			const x0 = Math.max(0, Math.floor(found.x - margin));
+			const y0 = Math.max(0, Math.floor(found.y - margin));
+			const w = Math.min(
+				image.width - x0,
+				Math.ceil(found.cols * found.pitchX + 2 * margin),
+			);
+			const h = Math.min(
+				image.rows - y0,
+				Math.ceil(found.rows * found.pitchY + 2 * margin),
+			);
+			const rgb = new Uint8Array(w * h * 3);
+			for (let y = 0; y < h; y++)
+				rgb.set(
+					image.rgb.subarray(
+						((y0 + y) * image.width + x0) * 3,
+						((y0 + y) * image.width + x0 + w) * 3,
+					),
+					y * w * 3,
 				);
-			}
+			const dir = join(this.options.dataDir, "shots");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(
+				join(dir, `${name.replace(/\.\w+$/, "")}.png`),
+				encodePng({ width: w, height: h, rows: h, rgb }),
+			);
 		} catch (error) {
 			this.error("screenshot crop", error, { file: name });
 		}
-		this.shotRemove.set(file, 0);
 	}
 
 	// Client files ----------------------------------------------------------------
@@ -832,12 +763,10 @@ export class Companion {
 		}
 	}
 
-	private reset(): { signals: number; slots: number } {
+	private reset(): { signals: number; fonts: number } {
 		this.nextBell = 1;
-		// A new client process reads the bank from the start again.
-		this.nextFont = 1;
-		this.slotWritten.clear();
 		this.active = undefined;
+		for (const entry of this.watched.values()) entry.assembly = undefined;
 		return resetVolatile(this.options.paths);
 	}
 
@@ -848,30 +777,26 @@ export class Companion {
 			this.pids = pids;
 			this.log.add("game", { pids, initial: true });
 			if (pids.length === 0) this.log.add("reset", this.reset());
-			else {
-				// The game was already running: its files cannot be reset safely.
-				this.gameStartedAt = Date.now();
-				this.nextBell = this.firstUnraised();
-			}
+			// The game was already running: its files cannot be reset safely.
+			else this.nextBell = this.firstUnraised();
 			return;
 		}
 		const started = pids.filter((pid) => !this.pids.includes(pid));
 		const closed = this.pids.length > 0 && pids.length === 0;
 		if (started.length === 0 && pids.length === this.pids.length) return;
-		// A new client process reads the doorbell files fresh, so they can be reused. A second
-		// process next to a running client is left alone: a reset would drop a doorbell the
-		// running client has not heard yet.
+		// A new client process reads the doorbell and font files fresh, so they can be reused.
+		// A second process next to a running client is left alone: a reset would drop a
+		// doorbell the running client has not heard yet.
 		const restarted =
 			started.length > 0 && !pids.some((pid) => this.pids.includes(pid));
 		this.pids = pids;
 		this.log.add("game", { pids });
 		if (restarted || closed) {
 			this.log.add("reset", this.reset());
-			this.gameStartedAt = restarted ? Date.now() : undefined;
 			this.log.say(
 				closed
-					? "WoW closed. Doorbell and slot files reset."
-					: `WoW started (pid ${started.join(", ")}). Doorbell and slot files reset.`,
+					? "WoW closed. Doorbells and fonts reset."
+					: `WoW started (pid ${started.join(", ")}). Doorbells and fonts reset.`,
 			);
 		}
 	}

@@ -130,7 +130,7 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 	const { interface: iface, version } = clientVersion(paths.client);
 	const running = (await clientProcesses()).length > 0;
 	const firstInstall = !isInstalled(paths);
-	const result = install(paths, iface);
+	const result = install(paths, iface, running);
 	const log = new EventLog(join(dataDir, `companion-${stamp()}.jsonl`));
 	log.add("start", {
 		version: VERSION,
@@ -147,9 +147,13 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 	if (firstInstall) console.log("Test addon installed.");
 	else if (result.added + result.updated > 0)
 		console.log("Test addon updated.");
-	if (running && result.added > 0)
+	if (result.removed > 0)
 		console.log(
-			"\n!! WoW is running and new addon files were added. Quit WoW completely and start it again;\n!! /reload does not pick up new files.\n",
+			`Removed ${result.removed} helper addons of older versions${result.rows ? ` and their ${result.rows} AddOns.txt rows` : ""}.`,
+		);
+	if (running && result.added + result.removed > 0)
+		console.log(
+			"\n!! WoW is running and addon folders were added or removed. Quit WoW completely and start it\n!! again; /reload does not pick up new files.\n",
 		);
 	else if (running && result.updated > 0)
 		console.log("WoW is running: type /reload in game to load the update.");
@@ -170,12 +174,15 @@ async function run(paths: WowPaths, dataDir: string): Promise<void> {
 		[
 			"",
 			"In game:",
-			"  1. Log in. Chat shows the self-test and whether doorbells work on this client.",
-			"  2. Stand somewhere quiet, out of combat, and type /fspike bench (about three minutes).",
+			"  1. Log in. Chat shows the self-test and whether the companion answers.",
+			"  2. Stand somewhere quiet, out of combat, and type /fspike bench (about two minutes:",
+			"     the screen flashes, picture and sound settings change for moments, the interface",
+			"     disappears for a second).",
 			"  3. Type /reload once when it is done, so the client saves the results.",
-			"  4. Keep playing as usual for at least an hour. Switch characters once and come back.",
-			"  5. Quit WoW completely once, start it again and log in.",
-			"  6. At the end, log out to the character list or quit WoW: WoW saves the results only then.",
+			"  4. Play for about an hour: fight, pass a loading screen, Alt+Tab away for three minutes.",
+			"  5. Now and then type /fspike say <anything>; the answer comes back in chat.",
+			'  6. Open the addon list in game and at the character list: is "Familiar Spike lane" closed?',
+			"  7. At the end, log out to the character list or quit WoW: WoW saves the results only then.",
 			"Leave this window open. Ctrl+C stops and writes report.md.",
 			"",
 		].join("\n"),

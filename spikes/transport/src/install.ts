@@ -1,4 +1,10 @@
-// Installs and removes the spike addon, its lane helpers, slots, signal files and fonts.
+// Installs and removes the spike addon, its lane helpers, doorbell files and fonts.
+//
+// The 256 lane helpers form one group under FamiliarSpike_U000, and that group sits in its own
+// addon list category, which the addon collapses once: the list then shows the main addon and
+// one closed "Familiar Spike lane" entry. Forever's AddonList.lua files a group under the
+// category of its parent addon only, so U000 is the parent and every helper names the
+// category. Helpers of older spike versions (lane D, slots) are removed.
 import {
 	existsSync,
 	mkdirSync,
@@ -14,15 +20,11 @@ import { atomicWrite } from "./files.ts";
 import { FONTS, fontName, placeholderFont } from "./font.ts";
 import {
 	LANE_BITS,
-	type Lane,
 	LONG_WAV,
 	laneFolder,
-	placeholderSource,
 	SHORT_WAV,
 	SIGNALS,
-	SLOTS,
 	signalName,
-	slotFolder,
 } from "./protocol.ts";
 import { VERSION } from "./version.ts";
 import {
@@ -34,6 +36,10 @@ import {
 
 const MARKER = "## X-Familiar-Spike: 1";
 const MAIN = "FamiliarSpike";
+export const CATEGORY = "Familiar Spike lane";
+/** Lane D, slots: helpers of spike versions before 0.5.0. */
+const OLD_HELPER = /^FamiliarSpike_(D\d{3}|L\d{2})$/;
+const OLD_ROW = /^FamiliarSpike_(D\d{3}|L\d{2}):/;
 
 function toc(lines: string[]): string {
 	return `${lines.join("\n")}\n`;
@@ -56,25 +62,13 @@ function mainToc(iface: number): string {
 function helperToc(iface: number, name: string): string {
 	return toc([
 		`## Interface: ${iface}`,
-		`## Title: Familiar Spike ${name.slice(MAIN.length + 1)}`,
+		`## Title: Familiar Spike lane ${name.slice(-3)}`,
 		"## Notes: Transport test helper without code.",
-		`## Group: ${MAIN}`,
+		`## Group: ${laneFolder(0)}`,
+		`## Category: ${CATEGORY}`,
 		"## DefaultState: disabled",
 		"## LoadOnDemand: 1",
 		MARKER,
-	]);
-}
-
-function slotToc(iface: number, name: string): string {
-	return toc([
-		`## Interface: ${iface}`,
-		`## Title: Familiar Spike ${name.slice(MAIN.length + 1)}`,
-		"## Notes: Transport test slot.",
-		`## Group: ${MAIN}`,
-		"## LoadOnDemand: 1",
-		MARKER,
-		"",
-		"data.lua",
 	]);
 }
 
@@ -106,6 +100,10 @@ export interface InstallResult {
 	/** New files or folders the running game cannot see until it restarts. */
 	added: number;
 	updated: number;
+	/** Old helper folders; the running game lists them until it restarts. */
+	removed: number;
+	/** Their rows in the characters' AddOns.txt, removed only while the game is closed. */
+	rows: number;
 }
 
 export function spikeFolders(paths: WowPaths): string[] {
@@ -117,8 +115,26 @@ export function isInstalled(paths: WowPaths): boolean {
 	return owned(join(paths.addons, MAIN));
 }
 
-export function install(paths: WowPaths, iface: number): InstallResult {
-	const result: InstallResult = { added: 0, updated: 0 };
+/** Drops rows matching `pattern` from every character's AddOns.txt. */
+function dropRows(paths: WowPaths, pattern: RegExp): number {
+	let rows = 0;
+	for (const { file } of addonsFiles(paths)) {
+		const lines = readFileSync(file, "latin1").split("\n");
+		const kept = lines.filter((line) => !pattern.test(line));
+		if (kept.length !== lines.length) {
+			rows += lines.length - kept.length;
+			atomicWrite(file, Buffer.from(kept.join("\n"), "latin1"));
+		}
+	}
+	return rows;
+}
+
+export function install(
+	paths: WowPaths,
+	iface: number,
+	gameRunning = false,
+): InstallResult {
+	const result: InstallResult = { added: 0, updated: 0, removed: 0, rows: 0 };
 	const folder = (name: string) => {
 		const dir = join(paths.addons, name);
 		if (existsSync(dir) && !owned(dir) && readdirSync(dir).length > 0)
@@ -164,29 +180,33 @@ export function install(paths: WowPaths, iface: number): InstallResult {
 		const file = join(main, "fonts", fontName(slot));
 		if (!existsSync(file)) write(file, placeholderFont(slot));
 	}
-
-	for (const lane of ["U", "D"] as Lane[])
-		for (let i = 0; i < LANE_BITS; i++) {
-			const name = laneFolder(lane, i);
-			write(join(folder(name), `${name}.toc`), helperToc(iface, name));
-		}
-	for (let k = 1; k <= SLOTS; k++) {
-		const name = slotFolder(k);
-		const dir = folder(name);
-		write(join(dir, `${name}.toc`), slotToc(iface, name));
-		write(join(dir, "data.lua"), placeholderSource(k), false);
+	for (let i = 0; i < LANE_BITS; i++) {
+		const name = laneFolder(i);
+		write(join(folder(name), `${name}.toc`), helperToc(iface, name));
 	}
+	for (const name of spikeFolders(paths)) {
+		const dir = join(paths.addons, name);
+		if (OLD_HELPER.test(name) && owned(dir)) {
+			rmSync(dir, { recursive: true, force: true });
+			result.removed++;
+		}
+	}
+	if (!gameRunning) result.rows = dropRows(paths, OLD_ROW);
 	return result;
 }
 
-/** Silences raised signals and restores slot placeholders. Only safe while the game is closed. */
+/**
+ * Silences raised doorbells and empties the font bank. Only safe while the game is closed:
+ * a running client may still read them.
+ */
 export function resetVolatile(paths: WowPaths): {
 	signals: number;
-	slots: number;
+	fonts: number;
 } {
 	let signals = 0;
-	let slots = 0;
-	const sig = join(paths.addons, MAIN, "sig");
+	let fonts = 0;
+	const main = join(paths.addons, MAIN);
+	const sig = join(main, "sig");
 	if (existsSync(sig))
 		for (const name of readdirSync(sig)) {
 			const file = join(sig, name);
@@ -195,17 +215,16 @@ export function resetVolatile(paths: WowPaths): {
 				signals++;
 			}
 		}
-	for (let k = 1; k <= SLOTS; k++) {
-		const file = join(paths.addons, slotFolder(k), "data.lua");
-		if (
-			existsSync(file) &&
-			readFileSync(file, "utf8") !== placeholderSource(k)
-		) {
-			atomicWrite(file, placeholderSource(k));
-			slots++;
+	for (let slot = 1; slot <= FONTS; slot++) {
+		const file = join(main, "fonts", fontName(slot));
+		if (!existsSync(file)) continue;
+		const placeholder = placeholderFont(slot);
+		if (Buffer.compare(readFileSync(file), Buffer.from(placeholder)) !== 0) {
+			atomicWrite(file, placeholder);
+			fonts++;
 		}
 	}
-	return { signals, slots };
+	return { signals, fonts };
 }
 
 /** Removes everything the tool created, including saved results and AddOns.txt rows. */
@@ -223,17 +242,5 @@ export function uninstall(paths: WowPaths): { folders: number; rows: number } {
 		rmSync(file, { force: true });
 		rmSync(`${file}.bak`, { force: true });
 	}
-	let rows = 0;
-	for (const { file } of addonsFiles(paths)) {
-		const text = readFileSync(file, "latin1");
-		const lines = text.split("\n");
-		const kept = lines.filter(
-			(line) => !/^FamiliarSpike(_[UDL]\d+)?:/.test(line),
-		);
-		if (kept.length !== lines.length) {
-			rows += lines.length - kept.length;
-			atomicWrite(file, Buffer.from(kept.join("\n"), "latin1"));
-		}
-	}
-	return { folders, rows };
+	return { folders, rows: dropRows(paths, /^FamiliarSpike(_[UDL]\d+)?:/) };
 }

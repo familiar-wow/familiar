@@ -1,18 +1,12 @@
--- Frame codec and AddOns.txt lanes.
--- A lane is 256 empty helper addons. Each helper's per-character enable state carries one
--- bit. Helpers are addressed by index, as Blizzard's own addon list does.
+-- Codecs and lane U. The lane is 256 empty helper addons; each helper's per-character enable
+-- state carries one bit, and C_AddOns.SaveAddOns writes them to AddOns.txt for the companion.
+-- A frame uses the first 64, 128 or all 256 helpers. Formats: src/protocol.ts.
 local _, ns = ...
 
-local band, bxor, rshift = bit.band, bit.bxor, bit.rshift
+local band, bxor, lshift, rshift = bit.band, bit.bxor, bit.lshift, bit.rshift
 local byte, char, format, floor, rep = string.byte, string.char, string.format, math.floor, string.rep
 
-local Wire = {
-	BITS = 256,
-	FRAME = 32,
-	PAYLOAD = 20,
-	DATA = 1,
-	CONTROL = 3,
-}
+local Wire = { BITS = 256, WIDTHS = { 8, 16, 32 } }
 ns.Wire = Wire
 
 local CRC = {}
@@ -41,6 +35,22 @@ function Wire.Crc32(s, first, last)
 	return crc
 end
 
+-- CRC-16/CCITT-FALSE.
+function Wire.Crc16(s, first, last)
+	local crc = 0xFFFF
+	for i = first or 1, last or #s do
+		crc = bxor(crc, lshift(byte(s, i), 8))
+		for _ = 1, 8 do
+			if band(crc, 0x8000) ~= 0 then
+				crc = band(bxor(lshift(crc, 1), 0x1021), 0xFFFF)
+			else
+				crc = band(lshift(crc, 1), 0xFFFF)
+			end
+		end
+	end
+	return crc
+end
+
 function Wire.U16(n)
 	return char(n % 256, floor(n / 256) % 256)
 end
@@ -50,6 +60,7 @@ function Wire.U32(n)
 end
 
 function Wire.U48(n)
+	n = floor(n)
 	return Wire.U32(n % 4294967296) .. Wire.U16(floor(n / 4294967296))
 end
 
@@ -68,46 +79,26 @@ function Wire.ReadU48(s, i)
 	return Wire.ReadU32(s, i) + Wire.ReadU16(s, i + 4) * 4294967296
 end
 
--- Layout: "FS", kind, epoch, seq (u16), length, flags, 20 payload bytes, CRC-32 of bytes 1-28.
-function Wire.Encode(kind, epoch, seq, payload, flags)
-	local body = "FS"
-		.. char(kind, epoch)
-		.. Wire.U16(seq)
-		.. char(#payload, flags or 0)
-		.. payload
-		.. rep("\0", Wire.PAYLOAD - #payload)
-	return body .. Wire.U32(Wire.Crc32(body))
+-- One lane frame: width code (bits 7-6), first-frame flag (bit 5) and sequence (bits 4-0),
+-- a chunk of the message, then a CRC-16 of everything before it.
+function Wire.Frame(code, first, seq, chunk)
+	local size = Wire.WIDTHS[code]
+	local head = char(code * 64 + (first and 32 or 0) + seq % 32) .. chunk .. rep("\0", size - 3 - #chunk)
+	local crc = Wire.Crc16(head)
+	return head .. char(crc % 256, floor(crc / 256))
 end
 
-function Wire.Decode(frame)
-	if #frame ~= Wire.FRAME or frame:sub(1, 2) ~= "FS" then
-		return nil
-	end
-	if Wire.Crc32(frame, 1, 28) ~= Wire.ReadU32(frame, 29) then
-		return nil
-	end
-	local length = byte(frame, 7)
-	if length > Wire.PAYLOAD then
-		return nil
-	end
-	return {
-		kind = byte(frame, 3),
-		epoch = byte(frame, 4),
-		seq = Wire.ReadU16(frame, 5),
-		flags = byte(frame, 8),
-		payload = frame:sub(9, 8 + length),
-	}
+Wire.REST = rep("\0", 32)
+
+function Wire.LaneName(i)
+	return format("FamiliarSpike_U%03d", i)
 end
 
-function Wire.LaneName(letter, i)
-	return format("FamiliarSpike_%s%03d", letter, i)
-end
-
--- Indices of a lane's 256 helpers, or nil and the number of helpers the client does not know.
-function Wire.Resolve(letter)
+-- Indices of the 256 helpers, or nil and the number of helpers the client does not know.
+function Wire.Resolve()
 	local wanted, indices, found = {}, {}, 0
 	for i = 0, Wire.BITS - 1 do
-		wanted[Wire.LaneName(letter, i)] = i
+		wanted[Wire.LaneName(i)] = i
 	end
 	for index = 1, C_AddOns.GetNumAddOns() do
 		local bitIndex = wanted[(C_AddOns.GetAddOnInfo(index))]
@@ -139,13 +130,26 @@ function Wire.NewWriter(indices, character)
 	return setmetatable({ indices = indices, character = character, bits = {}, stale = true }, Writer)
 end
 
--- The client may have changed the lane, for example after ResetAddOns or the player's addon list.
+-- The client may have changed the lane, for example after the player's addon list.
 function Writer:Invalidate()
 	self.stale = true
 end
 
--- Applies a frame and persists it. Returns toggle ms, save ms, flipped bits and how many
--- flipped bits the client did not take.
+-- Whether every helper is off, as the addon list saw them when the UI loaded.
+function Writer:AtRest()
+	if self.stale then
+		return false
+	end
+	for i = 0, Wire.BITS - 1 do
+		if self.bits[i] then
+			return false
+		end
+	end
+	return true
+end
+
+-- Applies a frame of up to 32 bytes (missing bytes are zero) and persists it. Returns toggle
+-- ms, save ms, flipped bits and how many flipped bits the client did not take.
 function Writer:Write(frame)
 	local enable, disable, state = C_AddOns.EnableAddOn, C_AddOns.DisableAddOn, C_AddOns.GetAddOnEnableState
 	local indices, bits, character = self.indices, self.bits, self.character
@@ -157,8 +161,8 @@ function Writer:Write(frame)
 		end
 		self.stale = false
 	end
-	for index = 1, Wire.FRAME do
-		local value, base = byte(frame, index), (index - 1) * 8
+	for index = 1, Wire.BITS / 8 do
+		local value, base = byte(frame, index) or 0, (index - 1) * 8
 		for offset = 0, 7 do
 			local wanted = floor(value / POW2[offset]) % 2 == 1
 			local i = base + offset
@@ -183,29 +187,4 @@ function Writer:Write(frame)
 		end
 	end
 	return toggled - started, saved - toggled, #flipped, mismatches
-end
-
-local Reader = {}
-Reader.__index = Reader
-
-function Wire.NewReader(indices, character)
-	return setmetatable({ indices = indices, character = character }, Reader)
-end
-
--- Calls ResetAddOns, then reads the lane. Returns the frame, reset ms and read ms.
-function Reader:Read()
-	local started = debugprofilestop()
-	C_AddOns.ResetAddOns()
-	local reset = debugprofilestop()
-	local state, indices, character, bytes = C_AddOns.GetAddOnEnableState, self.indices, self.character, {}
-	for index = 1, Wire.FRAME do
-		local value, base = 0, (index - 1) * 8
-		for offset = 0, 7 do
-			if state(indices[base + offset], character) == 2 then
-				value = value + POW2[offset]
-			end
-		end
-		bytes[index] = value
-	end
-	return char(unpack(bytes)), reset - started, debugprofilestop() - reset
 end

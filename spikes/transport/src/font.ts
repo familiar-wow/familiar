@@ -2,7 +2,8 @@
 // font it has never loaded and measures the width of every data glyph; the file holds no code.
 // The client reads a font file only on its first use per process and finds only files that
 // existed when it started, so the bank is a set of files installed up front, each read once.
-// Shared with addon/FamiliarSpike/Font.lua.
+// A reply fills the fonts from the one the addon named in its message. Shared with
+// addon/FamiliarSpike/Font.lua.
 //
 // Metrics follow what wow-forever-codex measured to work on Forever: 1024 units per em, a data
 // glyph for byte v is (16 + v) × 16 units wide, read at font height 64 with "!" (v = 0) and '"'
@@ -25,38 +26,56 @@ export function fontName(slot: number): string {
 	return `F${String(slot).padStart(3, "0")}.ttf`;
 }
 
-/** Payload byte j (0-based) of a font packet, as in Font.lua. */
-export function fontByte(slot: number, counter: number, j: number): number {
-	return (slot * 17 + counter * 31 + j * 7) % 251;
-}
-
 export interface FontContent {
 	/** The companion run. */
 	epoch: number;
 	slot: number;
-	/** Counts the companion's font writes; 0 only in the install-time placeholder. */
-	counter: number;
+	/** The part of the reply this font carries, from 0. */
+	part: number;
 	/** Companion wall time in ms when it wrote the file. */
 	wallMs: number;
+	payload: Uint8Array;
 }
 
 /**
- * Layout: "FF", version 1, epoch, slot (u16), counter (u32), wall ms (u48), payload length
- * (u16), 490 payload bytes, CRC-32 of everything before it. Little-endian.
+ * Layout: "FF", version 1, epoch, slot (u16), part (u32), wall ms (u48), payload length (u16),
+ * 490 payload bytes, CRC-32 of everything before it. Little-endian.
  */
 export function fontPacket(content: FontContent): Uint8Array {
+	if (content.payload.length > FONT_PAYLOAD) throw new Error("font payload");
 	const bytes = new Uint8Array(FONT_PACKET);
 	const view = new DataView(bytes.buffer);
 	bytes.set([0x46, 0x46, 1, content.epoch], 0);
 	view.setUint16(4, content.slot, true);
-	view.setUint32(6, content.counter >>> 0, true);
+	view.setUint32(6, content.part >>> 0, true);
 	view.setUint32(10, content.wallMs % 2 ** 32, true);
 	view.setUint16(14, Math.floor(content.wallMs / 2 ** 32), true);
-	view.setUint16(16, FONT_PAYLOAD, true);
-	for (let j = 0; j < FONT_PAYLOAD; j++)
-		bytes[FONT_HEADER + j] = fontByte(content.slot, content.counter, j);
+	view.setUint16(16, content.payload.length, true);
+	bytes.set(content.payload, FONT_HEADER);
 	view.setUint32(FONT_PACKET - 4, crc32(bytes, 0, FONT_PACKET - 4), true);
 	return bytes;
+}
+
+/** A reply cut into font packets, one per slot from `first` on. */
+export function replyPackets(
+	reply: Uint8Array,
+	first: number,
+	epoch: number,
+	wallMs: number,
+): { slot: number; packet: Uint8Array }[] {
+	const out: { slot: number; packet: Uint8Array }[] = [];
+	for (let part = 0; part * FONT_PAYLOAD < reply.length; part++) {
+		const slot = first + part;
+		const payload = reply.subarray(
+			part * FONT_PAYLOAD,
+			(part + 1) * FONT_PAYLOAD,
+		);
+		out.push({
+			slot,
+			packet: fontPacket({ epoch, slot, part, wallMs, payload }),
+		});
+	}
+	return out;
 }
 
 /** Big-endian byte builder for the font tables. */

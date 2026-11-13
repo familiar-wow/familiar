@@ -1,6 +1,5 @@
-// Joins the addon's SavedVariables with the companion log and renders report.md.
-// Every channel gets one verdict from its benchmark and its soak. The diagnosis section shows
-// what the client actually wrote, so a channel that fails can be explained.
+// Joins the addon's SavedVariables with the companion log and renders report.md: one verdict
+// per question 0.5.0 asks, then the details behind each.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type LogEvent, readLogs } from "./log.ts";
@@ -45,28 +44,22 @@ function summary(value: string | undefined): Stats | undefined {
 
 const ms = (value: number | undefined, digits = 0) =>
 	value === undefined ? "–" : `${value.toFixed(digits)} ms`;
-const trio = (s: Stats | undefined, digits = 0) =>
+const sec = (value: number | undefined) =>
+	value === undefined ? "–" : `${(value / 1000).toFixed(2)} s`;
+const trio = (s: Stats | undefined, digits = 1) =>
 	s
 		? `${s.p50.toFixed(digits)} / ${s.p95.toFixed(digits)} / ${s.max.toFixed(digits)} ms`
 		: "–";
-const pct = (part: number, whole: number) =>
-	whole === 0 ? "–" : `${((100 * part) / whole).toFixed(1)} %`;
 const mark = (ok: boolean | undefined) =>
 	ok === undefined ? "?" : ok ? "✔" : "✘";
 const rows = (value: string | undefined) =>
 	value ? value.split(";").filter(Boolean) : [];
-const numOrUndefined = (value: string | undefined) =>
+const stamp = (value: string | undefined) =>
 	value === undefined || value === "" || value === "-"
 		? undefined
 		: Number(value);
-const bytes = (n: number) =>
-	n >= 1048576
-		? `${n / 1048576} MB`
-		: n >= 1024
-			? `${Math.round(n / 1024)} KB`
-			: `${n} B`;
 const time = (t: number) => new Date(t).toLocaleTimeString();
-const nFrames = (n: number) => `${n} frame${n === 1 ? "" : "s"}`;
+const ratio = (ok: number, all: number) => `${ok}/${all}`;
 
 function tableMd(head: string[], body: (string | number)[][]): string {
 	const line = (cells: (string | number)[]) => `| ${cells.join(" | ")} |`;
@@ -74,13 +67,6 @@ function tableMd(head: string[], body: (string | number)[][]): string {
 		"\n",
 	);
 }
-
-function count<K>(map: Map<K, number>, key: K, by = 1): void {
-	map.set(key, (map.get(key) ?? 0) + by);
-}
-
-const listing = (map: Map<string, number>) =>
-	[...map.entries()].map(([reason, n]) => `${reason} ×${n}`).join(", ");
 
 export interface Saved {
 	account: string;
@@ -107,36 +93,219 @@ export function loadSaved(dataDir: string): Saved[] {
 	return result;
 }
 
-/** One addon session (a login or /reload) and the companion events of its lifetime. */
+// Records -------------------------------------------------------------------------
+
 interface Session {
 	account: string;
 	data: LuaTable;
 	epoch: number;
-	from: number;
-	to: number;
-	events: LogEvent[];
-	/** Whether the companion ran during the session. */
-	companion: boolean;
+	started: number;
 }
 
-function sessionsOf(saved: Saved[], events: LogEvent[]): Session[] {
-	return saved.flatMap(({ account, db }) =>
+interface LaneSend {
+	epoch: number;
+	id: number;
+	kind: string;
+	tag: string;
+	code: number;
+	gap: number;
+	bytes: number;
+	frames: number;
+	first: number;
+	save?: Stats;
+	toggle?: Stats;
+	mismatches: number;
+	context: string;
+}
+
+interface ShotTake {
+	epoch: number;
+	id: number;
+	attempt: number;
+	tag: string;
+	style: number;
+	format: string;
+	bytes: number;
+	w: number;
+	h: number;
+	paintMax: number;
+	called: number;
+	result: string;
+	worst: number;
+}
+
+interface Trip {
+	epoch: number;
+	id: number;
+	attempts: number;
+	kind: string;
+	path: number;
+	style: number;
+	tag: string;
+	start: number;
+	sent: number;
+	bell?: number;
+	done: number;
+	received?: number;
+	written?: number;
+	fonts: number;
+	result: string;
+	context: string;
+}
+
+function laneSend(epoch: number, record: string): LaneSend {
+	const f = record.split(",");
+	return {
+		epoch,
+		id: Number(f[0]),
+		kind: f[2] ?? "?",
+		tag: f[3] ?? "-",
+		code: Number(f[4]),
+		gap: Number(f[5]),
+		bytes: Number(f[6]),
+		frames: Number(f[7]),
+		first: Number(f[8]),
+		toggle: summary(f[11]),
+		save: summary(f[12]),
+		mismatches: Number(f[14] ?? 0),
+		context: f[15] ?? "-",
+	};
+}
+
+function shotTake(epoch: number, record: string): ShotTake {
+	const f = record.split(",");
+	return {
+		epoch,
+		id: Number(f[0]),
+		attempt: Number(f[1]),
+		tag: f[2] ?? "-",
+		style: Number(f[3]),
+		format: f[4] ?? "?",
+		bytes: Number(f[5]),
+		w: Number(f[10]),
+		h: Number(f[11]),
+		paintMax: Number(f[13]),
+		called: Number(f[15]),
+		result: f[18] ?? "?",
+		worst: Number(f[19]),
+	};
+}
+
+function trip(epoch: number, record: string): Trip {
+	const f = record.split(",");
+	return {
+		epoch,
+		id: Number(f[0]),
+		attempts: Number(f[1]),
+		kind: f[2] ?? "?",
+		path: Number(f[3]),
+		style: Number(f[4]),
+		tag: f[5] ?? "-",
+		start: Number(f[6]),
+		sent: Number(f[7]),
+		bell: stamp(f[8]),
+		done: Number(f[9]),
+		received: stamp(f[10]),
+		written: stamp(f[11]),
+		fonts: Number(f[13]),
+		result: f[15] ?? "?",
+		context: f[16] ?? "-",
+	};
+}
+
+const STYLE = { muted: 1, small: 2, world: 4, hold: 8 };
+
+function styleName(style: number): string {
+	const parts = [style & STYLE.muted ? "muted" : "bright"];
+	if (style & STYLE.small) parts.push("2 px");
+	parts.push(style & STYLE.hold ? "2 frames" : "1 frame");
+	if (style & STYLE.world) parts.push("world");
+	return parts.join(", ");
+}
+
+/** Everything the report joins, keyed by "epoch:id". */
+interface Data {
+	sessions: Session[];
+	lane: LaneSend[];
+	shots: ShotTake[];
+	trips: Trip[];
+	/** Companion "message" events. */
+	messages: Map<string, LogEvent[]>;
+	/** Companion "shot" events with a decoded message, by "epoch:id:attempt". */
+	pictures: Map<string, LogEvent>;
+	/** Pictures without a decodable block, for matching by time. */
+	blank: LogEvent[];
+	events: LogEvent[];
+}
+
+const key = (epoch: number, id: number) => `${epoch}:${id}`;
+
+function collect(saved: Saved[], events: LogEvent[]): Data {
+	const sessions = saved.flatMap(({ account, db }) =>
 		list(db.sessions).map((value) => {
 			const data = table(value) ?? {};
-			const from = (num(data.started) ?? 0) * 1000 - 2000;
-			const to = (num(data.ended) ?? Number.POSITIVE_INFINITY) + 2000;
-			const own = events.filter((e) => e.t >= from && e.t <= to);
 			return {
 				account,
 				data,
 				epoch: num(data.epoch) ?? -1,
-				from,
-				to,
-				events: own,
-				companion: own.some((e) => e.ev === "poll" || e.ev === "lane-d"),
+				started: (num(data.started) ?? 0) * 1000,
 			};
 		}),
 	);
+	const data: Data = {
+		sessions,
+		lane: [],
+		shots: [],
+		trips: [],
+		messages: new Map(),
+		pictures: new Map(),
+		blank: [],
+		events,
+	};
+	for (const s of sessions) {
+		for (const r of list(s.data.lane))
+			data.lane.push(laneSend(s.epoch, String(r)));
+		for (const r of list(s.data.shots))
+			data.shots.push(shotTake(s.epoch, String(r)));
+		for (const r of list(s.data.trips))
+			data.trips.push(trip(s.epoch, String(r)));
+	}
+	for (const e of events) {
+		if (e.ev === "message") {
+			const k = key(Number(e.epoch), Number(e.id));
+			data.messages.set(k, [...(data.messages.get(k) ?? []), e]);
+		} else if (e.ev === "shot") {
+			if (e.ok) data.pictures.set(`${e.epoch}:${e.id}:${e.attempt}`, e);
+			else data.blank.push(e);
+		}
+	}
+	return data;
+}
+
+const arrived = (d: Data, epoch: number, id: number) =>
+	d.messages.has(key(epoch, id));
+
+/** The companion's picture of a take: decoded, a picture without our block, or none. */
+function pictureOf(
+	d: Data,
+	take: ShotTake,
+): { decoded: boolean; event?: LogEvent } {
+	const event = d.pictures.get(`${take.epoch}:${take.id}:${take.attempt}`);
+	if (event) return { decoded: true, event };
+	const blank = d.blank.find(
+		(e) =>
+			Number(e.mtime) >= take.called - 1000 &&
+			Number(e.mtime) <= take.called + 4000,
+	);
+	return { decoded: false, event: blank };
+}
+
+// Sections --------------------------------------------------------------------------
+
+interface Verdict {
+	ok: boolean | undefined;
+	check: string;
+	result: string;
 }
 
 interface Section {
@@ -144,1011 +313,380 @@ interface Section {
 	body: string;
 }
 
-interface Tally {
-	ok: number;
-	failed: number;
-}
-
-interface Verdict {
-	channel: string;
-	/** undefined: not measured. */
-	bench: boolean | undefined;
-	benchText: string;
-	soak: Tally;
-	soakText: string;
-	/** A channel without a soak is judged on its benchmark alone. */
-	benchOnly?: boolean;
-}
-
-const tally = (): Tally => ({ ok: 0, failed: 0 });
-
-// Uplink ------------------------------------------------------------------------
-
-const UPLINK_STREAMS = [1, 2, 3, 4, 5];
-const SOAK_STREAM = 9;
-
-function framesSeen(session: Session, stream: number): Map<number, LogEvent> {
-	const seen = new Map<number, LogEvent>();
-	for (const e of session.events)
-		if (
-			e.ev === "frame" &&
-			e.kind === "data" &&
-			e.epoch === session.epoch &&
-			e.stream === stream
-		)
-			seen.set(Number(e.index), e);
-	return seen;
-}
-
-/** What the client wrote to AddOns.txt between two times. */
-function clientWrites(events: LogEvent[], from: number, to: number) {
-	const writes = events.filter(
-		(e) => e.ev === "addons" && e.t >= from && e.t <= to,
-	);
-	const rowCounts = writes.map((e) => Number(e.rows ?? 0));
-	return {
-		writes: writes.length,
-		decoded: writes.filter((e) => e.frame).length,
-		minRows: rowCounts.length ? Math.min(...rowCounts) : 0,
-		maxRows: Math.max(0, ...rowCounts),
-		maxOn: Math.max(0, ...writes.map((e) => Number(e.on ?? 0))),
-	};
-}
-
-function uplinkBench(
-	session: Session,
-	bench: LuaTable,
-): { section: Section; ok: boolean | undefined; text: string } {
-	const up = table(bench.up);
-	const body: (string | number)[][] = [];
-	let lossFree = true;
-	let detect95 = 0;
-	let cost95 = 0;
-	let streams = 0;
-	let seenTotal = 0;
-	let mismatches = 0;
-	for (const stream of UPLINK_STREAMS) {
-		const run = table(up?.[String(stream)]);
-		if (!run) continue;
-		streams++;
-		const seen = framesSeen(session, stream);
-		const sends = rows(text(run.sends)).map((row) =>
-			row.split(",").map(Number),
-		);
-		const detect: number[] = [];
-		const fileLag: number[] = [];
-		const cost: number[] = [];
-		let corrupt = 0;
-		let streamMismatches = 0;
-		for (const [
-			index = 0,
-			sent = 0,
-			toggle = 0,
-			save = 0,
-			,
-			mis = 0,
-		] of sends) {
-			cost.push(toggle + save);
-			streamMismatches += mis;
-			const e = seen.get(index);
-			if (!e) continue;
-			if (e.ok === false) corrupt++;
-			detect.push(Number(e.read) - sent);
-			fileLag.push(Number(e.mtime) - sent);
-		}
-		seenTotal += detect.length;
-		mismatches += streamMismatches;
-		const interval = num(run.interval) ?? 0;
-		const lost = sends.length - detect.length;
-		if ((lost > 0 || corrupt > 0) && interval >= 0.033) lossFree = false;
-		const d = stats(detect);
-		const c = stats(cost);
-		if (interval >= 0.066) {
-			detect95 = Math.max(detect95, d?.p95 ?? 0);
-			cost95 = Math.max(cost95, c?.p95 ?? 0);
-		}
-		const first = sends[0]?.[1] ?? 0;
-		const last = sends.at(-1)?.[1] ?? 0;
-		const seconds = Math.max(0.001, (last - first) / 1000);
-		body.push([
-			interval === 0 ? "every frame" : `${Math.round(interval * 1000)} ms`,
-			`${detect.length}/${sends.length}`,
-			pct(lost, sends.length),
-			corrupt,
-			streamMismatches,
-			`${((detect.length * 20) / seconds).toFixed(0)} B/s`,
-			trio(d),
-			trio(stats(fileLag)),
-			trio(c, 2),
-		]);
+function laneSection(d: Data): { verdicts: Verdict[]; section: Section } {
+	const tests = d.lane.filter((l) => l.kind === "lane");
+	// One row per width, gap and message size.
+	const groups = new Map<string, LaneSend[]>();
+	for (const l of tests) {
+		const group = `${l.tag}/${l.bytes}`;
+		groups.set(group, [...(groups.get(group) ?? []), l]);
 	}
-	const from = num(bench.started) ?? 0;
-	const to = num(bench.finished) ?? from;
-	const writes = clientWrites(session.events, from, to);
-	let ok: boolean | undefined;
-	let verdict: string;
-	if (streams === 0) {
-		verdict = "not measured (helper addons missing?)";
-	} else if (seenTotal === 0) {
-		ok = session.companion ? false : undefined;
-		verdict = !session.companion
-			? "companion was not running"
-			: writes.writes === 0
-				? "no frame arrived: the client did not write AddOns.txt during the benchmark"
-				: writes.maxRows === 0
-					? `no frame arrived: the client wrote AddOns.txt ${writes.writes}× without FamiliarSpike_U rows`
-					: `no frame arrived: the client wrote AddOns.txt ${writes.writes}× (up to ${writes.maxRows} lane rows, ${writes.maxOn} enabled), none held a valid frame`;
-	} else {
-		ok = lossFree && detect95 < 250 && cost95 < 2 && mismatches === 0;
-		verdict = `${lossFree ? "no loss at ≥33 ms spacing" : "frames lost"}, detect p95 ${ms(detect95)}, write cost p95 ${ms(cost95, 2)}`;
-	}
-	if (mismatches > 0)
-		verdict += `; the client ignored ${mismatches} enable/disable calls`;
-	return {
-		ok,
-		text: verdict,
-		section: {
-			title: "Uplink: AddOns.txt lane U",
-			body: [
-				"The addon flips 256 helper enable states and calls `C_AddOns.SaveAddOns()`; the companion reads every client write of `AddOns.txt`. *Detect* runs from the start of the write to the companion's read (two clocks, ± one frame). *File lag* is the file's mtime minus the start of the write. *Write cost* is the time inside the toggle and save calls, which the frame pays for. *Ignored* counts enable/disable calls the client did not take. Payload per frame: 20 bytes.",
-				"",
-				tableMd(
-					[
-						"Spacing",
-						"Seen",
-						"Lost",
-						"Corrupt",
-						"Ignored",
-						"Payload",
-						"Detect p50/p95/max",
-						"File lag p50/p95/max",
-						"Write cost p50/p95/max",
-					],
-					body,
-				),
-				"",
-				`During the benchmark the client wrote \`AddOns.txt\` ${writes.writes}× (lane U rows per write: ${writes.minRows}–${writes.maxRows}, enabled up to ${writes.maxOn}); ${writes.decoded} of these writes held a valid frame.`,
-			].join("\n"),
-		},
-	};
-}
-
-// Lane D ------------------------------------------------------------------------
-
-function laneDBench(
-	session: Session,
-	bench: LuaTable,
-): { section: Section; ok: boolean | undefined; text: string } {
-	const d = table(bench.laneD);
-	if (!d)
-		return {
-			ok: undefined,
-			text: "not measured",
-			section: { title: "Downlink: AddOns.txt lane D", body: "Not measured." },
-		};
-	const started = num(d.started) ?? 0;
-	const finished = num(d.finished) ?? started;
-	const frames = rows(text(d.frames)).map((row) => row.split(",").map(Number));
-	const writes = session.events.filter(
-		(e) => e.ev === "lane-d" && e.t >= started && e.t <= finished - 500,
-	);
-	const written = writes.filter((e) => Number(e.written) > 0);
-	const busy = writes.length - written.length;
-	const seenCounters = new Set(frames.map(([counter]) => counter));
-	const missed = written.filter((e) => !seenCounters.has(Number(e.counter)));
-	const latency = frames
-		.filter(([, at = 0]) => at >= started)
-		.map(([, at = 0, seen = 0]) => seen - at);
-	const lat = stats(latency);
-	const reset = summary(text(d.reset));
-	const read = summary(text(d.read));
-	let ok: boolean | undefined;
-	let verdict: string;
-	if (!session.companion) verdict = "companion was not running";
-	else if (written.length === 0)
-		verdict = `the companion could not write lane D (${busy}× the client had just written AddOns.txt)`;
-	else if (frames.length === 0) {
-		ok = false;
-		verdict = `ResetAddOns does not pick up the file: 0 of ${written.length} companion frames seen`;
-	} else {
-		ok = missed.length === 0 && (lat?.p95 ?? 0) < 1000 && (reset?.p95 ?? 0) < 2;
-		verdict = `${written.length - missed.length}/${written.length} frames seen, latency p95 ${ms(lat?.p95)}, ResetAddOns cost p95 ${ms(reset?.p95, 2)}`;
-	}
-	return {
-		ok,
-		text: verdict,
-		section: {
-			title: "Downlink: AddOns.txt lane D",
-			body: [
-				"The companion rewrites lane D every 2 seconds with a counter and its clock, unless the client wrote the file within the last 3 seconds. The addon calls `C_AddOns.ResetAddOns()` every 0.1 s and reads the lane back. This only works if that call re-reads the file. Payload: 20 bytes per frame.",
-				"",
-				tableMd(
-					[
-						"Companion writes",
-						"Skipped (client busy)",
-						"Seen",
-						"Latency p50/p95/max",
-						"ResetAddOns cost p50/p95/max",
-						"Read cost p50/p95/max",
-					],
-					[
-						[
-							written.length,
-							busy,
-							`${written.length - missed.length}/${written.length}`,
-							trio(lat),
-							trio(reset, 3),
-							trio(read, 3),
-						],
-					],
-				),
-			].join("\n"),
-		},
-	};
-}
-
-// Slots -------------------------------------------------------------------------
-
-interface SlotLoad {
-	slot: number;
-	size: number;
-	cost: number;
-	age: number | undefined;
-	result: string;
-}
-
-function slotLoad(record: string): SlotLoad {
-	const [slot, size, cost, age, result = "?"] = record.split(",");
-	return {
-		slot: Number(slot),
-		size: Number(size),
-		cost: Number(cost),
-		age: numOrUndefined(age),
-		result,
-	};
-}
-
-function slotBench(
-	session: Session,
-	bench: LuaTable,
-): { section: Section; ok: boolean | undefined; text: string } {
-	const loads = rows(text(bench.slots)).map(slotLoad);
-	const until = num(bench.finished) ?? session.to;
-	const companionWrote = session.events.some(
-		(e) => e.ev === "slots" && Number(e.written) > 0 && e.t < until,
-	);
-	const fresh = loads.filter((l) => l.result === "fresh").length;
-	const small = stats(
-		loads
-			.filter((l) => l.size <= 2048 && l.result !== "used")
-			.map((l) => l.cost),
-	);
-	const big = loads.find((l) => l.size >= 1048576);
-	const age = stats(loads.flatMap((l) => (l.age === undefined ? [] : [l.age])));
-	let ok: boolean | undefined;
-	let verdict: string;
-	if (loads.length === 0) verdict = "not measured";
-	else if (!companionWrote && fresh === 0)
-		verdict = "companion did not write the slots";
-	else {
-		ok = fresh === loads.length;
-		const placeholders = loads.filter((l) => l.result === "placeholder").length;
-		verdict =
-			placeholders > 0 && companionWrote
-				? `${fresh}/${loads.length} fresh; ${placeholders}× the client loaded the install-time file although the companion had rewritten it`
-				: `${fresh}/${loads.length} fresh, data age p95 ${ms(age?.p95)}, LoadAddOn 2 KB p95 ${ms(small?.p95, 2)}${big ? `, 1 MB ${ms(big.cost, 1)}` : ""}`;
-	}
-	return {
-		ok,
-		text: verdict,
-		section: {
-			title: "Downlink: load-on-demand slots",
-			body: [
-				"The companion rewrites every slot's `data.lua` every 5 seconds (the 128 KB and 1 MB slots every 30 seconds); the addon loads one with `C_AddOns.LoadAddOn`. *fresh*: the data was written after the game started and is current; *placeholder*: the client loaded the file as installed. *Data age* is how old the data was when it was loaded. *Load cost* is paid inside one frame. A slot loads once per UI session; `/reload` frees them.",
-				"",
-				tableMd(
-					["Slot", "Size", "Result", "Data age", "Load cost"],
-					loads.map((l) => [
-						l.slot,
-						bytes(l.size),
-						l.result,
-						l.age === undefined ? "–" : ms(l.age),
-						ms(l.cost, 2),
-					]),
-				),
-			].join("\n"),
-		},
-	};
-}
-
-// Doorbells -----------------------------------------------------------------------
-
-/** How the addon tells a raised doorbell from a silent one, as Probe.lua names it. */
-const METHODS: Record<string, string> = {
-	return: "PlaySoundFile result",
-	duration: "sound length",
-};
-
-interface Bells {
-	heard: number;
-	missed: number;
-	early: number;
-	latency: number[];
-	contexts: Map<string, number>;
-}
-
-/** Matches the doorbells the addon heard with the ones the companion raised. */
-function bellsOf(session: Session, all: LogEvent[]): Bells {
-	const raises = all.filter((e) => e.ev === "bell");
-	const result: Bells = {
-		heard: 0,
-		missed: 0,
-		early: 0,
-		latency: [],
-		contexts: new Map(),
-	};
-	const listening = num(session.data.listening) ?? session.from;
-	for (const entry of list(session.data.bells).map(String)) {
-		const [n = 0, seen = 0] = entry.split(",").map(Number);
-		const context = entry.split(",")[2] ?? "-";
-		const before = raises.filter(
-			(e) => Number(e.n) === n && Number(e.raised) <= seen + 1000,
-		);
-		const raised = before.at(-1);
-		if (!raised) {
-			result.early++;
-			continue;
-		}
-		result.heard++;
-		count(result.contexts, context);
-		// A doorbell raised before the addon listened waited for the login, not the doorbell.
-		if (Number(raised.raised) >= listening)
-			result.latency.push(seen - Number(raised.raised));
-	}
-	// The companion silences every doorbell when the game starts or closes: one raised before
-	// that belongs to the previous client process and cannot be missed by this session.
-	const silenced = Math.max(
-		session.from,
-		...all.filter((e) => e.ev === "reset" && e.t <= listening).map((e) => e.t),
-	);
-	const next = num(session.data.nextSignal);
-	if (next !== undefined)
-		result.missed = raises.filter(
-			(e) =>
-				Number(e.n) >= next &&
-				Number(e.raised) >= silenced &&
-				Number(e.raised) <= session.to - 7000,
-		).length;
-	return result;
-}
-
-// Fonts ---------------------------------------------------------------------------
-
-interface FontRead {
-	where: string;
-	context: string;
-	slot: number;
-	start: number;
-	set: number;
-	ready: number;
-	readyFrames: number;
-	decode: number;
-	decodeFrames: number;
-	cost: number;
-	epoch: number;
-	counter: number;
-	written: number;
-	result: string;
-	dev: number;
-	/** Calibration widths; 48 and 303 when one UI unit is one pixel. Since 0.4.1. */
-	low?: number;
-	high?: number;
-	/** The slot named in the packet header, -1 without a header. Since 0.4.1. */
-	header?: number;
-}
-
-/** A Font.Format record. */
-function fontRead(record: string, where: string, context = "-"): FontRead {
-	const f = record.split(",");
-	const n = (i: number) => Number(f[i] ?? 0);
-	return {
-		where,
-		context,
-		slot: n(0),
-		start: n(1),
-		set: n(2),
-		ready: n(4),
-		readyFrames: n(5),
-		decode: n(6),
-		decodeFrames: n(7),
-		cost: n(8),
-		epoch: n(9),
-		counter: n(10),
-		written: n(11),
-		result: f[12] ?? "?",
-		dev: n(13),
-		low: numOrUndefined(f[14]),
-		high: numOrUndefined(f[15]),
-		header: numOrUndefined(f[16]),
-	};
-}
-
-/** Every font the companion wrote, per slot, oldest first. */
-type FontWrites = Map<number, { epoch: number; counter: number; at: number }[]>;
-
-function fontWritesOf(events: LogEvent[]): FontWrites {
-	const writes: FontWrites = new Map();
-	for (const e of events)
-		if (e.ev === "fonts")
-			for (const [slot = 0, counter = 0, at = 0] of (e.writes as number[][]) ??
-				[]) {
-				const list = writes.get(slot) ?? [];
-				list.push({ epoch: Number(e.epoch), counter, at });
-				writes.set(slot, list);
-			}
-	return writes;
-}
-
-/**
- * ok: decoded, and at least as new as the last data the companion wrote a second before the
- * read began. stale: decoded but older, the client kept an earlier version. waiting: the
- * install-time file because the companion had not written this font yet; not a failure.
- */
-function judgeFont(read: FontRead, writes: FontWrites): string {
-	const before = (writes.get(read.slot) ?? [])
-		.filter((w) => w.at < read.start - 1000)
-		.at(-1);
-	if (read.result === "ok")
-		return !before ||
-			(before.epoch === read.epoch && before.counter <= read.counter)
-			? "ok"
-			: "stale";
-	if (read.result === "placeholder")
-		return before ? "placeholder although written" : "waiting";
-	return read.result;
-}
-
-/** Font records of a session's soak; the first one is the read right after login. */
-function sessionFonts(session: Session): FontRead[] {
-	return list(session.data.soak)
-		.map(String)
-		.filter((r) => r.startsWith("F|"))
-		.map((r, i) => {
-			const [, context = "-", , detail = ""] = r.split("|");
-			return fontRead(detail, i === 0 ? "login" : "soak", context);
+	const body = [...groups.entries()].map(([group, sends]) => {
+		const times = sends.flatMap((l) => {
+			const m = d.messages.get(key(l.epoch, l.id))?.[0];
+			return m ? [Number(m.received) - l.first] : [];
 		});
-}
-
-function fontBench(
-	session: Session,
-	bench: LuaTable,
-	writes: FontWrites,
-): { ok: boolean | undefined; text: string } {
-	const reads = rows(text(bench.fonts)).map((r) => fontRead(r, "bench"));
-	const until = num(bench.finished) ?? session.to;
-	const wrote = [...writes.values()].some((list) =>
-		list.some((w) => w.at > session.from && w.at < until),
-	);
-	const status = reads.map((r) => judgeFont(r, writes));
-	const good = status.filter((s) => s === "ok").length;
-	const cost = stats(reads.map((r) => r.cost));
-	const ready = stats(
-		reads.filter((r) => r.result !== "timeout").map((r) => r.ready),
-	);
-	const dev = Math.max(0, ...reads.map((r) => r.dev));
-	if (reads.length === 0) return { ok: undefined, text: "not measured" };
-	if (!wrote && good === 0)
-		return { ok: undefined, text: "companion did not write the fonts" };
-	const problems = new Map<string, number>();
-	for (const s of status) if (s !== "ok") count(problems, s);
-	return {
-		ok: good === reads.length && (cost?.p95 ?? 0) < 2,
-		text: `${good}/${reads.length} decoded and current${problems.size ? ` (${listing(problems)})` : ""}, font ready p95 ${ms(ready?.p95)}, cost per frame p95 ${ms(cost?.p95, 2)}, largest deviation ${dev.toFixed(3)}`,
+		const t = stats(times);
+		const bytes = sends[0]?.bytes ?? 0;
+		const saves = sends.flatMap((l) => (l.save ? [l.save] : []));
+		const toggles = sends.flatMap((l) => (l.toggle ? [l.toggle] : []));
+		const merged = (list: Stats[]) =>
+			list.length
+				? {
+						n: list.reduce((a, s) => a + s.n, 0),
+						p50: stats(list.map((s) => s.p50))?.p50 ?? 0,
+						p95: Math.max(...list.map((s) => s.p95)),
+						max: Math.max(...list.map((s) => s.max)),
+					}
+				: undefined;
+		const [bits, gap] = group.split("/");
+		return [
+			`${bits} bit`,
+			`${gap} ms`,
+			`${bytes} B`,
+			ratio(times.length, sends.length),
+			sec(t?.p50),
+			t ? `${Math.round((bytes * 1000) / t.p50)} B/s` : "–",
+			trio(merged(saves)),
+			trio(merged(toggles)),
+		];
+	});
+	const all = d.lane;
+	const lost = all.filter((l) => !arrived(d, l.epoch, l.id));
+	const byKind = (kind: string) => {
+		const list = all.filter((l) => l.kind === kind);
+		return `${kind} ${ratio(list.filter((l) => arrived(d, l.epoch, l.id)).length, list.length)}`;
 	};
-}
-
-function fontSection(
-	sessions: Session[],
-	bench: LuaTable | undefined,
-	writes: FontWrites,
-	events: LogEvent[],
-): Section {
-	const reads = [
-		...rows(text(bench?.fonts)).map((r) => fontRead(r, "bench")),
-		...sessions.flatMap(sessionFonts),
-	].sort((a, b) => a.start - b.start);
-	// A client process starts the bank over: its first read shows whether a used font name
-	// gives new data again.
-	const processes: number[] = [];
-	let restart =
-		"not tested yet: quit WoW completely and start it again during the test";
-	for (const session of sessions) {
-		const process = num(session.data.fontProcess);
-		if (process === undefined || processes.includes(process)) continue;
-		processes.push(process);
-		const first = sessionFonts(session)[0];
-		if (processes.length > 1 && first)
-			restart = `${judgeFont(first, writes) === "ok" ? "current" : judgeFont(first, writes)} (slot ${first.slot})`;
-	}
-	const failed = new Map<string, number>();
-	for (const e of events)
-		if (e.ev === "fonts")
-			for (const [, code] of (e.failed as (number | string)[][]) ?? [])
-				count(failed, String(code));
-	const written = [...writes.values()].reduce((n, list) => n + list.length, 0);
-	return {
-		title: "Downlink: font bank",
-		body: [
-			"The companion rewrites the 256 fonts in `FamiliarSpike/fonts` one after another, two per second; each holds 512 bytes in the widths of its glyphs. The addon sets a font it has not used in this client process on a fresh font string and measures every glyph: eight in a row in the benchmark, one after every login and one every 2 minutes while you play. *Font ready* is how long the client took until the font measured right, *cost per frame* the longest our measuring took in one frame. *Calibration* are the widths of the two reference glyphs: 48 and 303 when one unit is one screen pixel. *Deviation* is how far a measured byte was from a whole number; up to 0.5 still reads correctly. *Data age* is how old the data was when the addon began. A failed read that names another font in its header was partly measured in that font.",
-			"",
-			reads.length
-				? tableMd(
-						[
-							"Time",
-							"Read",
-							"Context",
-							"Font",
-							"Result",
-							"Font ready",
-							"Measuring",
-							"Cost per frame",
-							"Calibration",
-							"Deviation",
-							"Data age",
-						],
-						reads.slice(-40).map((r) => {
-							const status = judgeFont(r, writes);
-							const header =
-								status !== "ok" &&
-								r.header !== undefined &&
-								r.header >= 0 &&
-								r.header !== r.slot
-									? ` (header of font ${r.header})`
-									: "";
-							return [
-								time(r.start),
-								r.where,
-								r.context,
-								r.slot,
-								`${status}${header}`,
-								`${ms(r.ready)} / ${nFrames(r.readyFrames)}`,
-								`${ms(r.decode)} / ${nFrames(r.decodeFrames)}`,
-								ms(r.cost, 2),
-								r.low !== undefined && r.high !== undefined
-									? `${r.low.toFixed(1)}–${r.high.toFixed(1)}`
-									: "–",
-								r.dev.toFixed(3),
-								r.result === "ok" ? ms(r.start - r.written) : "–",
-							];
-						}),
-					)
-				: "No font read yet.",
-			"",
-			`Client processes seen: ${processes.length}. First font after a client restart: ${restart}.`,
-			"",
-			`The companion wrote ${written} fonts${failed.size ? `; replacing a font failed ${listing(failed)} (the client may keep fonts it loaded open)` : ""}.`,
-		].join("\n"),
-	};
-}
-
-// Screenshots -----------------------------------------------------------------------
-
-interface ShotTake {
-	epoch: number;
-	seq: number;
-	variant: string;
-	format: string;
-	called: number;
-	done: number | undefined;
-	result: string;
-	/** Frames after the call's frame after which the data went; undefined: when saved. */
-	hide: number | undefined;
-	/** Painting the data: in total, the most in one frame, and over how many frames. */
-	paint: number;
-	paintMax: number;
-	paintFrames: number;
-	frames: number;
-	worst: number;
-	file?: LogEvent;
-}
-
-interface ShotRun {
-	data: LuaTable;
-	takes: ShotTake[];
-}
-
-/** A Shot.Take record; 0.4.0 records end after the worst frame and painted in one frame. */
-function shotTake(record: string, epoch: number): ShotTake {
-	const f = record.split(",");
-	const paint = Number(f[8]);
-	return {
-		epoch,
-		seq: Number(f[0]),
-		variant: f[1] ?? "?",
-		format: f[2] ?? "?",
-		called: Number(f[4]),
-		done: numOrUndefined(f[6]),
-		result: f[7] ?? "?",
-		hide: numOrUndefined(f[11]),
-		paint,
-		paintMax: numOrUndefined(f[12]) ?? paint,
-		paintFrames: numOrUndefined(f[13]) ?? 1,
-		frames: Number(f[9]),
-		worst: Number(f[10]),
-	};
-}
-
-/** The addon's screenshot runs, each picture joined with the file the companion read. */
-function shotRunsOf(
-	sessions: Session[],
-	events: LogEvent[],
-): { runs: ShotRun[]; others: number; unmatched: number } {
-	const files = events.filter((e) => e.ev === "shot");
-	const used = new Set<LogEvent>();
-	const runs = sessions.flatMap((session) =>
-		list(session.data.shots).map((value) => {
-			const data = table(value) ?? {};
-			const takes = rows(text(data.shots)).map((r) =>
-				shotTake(r, session.epoch),
-			);
-			return { data, takes };
-		}),
+	const broken = d.events.filter((e) => e.ev === "lane-broken");
+	const mismatches = all.reduce((a, l) => a + l.mismatches, 0);
+	const soakSaves = stats(
+		all
+			.filter((l) => l.kind === "soak")
+			.flatMap((l) => (l.save ? [l.save.p50] : [])),
 	);
-	const takes = runs.flatMap((run) => run.takes);
-	for (const take of takes) {
-		take.file = files.find(
-			(e) =>
-				!used.has(e) &&
-				e.epoch === take.epoch &&
-				e.seq === take.seq &&
-				e.found === true,
-		);
-		if (take.file) used.add(take.file);
-	}
-	// A picture whose header did not read: match it by time.
-	for (const take of takes) {
-		if (take.file) continue;
-		take.file = files.find(
-			(e) =>
-				!used.has(e) &&
-				Number(e.mtime) >= take.called - 1000 &&
-				Number(e.mtime) <= (take.done ?? take.called) + 3000,
-		);
-		if (take.file) used.add(take.file);
-	}
-	const rest = files.filter((e) => !used.has(e));
-	return {
-		runs,
-		others: rest.filter((e) => !e.found).length,
-		unmatched: rest.filter((e) => e.found).length,
-	};
-}
-
-const decoded = (take: ShotTake) => take.file?.ok === true;
-const early = (take: ShotTake) => take.hide !== undefined;
-
-/** "jpeg: A 2/2, B 1/2; png: E 2/2" in the order the formats were taken. */
-function shotSummary(takes: ShotTake[]): string {
-	const formats = [...new Set(takes.map((t) => t.format))];
-	return formats
-		.map((format) => {
-			const own = takes.filter((t) => t.format === format);
-			const variants = [...new Set(own.map((t) => t.variant))].sort();
-			return `${format}: ${variants
-				.map((v) => {
-					const of = own.filter((t) => t.variant === v);
-					return `${v} ${of.filter(decoded).length}/${of.length}`;
-				})
-				.join(", ")}`;
-		})
-		.join("; ");
-}
-
-/** "after 0 frames 0/1, after 1 frame 1/1": pictures whose data went early, still decoded. */
-function earlySummary(takes: ShotTake[]): string {
-	const hides = [...new Set(takes.map((t) => t.hide ?? 0))].sort(
-		(a, b) => a - b,
-	);
-	return hides
-		.map((h) => {
-			const of = takes.filter((t) => t.hide === h);
-			return `after ${nFrames(h)} ${of.filter(decoded).length}/${of.length}`;
-		})
-		.join(", ");
-}
-
-function shotBench(runs: ShotRun[]): { ok: boolean | undefined; text: string } {
-	const takes = runs.flatMap((run) => run.takes);
-	if (takes.length === 0)
-		return {
+	const verdicts: Verdict[] = [
+		{
+			ok: all.length ? lost.length === 0 : undefined,
+			check: "Lane U: every message arrives",
+			result: `${["lane", "soak", "say", "trip", "bell", "hello"].map(byKind).join(", ")}${lost.length ? `; lost: ${lost.map((l) => `${l.kind} #${l.id} (${l.context})`).join(", ")}` : ""}`,
+		},
+		{
+			ok: body.length ? true : undefined,
+			check: "Lane U: time for 332 B (300 B text)",
+			result: body.length
+				? body
+						.filter((r) => String(r[2]) === "332 B")
+						.map((r) => `${r[0]} at ${r[1]}: ${r[4]}`)
+						.join(", ")
+				: "no benchmark yet: type `/fspike bench`",
+		},
+		{
 			ok: undefined,
-			text: runs.some((run) => text(run.data.result))
-				? (text(runs[0]?.data.result) ?? "not measured")
-				: "not measured: type `/fspike shots`",
-		};
-	if (!takes.some((t) => t.file))
-		return {
-			ok: false,
-			text: `no screenshot reached the companion (client said: ${[...new Set(takes.map((t) => t.result))].join(", ")})`,
-		};
-	// The player's own format decides; PNG is a setting we could ask players to change.
-	// Pictures whose data went early only show when the client captures.
-	const full = takes.filter((t) => !early(t));
-	const own = text(runs.at(-1)?.data.format) ?? full[0]?.format;
-	const mine = full.filter((t) => t.format === own);
-	const variants = [...new Set(mine.map((t) => t.variant))];
-	const ok = variants.some((v) =>
-		mine.filter((t) => t.variant === v).every(decoded),
+			check: "Lane U: SaveAddOns per save (p50 of the soak)",
+			result: soakSaves ? ms(soakSaves.p50, 2) : "–",
+		},
+	];
+	return {
+		verdicts,
+		section: {
+			title: "Lane U",
+			body: [
+				"Benchmark messages, from the first save to the companion's read of the last frame. *Save* and *toggle* are p50 / p95 / max of every `SaveAddOns` call and of the `EnableAddOn`/`DisableAddOn` calls before it.",
+				"",
+				body.length
+					? tableMd(
+							[
+								"Width",
+								"Gap",
+								"Message",
+								"Arrived",
+								"Time (p50)",
+								"Rate",
+								"Save",
+								"Toggle",
+							],
+							body,
+						)
+					: "No benchmark yet.",
+				"",
+				`Frames the companion could not use: ${broken.length ? broken.map((e) => `${e.why}${e.why === "gap" ? ` (${e.expected}→${e.got})` : ""}`).join(", ") : "none"}. Bits the client did not take: ${mismatches}.`,
+			].join("\n"),
+		},
+	};
+}
+
+function shotSection(d: Data): { verdicts: Verdict[]; sections: Section[] } {
+	const takes = d.shots;
+	const judge = (take: ShotTake) => pictureOf(d, take);
+	const level = (e?: LogEvent) =>
+		e?.on !== undefined
+			? `${Math.round(Number(e.on))}/${Math.round(Number(e.off))}`
+			: "";
+	// Every style under normal settings.
+	const plain = takes.filter(
+		(t) =>
+			!t.tag.includes("/") &&
+			t.tag !== "soak" &&
+			t.tag !== "say" &&
+			t.tag !== "bench",
 	);
-	const latency = stats(
-		full.flatMap((t) => (t.file ? [Number(t.file.mtime) - t.called] : [])),
+	// The block was in the picture, whether or not its bits came through.
+	const seen = (t: ShotTake) => {
+		const p = judge(t);
+		return p.decoded || p.event?.found === true;
+	};
+	const plainRows = plain.map((t) => {
+		const p = judge(t);
+		return [
+			t.tag,
+			styleName(t.style),
+			`${t.w}×${t.h} px`,
+			p.decoded
+				? "✔"
+				: p.event?.found
+					? "✘ unreadable"
+					: p.event
+						? "✘ no block"
+						: "✘ no picture",
+			level(p.event),
+			ms(t.paintMax, 1),
+			ms(t.worst, 0),
+		];
+	});
+	// Picture settings: one row per setting, one column per style.
+	const settingTakes = takes.filter(
+		(t) => t.tag.includes(":") && t.tag.includes("/"),
+	);
+	const settings = [
+		...new Set(settingTakes.map((t) => t.tag.split("/")[0] ?? "")),
+	];
+	const styles = ["bright", "muted", "small", "small-muted"];
+	const matrix = settings.map((setting) => [
+		setting,
+		...styles.map((style) => {
+			const t = settingTakes.find((x) => x.tag === `${setting}/${style}`);
+			if (!t) return "–";
+			const p = judge(t);
+			return `${p.decoded ? "✔" : "✘"} ${level(p.event)}`.trim();
+		}),
+	]);
+	const holds = (style: string) =>
+		settingTakes.length > 0 &&
+		settingTakes
+			.filter((t) => t.tag.endsWith(`/${style}`))
+			.every((t) => judge(t).decoded);
+	const failing = (style: string) =>
+		settingTakes
+			.filter((t) => t.tag.endsWith(`/${style}`) && !judge(t).decoded)
+			.map((t) => t.tag.split("/")[0])
+			.join(", ");
+	const noui = takes.filter((t) => t.tag.startsWith("noui/"));
+	const nouiText = noui
+		.map(
+			(t) =>
+				`${t.tag.slice(5)} parent ${seen(t) ? "in the picture" : "not in it"}`,
+		)
+		.join(", ");
+	// Soak: a message counts once, delivered by its first or second picture.
+	const soak = takes.filter((t) => t.tag === "soak");
+	const soakIds = [...new Set(soak.map((t) => key(t.epoch, t.id)))];
+	let first = 0;
+	let second = 0;
+	const lostSoak: string[] = [];
+	for (const k of soakIds) {
+		const attempts = soak.filter((t) => key(t.epoch, t.id) === k);
+		const firstTake = attempts.find((t) => t.attempt === 1);
+		if (firstTake && judge(firstTake).decoded) first++;
+		else if (attempts.some((t) => t.attempt > 1 && judge(t).decoded)) second++;
+		else
+			lostSoak.push(
+				`#${k.split(":")[1]} at ${firstTake ? time(firstTake.called) : "?"} (${d.trips.find((x) => key(x.epoch, x.id) === k)?.context ?? "?"})`,
+			);
+	}
+	const soakTrips = d.trips.filter((t) => t.kind === "soak");
+	const combat = soakTrips.filter((t) => t.context.includes("combat"));
+	// Pictures where only the timing could fail: no setting at a limit, the interface shown.
+	const oneFrame = takes.filter(
+		(t) => !(t.style & STYLE.hold) && t.attempt === 1 && !t.tag.includes("/"),
 	);
 	const worst = stats(takes.map((t) => t.worst));
-	const painting = Math.max(0, ...takes.map((t) => t.paintMax));
-	const hidden = takes.filter(early);
+	const verdicts: Verdict[] = [
+		{
+			ok: plain.length ? plain.every((t) => judge(t).decoded) : undefined,
+			check: "Screenshot: every style decodes",
+			result: plain.length
+				? plain
+						.map((t) => `${t.tag} ${judge(t).decoded ? "✔" : "✘"}`)
+						.join(", ")
+				: "no benchmark yet",
+		},
+		{
+			ok: settingTakes.length ? holds("bright") : undefined,
+			check: "Screenshot: picture settings at their limits",
+			result: settingTakes.length
+				? styles
+						.map((s) => `${s} ${holds(s) ? "all" : `fails at ${failing(s)}`}`)
+						.join("; ")
+				: "no benchmark yet",
+		},
+		{
+			ok: undefined,
+			check: "Screenshot: interface hidden (Alt+Z)",
+			result: nouiText || "not measured",
+		},
+		{
+			ok: soakIds.length ? lostSoak.length === 0 : undefined,
+			check: "Screenshot soak: every message arrives",
+			result: soakIds.length
+				? `${first} with the first picture, ${second} with the second, ${lostSoak.length} lost${lostSoak.length ? ` (${lostSoak.join(", ")})` : ""}; ${combat.length} in combat`
+				: "no soak pictures yet",
+		},
+		{
+			ok: oneFrame.length ? oneFrame.every(seen) : undefined,
+			check: "Screenshot: block shown for one frame is in the picture",
+			result: `${ratio(oneFrame.filter(seen).length, oneFrame.length)} pictures; longest frame around a picture ${ms(worst?.max)}`,
+		},
+	];
+	const sections: Section[] = [
+		{
+			title: "Screenshots",
+			body: [
+				"Benchmark pictures with normal settings. *Levels* are the brightness of the block's on and off cells in the picture (0–255). *Paint* is the most Lua time in one frame while painting, *frame* the longest frame from the call to the saved file.",
+				"",
+				plainRows.length
+					? tableMd(
+							["Test", "Style", "Block", "Read", "Levels", "Paint", "Frame"],
+							plainRows,
+						)
+					: "No benchmark yet.",
+				"",
+				"Picture settings at their slider limits, each for about two seconds, with the levels of each block:",
+				"",
+				matrix.length
+					? tableMd(["Setting", ...styles], matrix)
+					: "Not measured.",
+			].join("\n"),
+		},
+	];
+	return { verdicts, sections };
+}
+
+function tripSection(d: Data): { verdicts: Verdict[]; section: Section } {
+	const trips = d.trips.filter((t) => t.kind === "say" || t.kind === "trip");
+	const timing = (t: Trip) =>
+		t.received !== undefined && t.written !== undefined && t.bell !== undefined
+			? [
+					sec(t.received - t.start),
+					sec(t.written - t.received),
+					sec(t.bell - t.written),
+					sec(t.done - t.bell),
+				]
+			: ["–", "–", "–", "–"];
+	const body = trips.map((t) => [
+		t.kind,
+		t.path === 1 ? "lane U" : `screenshot (${styleName(t.style)})`,
+		t.result === "ok" ? "✔" : `✘ ${t.result}`,
+		t.attempts > 1 ? "2" : "1",
+		sec(t.done - t.start),
+		...timing(t),
+		t.context,
+	]);
+	const ok = trips.filter((t) => t.result === "ok");
+	const byPath = (path: number) =>
+		stats(ok.filter((t) => t.path === path).map((t) => t.done - t.start));
+	const lane = byPath(1);
+	const shot = byPath(2);
+	const bells = d.trips.filter((t) => t.kind === "bell");
+	const fontReads = d.trips.filter((t) => t.fonts > 0);
+	const fontsOk = fontReads.filter((t) => t.result === "ok");
+	const verdicts: Verdict[] = [
+		{
+			ok: trips.length ? ok.length === trips.length : undefined,
+			check: "Round trip with a 2 KB reply",
+			result: trips.length
+				? `${ratio(ok.length, trips.length)} answered; lane U p50 ${sec(lane?.p50)} (max ${sec(lane?.max)}), screenshot p50 ${sec(shot?.p50)} (max ${sec(shot?.max)})`
+				: "none yet: `/fspike say <text>` or the benchmark",
+		},
+		{
+			ok: bells.length
+				? bells.find((t) => t.tag === "normal")?.result === "ok"
+				: undefined,
+			check: "Doorbell with normal sound, volume 0, sound off",
+			result: bells.length
+				? bells
+						.map(
+							(t) =>
+								`${t.tag.split(":")[0]} ${t.result === "ok" ? "heard" : "not heard"}`,
+						)
+						.join(", ")
+				: "not measured",
+		},
+		{
+			ok: fontReads.length ? fontsOk.length === fontReads.length : undefined,
+			check: "Font bank: replies read",
+			result: `${ratio(fontsOk.length, fontReads.length)} replies, ${fontReads.reduce((a, t) => a + t.fonts, 0)} fonts`,
+		},
+	];
 	return {
-		ok,
-		text: `${shotSummary(full)}${hidden.length ? `; data hidden early, still decoded: ${earlySummary(hidden)}` : ""}; call → file p95 ${ms(latency?.p95)}, worst frame p95 ${ms(worst?.p95)}, painting at most ${ms(painting, 1)} per frame`,
+		verdicts,
+		section: {
+			title: "Round trips",
+			body: [
+				"From the start of sending to the last reply font read: *up* until the companion had the message, *companion* until it wrote the reply, *doorbell* until the addon heard it, *fonts* reading the reply.",
+				"",
+				body.length
+					? tableMd(
+							[
+								"Kind",
+								"Path",
+								"Result",
+								"Pictures",
+								"Total",
+								"Up",
+								"Companion",
+								"Doorbell",
+								"Fonts",
+								"Context",
+							],
+							body,
+						)
+					: "None yet.",
+			].join("\n"),
+		},
 	};
 }
 
-function shotSection(
-	runs: ShotRun[],
-	others: number,
-	unmatched: number,
-): Section {
-	const takes = runs.flatMap((run) => run.takes);
-	const result = (t: ShotTake) => {
-		const f = t.file;
-		if (!f) return "no file";
-		if (f.ok) return "✔";
-		if (!f.found) return `✘ block not found, kept as ${f.file}`;
-		if (early(t) && f.bitErrors === undefined) return "✘ data not captured";
-		return f.bitErrors === undefined
-			? "✘ header unreadable"
-			: `✘ ${f.bitErrors} of ${f.bits} bits wrong`;
-	};
+function listSection(d: Data): Verdict {
+	// The addon collapses the category once; every later login shows whether it stayed so.
+	const states = d.sessions.map((s) => num(s.data.collapsed) ?? -1);
+	const later = states.slice(1).filter((s) => s >= 0);
+	const helpers = d.sessions.map((s) => num(s.data.helpers)).at(-1);
 	return {
-		title: "Uplink: screenshots",
-		body: [
-			"The addon paints a block of 258 × 34 cells of 4 pixels while it is hidden, a few hundred cells per frame, shows it in the top-left corner and calls `Screenshot()`. The companion decodes the picture, keeps the corner in `shots/` of the data folder and deletes the picture; screenshots without the block stay untouched. First in your own format, then in PNG if the addon may switch the format (it switches back right after). *A* has cells of 8 px, black or white (256 B); *B* 4 px, black or white (1 KB); *C* 4 grey levels (2 KB); *D* 8 grey levels (3 KB); *E* one byte per colour (24 KB, PNG only). Normally the block stays until the client reports the file saved. Some pictures hide the data 0, 1 or 2 frames after the call and keep only the border: whether their data still decodes shows when the client captures the picture. *Data on screen* counts the frames the data was visible, the one before the call included; *worst frame* is the longest frame from the call until a second after. *File → read* includes a quarter second in which the companion waits for the file to stop changing.",
-			"",
-			...runs.map((run) => {
-				const d = run.data;
-				return `- Run at ${time(num(d.started) ?? 0)}: format ${text(d.format) ?? "?"}, quality ${text(d.quality) ?? "?"}; Blizzard's message off: ${num(d.quiet) === 1 ? "yes" : "no"}; PNG: ${text(d.png) ?? "–"}${text(d.png) === "switched" ? (num(d.restored) === 1 ? ", restored" : ", NOT restored") : ""}; screen ${text(d.geometry) ?? "?"}.`;
-			}),
-			"",
-			takes.length
-				? tableMd(
-						[
-							"Picture",
-							"Variant",
-							"Format",
-							"Data on screen",
-							"Client",
-							"Decoded",
-							"Call → file",
-							"File → read",
-							"Worst frame",
-							"Painting",
-						],
-						takes.map((t) => [
-							t.seq,
-							t.variant,
-							t.format,
-							early(t)
-								? `${nFrames((t.hide ?? 0) + 1)}, hidden early`
-								: nFrames(t.frames + 1),
-							t.result,
-							result(t),
-							t.file ? ms(Number(t.file.mtime) - t.called) : "–",
-							t.file ? ms(Number(t.file.seen) - Number(t.file.mtime)) : "–",
-							ms(t.worst),
-							`${ms(t.paint, 1)} in ${nFrames(t.paintFrames)}, at most ${ms(t.paintMax, 1)}`,
-						]),
-					)
-				: "No screenshots yet.",
-			"",
-			`${others} screenshot${others === 1 ? "" : "s"} without the block ${others === 1 ? "was" : "were"} left alone.${unmatched ? ` ${unmatched} of ours belong to results not saved yet.` : ""}`,
-		].join("\n"),
+		ok: later.length ? later.every((s) => s === 1) : undefined,
+		check: "Addon list: lane category stays collapsed (in game)",
+		result: `${later.length ? `${ratio(later.filter((s) => s === 1).length, later.length)} logins found it collapsed` : "needs a second login"}; ${helpers ?? "?"} helper addons; character list: look yourself`,
 	};
 }
 
-// Soak ----------------------------------------------------------------------------
-
-interface ContextRow {
-	up: Tally;
-	laneD: Tally;
-	slots: Tally;
-	fonts: Tally;
-	bells: number;
-	skipped: number;
-}
-
-interface Soak {
-	minutes: number;
-	sessions: number;
-	up: Tally;
-	laneD: Tally;
-	slots: Tally;
-	fonts: Tally;
-	bells: Tally;
-	contexts: Map<string, ContextRow>;
-	reasons: Map<string, number>;
-	upDetect: number[];
-	bellLatency: number[];
-}
-
-function soakOf(
-	sessions: Session[],
-	all: LogEvent[],
-	fontWrites: FontWrites,
-): Soak {
-	const soak: Soak = {
-		minutes: 0,
-		sessions: 0,
-		up: tally(),
-		laneD: tally(),
-		slots: tally(),
-		fonts: tally(),
-		bells: tally(),
-		contexts: new Map(),
-		reasons: new Map(),
-		upDetect: [],
-		bellLatency: [],
-	};
-	const row = (context: string) => {
-		let found = soak.contexts.get(context);
-		if (!found) {
-			found = {
-				up: tally(),
-				laneD: tally(),
-				slots: tally(),
-				fonts: tally(),
-				bells: 0,
-				skipped: 0,
-			};
-			soak.contexts.set(context, found);
-		}
-		return found;
-	};
-	for (const session of sessions) {
-		if (!session.companion) continue;
-		const records = list(session.data.soak).map(String);
-		const bells = bellsOf(session, all);
-		if (records.length === 0 && bells.heard === 0) continue;
-		soak.sessions++;
-		const times = records
-			.map((r) => Number(r.split("|")[2]))
-			.filter(Number.isFinite);
-		if (times.length > 1)
-			soak.minutes += (Math.max(...times) - Math.min(...times)) / 60_000;
-		const seen = framesSeen(session, SOAK_STREAM);
-		const laneDWrites = session.events
-			.filter((e) => e.ev === "lane-d" && Number(e.written) > 0)
-			.map((e) => e.t);
-		const clientWrites = session.events
-			.filter((e) => e.ev === "addons")
-			.map((e) => Number(e.mtime));
-		let previousD = session.from;
-		for (const record of records) {
-			const [kind = "", context = "-", atText = "0", detail = ""] =
-				record.split("|");
-			const at = Number(atText);
-			const r = row(context);
-			const fail = (t: Tally, rt: Tally, reason: string) => {
-				t.failed++;
-				rt.failed++;
-				count(soak.reasons, reason);
-			};
-			if (kind === "U") {
-				// A frame sent right before logout may not have been read yet.
-				if (at > session.to - 4000) continue;
-				const e = seen.get(Number(detail));
-				if (e) {
-					soak.up.ok++;
-					r.up.ok++;
-					soak.upDetect.push(Number(e.read) - at);
-				} else fail(soak.up, r.up, "uplink frame lost");
-			} else if (kind === "D") {
-				// Every client save writes the client's own copy of lane D back. Nothing new to
-				// see is a failure only if the companion wrote a frame after the last client
-				// save and after the previous read.
-				const lastSave = Math.max(
-					previousD,
-					...clientWrites.filter((mtime) => mtime < at),
-				);
-				previousD = at;
-				if (detail !== "-") {
-					soak.laneD.ok++;
-					r.laneD.ok++;
-				} else if (laneDWrites.some((t) => t > lastSave && t < at - 300))
-					fail(soak.laneD, r.laneD, "lane D frame not seen");
-				else r.skipped++;
-			} else if (kind === "L") {
-				const load = slotLoad(detail);
-				if (load.result === "fresh") {
-					soak.slots.ok++;
-					r.slots.ok++;
-				} else fail(soak.slots, r.slots, `slot ${load.result}`);
-			} else if (kind === "F") {
-				const status = judgeFont(fontRead(detail, "soak"), fontWrites);
-				if (status === "ok") {
-					soak.fonts.ok++;
-					r.fonts.ok++;
-				} else if (status === "waiting") r.skipped++;
-				else fail(soak.fonts, r.fonts, `font ${status}`);
-			} else if (kind === "X") r.skipped++;
-		}
-		soak.bells.ok += bells.heard;
-		soak.bells.failed += bells.missed + bells.early;
-		soak.bellLatency.push(...bells.latency);
-		if (bells.missed) count(soak.reasons, "doorbell not heard", bells.missed);
-		if (bells.early)
-			count(soak.reasons, "doorbell heard before it was raised", bells.early);
-		for (const [context, n] of bells.contexts) row(context).bells += n;
-	}
-	return soak;
-}
-
-function soakSection(soak: Soak): Section {
-	const cell = (t: Tally) =>
-		t.ok + t.failed ? `${t.ok}/${t.ok + t.failed}` : "–";
-	return {
-		title: `Soak: ${soak.minutes.toFixed(0)} min in ${soak.sessions} session(s)`,
-		body: [
-			"While you play, the addon sends an uplink frame and reads lane D every 30 seconds, loads a slot every 3 minutes, reads a font every 2 minutes and listens for the doorbell the companion raises every 30 seconds. Cells show successful/attempted per context (combat, instance type, addon list open).",
-			"",
-			soak.contexts.size
-				? tableMd(
-						[
-							"Context",
-							"Uplink",
-							"Lane D",
-							"Slots",
-							"Fonts",
-							"Doorbells heard",
-							"Skipped",
-						],
-						[...soak.contexts.entries()].map(([context, r]) => [
-							context,
-							cell(r.up),
-							cell(r.laneD),
-							cell(r.slots),
-							cell(r.fonts),
-							r.bells,
-							r.skipped,
-						]),
-					)
-				: "No soak rounds yet.",
-			"",
-			soak.reasons.size
-				? `Failures: ${listing(soak.reasons)}.`
-				: "No failures.",
-		].join("\n"),
-	};
-}
-
-// Frame times ---------------------------------------------------------------------
-
-const FRAME_BINS = ["<8", "<12", "<17", "<25", "<34", "<50", "<100", "≥100"];
 const PHASES = [
 	"baseline",
 	"idle",
-	"up1",
-	"up2",
-	"up3",
-	"up4",
-	"up5",
-	"laneD",
-	"slots",
-	"fonts",
+	"lane64-33",
+	"lane128-33",
+	"lane256-33",
+	"lane256-17",
+	"lane256-0",
+	"bells",
+	"trips",
 	"shots",
+	"settings",
+	"noui",
+	"say",
 	"soak",
 ];
 
-function frameSection(session: LuaTable): Section {
-	const frames = table(session.frames);
+function frameSection(session: LuaTable | undefined): Section {
+	const frames = table(session?.frames);
 	const phases = Object.keys(frames ?? {}).sort((a, b) => {
 		const ia = PHASES.indexOf(a);
 		const ib = PHASES.indexOf(b);
@@ -1161,6 +699,10 @@ function frameSection(session: LuaTable): Section {
 		return { phase, n, mean: n ? sum / n : 0, max, counts };
 	});
 	const baseline = parsed.find((p) => p.phase === "baseline")?.mean;
+	const share = (counts: number[], from: number, n: number) =>
+		n
+			? `${((100 * counts.slice(from).reduce((a, c) => a + c, 0)) / n).toFixed(1)} %`
+			: "–";
 	const body = parsed.map((p) => [
 		p.phase,
 		p.n,
@@ -1169,10 +711,10 @@ function frameSection(session: LuaTable): Section {
 			? ""
 			: `${p.mean - baseline >= 0 ? "+" : ""}${(p.mean - baseline).toFixed(1)}`,
 		ms(p.max, 0),
-		pct((p.counts[5] ?? 0) + (p.counts[6] ?? 0) + (p.counts[7] ?? 0), p.n),
-		pct((p.counts[6] ?? 0) + (p.counts[7] ?? 0), p.n),
+		share(p.counts, 5, p.n),
+		share(p.counts, 6, p.n),
 	]);
-	const hitches = rows(text(session.hitches))
+	const hitches = rows(text(session?.hitches))
 		.map((row) => row.split(","))
 		.map(([, frame, phase, ours, context]) => ({
 			frame: Number(frame),
@@ -1185,18 +727,28 @@ function frameSection(session: LuaTable): Section {
 	return {
 		title: "Frame times",
 		body: [
-			`Frame time per phase. *vs. baseline* compares the mean with ten idle seconds before the benchmark. Bins in ms: ${FRAME_BINS.join(", ")}.`,
+			"Session with the benchmark. *vs. baseline* compares the mean with ten idle seconds before it.",
 			"",
-			tableMd(
-				["Phase", "Frames", "Mean", "vs. baseline", "Max", "≥34 ms", "≥50 ms"],
-				body,
-			),
+			body.length
+				? tableMd(
+						[
+							"Phase",
+							"Frames",
+							"Mean",
+							"vs. baseline",
+							"Max",
+							"≥34 ms",
+							"≥50 ms",
+						],
+						body,
+					)
+				: "No frame times saved yet.",
 			"",
 			hitches.length
 				? tableMd(
-						["Hitch", "Phase", "Our share in previous frame", "Context"],
+						["Hitch", "Phase", "Our share in the frame before", "Context"],
 						hitches.map((h) => [
-							ms(h.frame, 0),
+							ms(h.frame),
 							h.phase,
 							ms(h.ours, 2),
 							h.context,
@@ -1207,101 +759,77 @@ function frameSection(session: LuaTable): Section {
 	};
 }
 
-// What the client wrote -------------------------------------------------------------
-
-function clientSection(events: LogEvent[]): Section {
-	const byFile = new Map<string, LogEvent[]>();
-	for (const e of events)
-		if (e.ev === "addons") {
-			const file = String(e.file);
-			byFile.set(file, [...(byFile.get(file) ?? []), e]);
-		}
-	const addons = [...byFile.entries()].map(([file, writes]) => {
-		const lane = writes.map((e) => Number(e.rows ?? 0));
-		const d = writes.map((e) => Number(e.dRows ?? 0));
-		return [
-			file,
-			writes.length,
-			writes.filter((e) => e.frame).length,
-			`${Math.min(...lane)}–${Math.max(...lane)}`,
-			Math.max(...writes.map((e) => Number(e.on ?? 0))),
-			`${Math.min(...d)}–${Math.max(...d)}`,
-		];
-	});
-	const wtf = new Map<
-		string,
-		{ n: number; last: number; changes: Set<string> }
-	>();
-	for (const e of events)
-		if (e.ev === "wtf") {
-			const path = String(e.path);
-			const entry = wtf.get(path) ?? { n: 0, last: 0, changes: new Set() };
-			entry.n++;
-			entry.last = e.t;
-			entry.changes.add(String(e.change));
-			wtf.set(path, entry);
-		}
-	const files = [...wtf.entries()].sort((a, b) => b[1].n - a[1].n);
-	const laneD = events.filter((e) => e.ev === "lane-d");
-	const readErrors = new Map<string, number>();
-	for (const e of events)
-		if (e.ev === "read-error") count(readErrors, String(e.code));
+function sessionSection(d: Data): Section {
+	const body = d.sessions.map((s) => [
+		s.epoch,
+		s.data.reload === true ? "reload" : "login",
+		time(s.started),
+		num(s.data.ended)
+			? `${Math.round(((num(s.data.ended) ?? 0) - s.started) / 60_000)} min`
+			: "–",
+		text(s.data.screen) ?? "–",
+		num(s.data.collapsed) === 1
+			? "yes"
+			: num(s.data.collapsed) === 0
+				? "no"
+				: "?",
+		num(s.data.fontRestart) === 1 ? "new process" : "",
+		list(s.data.errors).length,
+	]);
+	const latest = d.sessions.at(-1)?.data;
+	const recovered = d.sessions.filter((s) => text(s.data.recovered));
+	const writes = d.events.filter((e) => e.ev === "addons");
+	const last = writes.at(-1);
 	return {
-		title: "What the client wrote",
+		title: "Sessions",
 		body: [
-			"Every write of `AddOns.txt` the companion saw, per character, and every other file the client changed under `WTF`. This explains a channel that stays silent.",
+			tableMd(
+				[
+					"Epoch",
+					"Start",
+					"At",
+					"Length",
+					"Screen",
+					"List collapsed",
+					"Fonts",
+					"Errors",
+				],
+				body,
+			),
 			"",
-			addons.length
-				? tableMd(
-						[
-							"AddOns.txt",
-							"Client writes",
-							"With a valid frame",
-							"Lane U rows",
-							"Enabled up to",
-							"Lane D rows",
-						],
-						addons,
-					)
-				: "The client never wrote `AddOns.txt` while the companion ran.",
-			"",
-			files.length
-				? tableMd(
-						["Other file under WTF", "Changes", "Kind", "Last"],
-						files
-							.slice(0, 15)
-							.map(([path, f]) => [
-								`\`${path}\``,
-								f.n,
-								[...f.changes].join(", "),
-								time(f.last),
-							]),
-					)
-				: "No other file under `WTF` changed.",
-			"",
-			`Lane D: the companion wrote ${laneD.filter((e) => Number(e.written) > 0).length}×, skipped ${laneD.filter((e) => Number(e.written) === 0).length}× because the client had just written the file.${readErrors.size ? ` Read errors: ${listing(readErrors)}.` : ""}`,
-		].join("\n"),
+			`Settings at the last login: \`${text(latest?.settings) ?? "–"}\`.`,
+			`Self-test: ${text(latest?.selftest) ?? "–"}. Doorbell: ${text(latest?.doorbell) ?? "–"} (\`${text(latest?.sound) ?? "–"}\`).`,
+			recovered.length
+				? `Settings put back after an interrupted benchmark: ${recovered.map((s) => text(s.data.recovered)).join("; ")}.`
+				: "",
+			last
+				? `AddOns.txt at the last client write: ${Math.round(Number(last.size) / 1024)} KB, ${last.rows} lane rows (${writes.length} client writes logged).`
+				: "",
+		]
+			.filter((line) => line !== "")
+			.join("\n"),
 	};
 }
 
-function companionSection(events: LogEvent[]): Section {
-	const polls = events.filter((e) => e.ev === "poll");
-	const p95 = stats(polls.map((e) => Number(e.p95)));
-	const worst = Math.max(0, ...polls.map((e) => Number(e.max)));
-	const errors = events.filter((e) => e.ev === "error");
-	const games = events.filter((e) => e.ev === "game").length;
+function errorSection(d: Data): Section {
+	const addon = d.sessions.flatMap((s) =>
+		list(s.data.errors).map((e) => [s.epoch, String(e)]),
+	);
+	const companion = d.events.filter((e) => e.ev === "error");
 	return {
-		title: "Companion",
+		title: "Errors",
 		body: [
-			`Poll loop: p95 of the 10-second p95 values ${ms(p95?.p95, 1)}, worst single gap ${ms(worst, 0)}. Game process changes seen: ${games}.`,
+			addon.length
+				? tableMd(["Session", "Addon error"], addon)
+				: "No addon errors.",
 			"",
-			errors.length
+			companion.length
 				? tableMd(
-						["Time", "Where", "Detail"],
-						errors
+						["Time", "Where", "Companion error"],
+						companion
 							.slice(0, 20)
 							.map((e) => [
-								new Date(e.t).toLocaleString(),
+								time(e.t),
 								String(e.where ?? ""),
 								String(e.message ?? ""),
 							]),
@@ -1311,58 +839,21 @@ function companionSection(events: LogEvent[]): Section {
 	};
 }
 
-// Report ----------------------------------------------------------------------------
-
-function overall(v: Verdict, minutes: number): boolean | undefined {
-	if (v.benchOnly) return v.bench;
-	if (v.bench === false || v.soak.failed > 0) return false;
-	if (v.bench === true && minutes >= 60 && v.soak.ok > 0) return true;
-	return undefined;
-}
-
-const soakText = (t: Tally, unit: string) =>
-	t.ok + t.failed === 0 ? "–" : `${t.ok}/${t.ok + t.failed} ${unit}`;
-
-/**
- * Sessions the companion got a hello from that are not in the saved results: the game writes
- * them only on /reload or logout. Their uplink frames show how far they got.
- */
-function unsavedNote(sessions: Session[], events: LogEvent[]): string[] {
-	const saved = new Set(sessions.map((s) => num(s.data.nonce)));
-	const hellos = events.filter((e) => e.ev === "hello");
-	const unsaved = hellos.flatMap((hello, k) => {
-		if (saved.has(Number(hello.nonce))) return [];
-		const until = hellos[k + 1]?.t ?? Number.POSITIVE_INFINITY;
-		const frames = events.filter(
-			(e) =>
-				e.ev === "frame" &&
-				e.epoch === hello.epoch &&
-				e.t >= hello.t &&
-				e.t < until,
-		);
-		const seqs = new Set(frames.map((e) => Number(e.seq)));
-		const last = Math.max(1, ...seqs);
-		const end = frames.at(-1)?.t ?? hello.t;
+/** Sessions that said hello but are not saved yet: the game writes them on /reload or logout. */
+function unsavedNote(d: Data): string[] {
+	const saved = new Set(d.sessions.map((s) => s.epoch));
+	const hellos = [...d.messages.values()]
+		.flat()
+		.filter((e) => e.kind === "hello" && !saved.has(Number(e.epoch)));
+	if (hellos.length === 0) return [];
+	const last = hellos.at(-1);
+	if (hellos.length === 1 && last && Date.now() - last.t < 120_000)
 		return [
-			{
-				last: k === hellos.length - 1,
-				ms: end - hello.t,
-				line: `- Session ${hello.epoch} on ${hello.file} (${hello.reload ? "reload" : "login"}, ${time(hello.t)}–${time(end)}): ${seqs.size} uplink frames arrived, ${last - seqs.size} of 1–${last} missing.`,
-			},
-		];
-	});
-	if (unsaved.length === 0) return [];
-	const [only] = unsaved;
-	// The session a final /reload starts is never saved if the tool stops while WoW runs.
-	if (unsaved.length === 1 && only?.last && only.ms < 120_000)
-		return [
-			`Not saved: the last session, ${Math.round(only.ms / 1000)} s after the final /reload or login. That is expected when the tool stops while WoW still runs; log out or quit WoW first to avoid it.`,
+			"Not saved: the last session, started right before the report. Log out or quit WoW first to include it.",
 			"",
 		];
 	return [
-		"⚠ **Results not saved yet.** The companion saw these sessions, but the game has not written their results. WoW writes them on `/reload` or logout: type `/reload` in game, then run `familiar-spike report`.",
-		"",
-		...unsaved.map((u) => u.line),
+		`⚠ **${hellos.length} session(s) not saved yet** (${hellos.map((e) => `${e.epoch} at ${time(e.t)}`).join(", ")}). WoW writes results on \`/reload\` or logout: type \`/reload\` in game, then run \`familiar-spike report\`.`,
 		"",
 	];
 }
@@ -1370,7 +861,7 @@ function unsavedNote(sessions: Session[], events: LogEvent[]): string[] {
 export function buildReport(dataDir: string, now = new Date()): string {
 	const events = readLogs(dataDir);
 	const saved = loadSaved(dataDir);
-	const sessions = sessionsOf(saved, events);
+	const d = collect(saved, events);
 	const runs = events.filter((e) => e.ev === "companion");
 	const platforms = [...new Set(runs.map((e) => String(e.platform)))].join(
 		", ",
@@ -1378,150 +869,43 @@ export function buildReport(dataDir: string, now = new Date()): string {
 	const out: string[] = [
 		"# Transport spike report (FAM-15)",
 		"",
-		`Generated ${now.toLocaleString()}. ${sessions.length} addon session(s) in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
+		`Generated ${now.toLocaleString()}. ${d.sessions.length} addon session(s) in ${saved.length} account(s), ${runs.length} companion run(s)${platforms ? ` on ${platforms}` : ""}, ${events.length} companion events.`,
 		"",
-		...unsavedNote(sessions, events),
+		...unsavedNote(d),
 	];
-	if (sessions.length === 0) {
+	if (d.sessions.length === 0) {
 		out.push(
 			"No saved addon results yet. Type `/reload` in game (or log out) so the client writes them.",
-			"",
-			clientSection(events).body,
 		);
 		return `${out.join("\n")}\n`;
 	}
-
-	const latest = sessions.at(-1);
-	const benched = sessions.filter((s) => table(s.data.bench)).at(-1);
-	const bench = table(benched?.data.bench);
-	const sections: Section[] = [];
-	const doorbell =
-		text(bench?.doorbell) ?? text(latest?.data.doorbell) ?? "not tested";
-	const method = METHODS[doorbell];
-	const sound = text(bench?.sound) ?? text(latest?.data.sound) ?? "–";
-	sections.push({
-		title: "Setup",
-		body: [
-			`Build ${text(latest?.data.build) ?? "?"}. Self-test: ${text(bench?.selftest) ?? text(latest?.data.selftest) ?? "–"}.`,
-			"",
-			`Sound probe (\`PlaySoundFile\` result / \`C_Sound.IsPlaying\` 0.3 s and 0.8 s later, one digit each; - means no handle): \`${sound}\`. *empty* is a 0-byte file, *valid* 10 ms and *long* 1.5 s of silence, *missing* does not exist. *secure* is 1 while \`PlaySoundFile\` is Blizzard's own function, otherwise the addon that replaced it.`,
-			"",
-			`Doorbell method: ${method ?? doorbell}. *PlaySoundFile result*: an empty file fails to play, a raised one plays. *Sound length*: both play, but only a raised one is still playing a quarter second later.`,
-		].join("\n"),
-	});
-
-	const fontWrites = fontWritesOf(events);
-	const soak = soakOf(sessions, events, fontWrites);
-	const shots = shotRunsOf(sessions, events);
-	const verdicts: Verdict[] = [];
-	if (benched && bench) {
-		const up = uplinkBench(benched, bench);
-		const laneD = laneDBench(benched, bench);
-		const slots = slotBench(benched, bench);
-		const fonts = fontBench(benched, bench, fontWrites);
-		verdicts.push(
-			{
-				channel: "Uplink: AddOns.txt lane U (SaveAddOns)",
-				bench: up.ok,
-				benchText: up.text,
-				soak: soak.up,
-				soakText: soakText(soak.up, "frames"),
-			},
-			{
-				channel: "Downlink: AddOns.txt lane D (ResetAddOns)",
-				bench: laneD.ok,
-				benchText: laneD.text,
-				soak: soak.laneD,
-				soakText: soakText(soak.laneD, "reads"),
-			},
-			{
-				channel: "Downlink: load-on-demand slot (LoadAddOn)",
-				bench: slots.ok,
-				benchText: slots.text,
-				soak: soak.slots,
-				soakText: soakText(soak.slots, "fresh"),
-			},
-			{
-				channel: "Downlink: font bank (SetFont)",
-				bench: fonts.ok,
-				benchText: fonts.text,
-				soak: soak.fonts,
-				soakText: soakText(soak.fonts, "current"),
-			},
-		);
-		sections.push(up.section, laneD.section, slots.section);
-	} else {
-		for (const [channel, tallied, unit] of [
-			["Uplink: AddOns.txt lane U (SaveAddOns)", soak.up, "frames"],
-			["Downlink: AddOns.txt lane D (ResetAddOns)", soak.laneD, "reads"],
-			["Downlink: load-on-demand slot (LoadAddOn)", soak.slots, "fresh"],
-			["Downlink: font bank (SetFont)", soak.fonts, "current"],
-		] as const)
-			verdicts.push({
-				channel,
-				bench: undefined,
-				benchText: "no benchmark yet: type `/fspike bench`",
-				soak: tallied,
-				soakText: soakText(tallied, unit),
-			});
-	}
-	const bellLatency = stats(soak.bellLatency);
-	verdicts.push({
-		channel: "Doorbell: .wav made playable (PlaySoundFile)",
-		bench: method
-			? soak.bells.ok + soak.bells.failed === 0
-				? undefined
-				: (bellLatency?.p95 ?? 0) < 1000
-			: doorbell.includes("game sound off") || doorbell === "not tested"
-				? undefined
-				: false,
-		benchText: method
-			? `${method}; raise → heard p95 ${ms(bellLatency?.p95)}`
-			: doorbell,
-		soak: soak.bells,
-		soakText: soakText(soak.bells, "heard"),
-	});
-	const shot = shotBench(shots.runs);
-	verdicts.push({
-		channel: "Uplink: screenshot (Screenshot)",
-		bench: shot.ok,
-		benchText: shot.text,
-		soak: tally(),
-		soakText: "on demand only",
-		benchOnly: true,
-	});
-
-	sections.push(
-		fontSection(sessions, bench, fontWrites, events),
-		shotSection(shots.runs, shots.others, shots.unmatched),
-		soakSection(soak),
-	);
-	if (benched) sections.push(frameSection(benched.data));
-	sections.push(clientSection(events), companionSection(events));
-	const errors = sessions.flatMap((s) => list(s.data.errors).map(String));
-	if (errors.length)
-		sections.push({
-			title: "Addon errors",
-			body: errors.map((e) => `- \`${e}\``).join("\n"),
-		});
-
+	const lane = laneSection(d);
+	const shots = shotSection(d);
+	const trips = tripSection(d);
+	const verdicts = [
+		...lane.verdicts,
+		listSection(d),
+		...shots.verdicts,
+		...trips.verdicts,
+	];
+	const benched = d.sessions.filter((s) => table(s.data.bench)).at(-1);
 	out.push(
-		"## Verdict",
-		"",
 		tableMd(
-			["", "Channel", "Benchmark", "Soak"],
-			verdicts.map((v) => [
-				mark(overall(v, soak.minutes)),
-				v.channel,
-				v.benchText,
-				v.soakText,
-			]),
+			["", "Check", "Result"],
+			verdicts.map((v) => [mark(v.ok), v.check, v.result]),
 		),
 		"",
-		`Soak so far: ${soak.minutes.toFixed(0)} of 60 minutes. Thresholds: uplink loss-free at ≥33 ms spacing, detect p95 < 250 ms, write cost p95 < 2 ms; lane D sees every frame, latency p95 < 1 s, ResetAddOns cost p95 < 2 ms; every slot load fresh; every font read decoded and current, cost per frame p95 < 2 ms; doorbell raise → heard p95 < 1 s once the addon listens after login; no failures in a soak of at least 60 minutes. Screenshots run on demand only and are judged on the benchmark: one variant decodes in every picture in your own format; pictures whose data was hidden early do not count. \`?\` means not enough data yet.`,
+		"✔ passed, ✘ failed, ? not measured yet or for information.",
 		"",
 	);
-	for (const section of sections)
+	for (const section of [
+		lane.section,
+		...shots.sections,
+		trips.section,
+		frameSection(benched?.data),
+		sessionSection(d),
+		errorSection(d),
+	])
 		out.push(`## ${section.title}`, "", section.body, "");
 	return `${out.join("\n").trimEnd()}\n`;
 }

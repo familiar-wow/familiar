@@ -5,46 +5,40 @@ which channels can carry Familiar's traffic between the addon and the companion 
 actually play? The addon sandbox has no sockets and no file access, so every channel is a
 side effect the client happens to persist or reload.
 
-| Channel           | Direction         | How it works                                                                                                                                          |
-| ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AddOns.txt lane U | addon → companion | The addon flips the enable state of 256 empty helper addons and calls `C_AddOns.SaveAddOns()`. The companion reads `AddOns.txt`. 20 bytes per frame.  |
-| AddOns.txt lane D | companion → addon | The companion rewrites a second lane; the addon calls `C_AddOns.ResetAddOns()` and reads it back. Works only if that call re-reads the file.          |
-| Slot              | companion → addon | Pre-installed load-on-demand addons. The companion keeps their `data.lua` fresh; the addon calls `LoadAddOn`. Large payloads, 64 per UI session.      |
-| Doorbell          | companion → addon | Pre-installed empty `.wav` files. The companion writes a silent sound into one; the addon notices with `PlaySoundFile`. One bit, no payload.          |
-| Font bank         | companion → addon | 256 pre-installed fonts. The companion writes bytes into the glyph widths; the addon sets a font and measures them. 490 bytes per font, no code.      |
-| Screenshot        | addon → companion | The addon paints a block of cells into a corner for a moment and calls `Screenshot()`; the companion decodes the picture. 256 B to 24 KB per picture. |
+0.5.0 is the last round. Earlier rounds settled the downlink and dropped the channels that
+cost too much; this one runs the two remaining uplinks the way the product would use them,
+with a real reply for every message:
 
-Doorbells and slots are the downlink that [wow-ai](https://github.com/chelinho139/wow-ai) and
-[hermes-forever](https://github.com/Adolanium/hermes-forever) already use. The AddOns.txt
-lanes would replace their screen-capture uplink: no visible pixels, and it works minimized
-and in exclusive fullscreen.
+| Channel           | Direction         | How it works                                                                                                                                                                         |
+| ----------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| AddOns.txt lane U | addon → companion | The addon flips the enable state of 64, 128 or 256 empty helper addons and calls `C_AddOns.SaveAddOns()`; the companion reads `AddOns.txt`. Every message ends with all helpers off. |
+| Screenshot        | addon → companion | The addon paints the message as a black-and-white block next to the chat box, shows it for the frame that calls `Screenshot()` and hides it; the companion finds it in the picture.  |
+| Font bank         | companion → addon | 256 pre-installed fonts. The companion writes the reply into the glyph widths of the fonts the message names; the addon measures them. 490 bytes per font, no code.                  |
+| Doorbell          | companion → addon | Pre-installed empty `.wav` files. Once the reply is in place, the companion writes a silent sound into the next one; the addon notices with `PlaySoundFile`.                         |
 
-The font bank follows what [wow-forever-codex](https://github.com/0xInuarashi/wow-forever-codex)
-measured on build 69913: the client reads a font file once per process, only files that
-existed when it started, and again after a full restart. The fonts are files, not addons, so
-they do not show up in the addon list. The screenshot channel is new: it needs no screen
-capture, so it should also work minimized and under Wayland.
+Messages and replies carry a CRC-32. A screenshot that brings no doorbell is taken once more,
+held a frame longer.
 
-On build 70888 both work, with two findings from 0.4.0. After `SetFont`, a font string that
-already shows one of our fonts keeps measuring with it at first, and `GetFont` does not name
-the new file yet. And widths came out close to half a byte off, which fits glyph advances
-rounded to whole screen pixels. Since 0.4.1 every font read uses a fresh font string, waits
-until `GetFont` names the new file and measures in a frame scaled to one pixel per unit. The
-screenshot block is painted while hidden, a few hundred cells per frame, and some pictures
-hide the data right after the call to find out when the client captures.
+What the earlier rounds found on build 1.60.1.70888, and what 0.5.0 does with it:
 
-Every channel is measured on its own schedule, so one that does not work on a client cannot
-hide the others. On build 1.60.1.70888 an empty `.wav` already "plays"; the addon then tells a
-raised doorbell by its length (`C_Sound.IsPlaying` a moment later) and says so in chat. The
-report also lists every file the client writes under `WTF`, which explains a channel that
-stays silent.
-
-What the client does with `AddOns.txt`, measured on build 70888: a character's file holds
-rows only for the addons set for that character, and the client keeps one enable state for
-the whole process. After a character switch, a helper without a row still has the state the
-previous character left in memory, so `GetAddOnEnableState` cannot be trusted. Since 0.3.1
-the addon disables all 256 helpers before its first frame in every session, and the
-companion writes lane D into the file the client wrote last.
+- The picture is the frame in which `Screenshot()` runs; `OnUpdate` comes before drawing. A
+  block shown in the same handler is in the picture, so it needs to be visible for one frame.
+- The client's picture settings can bend the colours of a screenshot. Black and white survive
+  generic curves at the slider limits, grey levels do not. The benchmark sets Gamma,
+  Brightness, Contrast and the colour-blind filter to their limits for a moment each.
+- Helpers in one group can sit in a collapsible category of the addon list (`## Category`;
+  Forever's `AddonList.lua` files a group under its parent's category). The addon collapses it
+  once, so the list shows one closed entry instead of 256.
+- The addon list turns _OK_ into _Reload UI_ when an addon's state differs from the state at
+  UI load. Ending every message with all helpers off keeps the list quiet.
+- A character's `AddOns.txt` holds rows only for addons set for that character, and the
+  client keeps one enable state per process, so the writer switches every helper off before
+  its first frame instead of trusting `GetAddOnEnableState`.
+- A font file is read once per process. A font string keeps measuring with its old font for a
+  moment after `SetFont`, so every read uses a fresh one and waits until `GetFont` names the
+  file. Widths end at the visible edge of the last glyph; the reader calibrates with two glyphs.
+- An empty `.wav` already "plays"; a raised doorbell is told by its length
+  (`C_Sound.IsPlaying` a moment later).
 
 ## Run it
 
@@ -59,8 +53,8 @@ starts with _Select_, press Esc.
 a terminal:
 
 ```sh
-tar xzf familiar-spike-0.4.1-linux-x64.tar.gz
-cd familiar-spike-0.4.1-linux-x64
+tar xzf familiar-spike-0.5.0-linux-x64.tar.gz
+cd familiar-spike-0.5.0-linux-x64
 ./familiar-spike check    # shows which client it found and changes nothing
 ./familiar-spike
 ```
@@ -72,27 +66,29 @@ It looks for the client in the Wine prefixes of Lutris, Steam (Proton), Bottles,
 Then, on both systems:
 
 1. Start the tool first, then WoW. If WoW was running, quit it completely and start it again:
-   `/reload` does not pick up new addon files.
-2. Log in. Chat shows the self-test, whether doorbells work on this client and, a few seconds
-   later, _Companion seen via …_.
-3. Stand somewhere quiet, out of combat, and type `/fspike bench`. It takes about three
-   minutes. At the end the top-left corner flashes twelve times: those are the screenshots.
-   Your screenshot format is switched to PNG for a few seconds and back.
+   `/reload` does not pick up new or removed addon folders.
+2. Log in. Chat shows the self-test and, a few seconds later, _Companion answered in …_.
+3. Stand somewhere quiet, out of combat, and type `/fspike bench`. It takes about two minutes:
+   the screen flashes a few dozen times next to the chat box, picture and sound settings
+   change for moments, and the interface disappears for a second. Everything is set back
+   right away; if WoW stops in between, at the next login.
 4. Type `/reload` once, so the client saves the results.
-5. Play as usual for at least an hour: questing, dungeons, combat. Somewhere in that hour,
-   switch characters once: log out to the character list, play a few minutes on another
-   character, then come back. Every `/reload` or logout adds results.
-6. Quit WoW completely once, start it again and log in: a new client process reads the font
-   bank from the start, which shows whether fonts can be used again.
-7. At the end, log out to the character list or quit WoW: WoW writes the addon's results
+5. Play for about an hour: fight, pass a loading screen, and Alt+Tab away for three minutes
+   once. In the background a short lane message goes out every minute and a screenshot every
+   two minutes, in combat too.
+6. Now and then type `/fspike say <anything>`. Odd messages go over lane U, even ones in a
+   screenshot, bright or muted, one frame or two. Chat shows the path, the reply and how long
+   it took.
+7. Open the addon list once in game and once at the character list: is _Familiar Spike lane_
+   closed?
+8. At the end, log out to the character list or quit WoW: WoW writes the addon's results
    only then. A `/reload` saves too, but starts a new session that is not saved.
-8. Press Ctrl+C in the tool's window. `familiar-spike-data/report.md` is the result; send the
-   whole `familiar-spike-data` folder. If the report starts with _Results not saved yet_,
-   log out in game and run `familiar-spike report`.
+9. Press Ctrl+C in the tool's window. `familiar-spike-data/report.md` is the result; send the
+   whole `familiar-spike-data` folder. If the report says sessions are not saved yet, log out
+   in game and run `familiar-spike report`.
 
 Keep the game sound on, at any volume: doorbells rely on `PlaySoundFile`. `/fspike` shows the
-status in game, `/fspike shots` repeats the screenshot test, `/fspike soak off` pauses the
-background rounds.
+status in game, `/fspike soak off` pauses the background messages.
 
 ```text
 familiar-spike check        show which client it found, without changing anything
@@ -103,17 +99,20 @@ familiar-spike --wow <folder>   use this client folder instead of searching
 
 ## What it touches
 
-- `Interface/AddOns/FamiliarSpike*`: the addon, 512 helper addons, 64 slots, 600 sound files
-  and 256 fonts (6 MB). All are marked `## X-Familiar-Spike: 1`; the tool never changes
-  folders without that mark. On Linux it uses the existing folder even if it is spelled
-  differently, such as `Addons`.
-- The `FamiliarSpike*` rows in each character's `AddOns.txt`. Until the client has written
-  one of them, lane D goes into every character's file. Other rows stay byte for byte.
-- `SavedVariables/FamiliarSpike.lua`.
-- `Screenshots`: the tool deletes only its own pictures, the ones with the block, and keeps
-  their corner in `familiar-spike-data/shots`. Your own screenshots stay untouched.
-- The `screenshotFormat` setting, during the screenshot test only. If WoW stops before it is
-  switched back, the addon restores it at the next login.
+- `Interface/AddOns/FamiliarSpike*`: the addon, 256 helper addons, 600 sound files and 256
+  fonts (6 MB). All are marked `## X-Familiar-Spike: 1`; the tool never changes folders
+  without that mark and removes the lane D and slot helpers of older versions. On Linux it
+  uses the existing folder even if it is spelled differently, such as `Addons`.
+- The `FamiliarSpike*` rows in each character's `AddOns.txt`, which the client writes. While
+  WoW is closed the tool removes the rows of old helpers; other rows stay byte for byte.
+- `SavedVariables/FamiliarSpike.lua`, and once the collapsed state of the helpers' category
+  in the addon list.
+- `Screenshots`: the tool deletes only its own pictures, the ones with a block, and keeps the
+  block in `familiar-spike-data/shots`. Your own screenshots stay untouched and nothing of
+  them is kept. So do pictures the block did not make it into, such as the one taken with
+  the interface hidden.
+- During the benchmark only: Gamma, Brightness, Contrast, the colour-blind filter, master
+  volume and game sound, each for a moment, and the interface hidden for a second.
 
 It only reads the rest of `WTF`. No network, no game automation, no memory access. The sounds
 are silence and are stopped right away.
@@ -129,14 +128,13 @@ bun run typecheck
 bun run sim                   # real addon + real companion, files in a temp folder,
                               # with a character switch and a client restart
 bun sim/run.ts --emptyplays   # build 70888: an empty .wav plays, a missing one stays missing
-bun sim/run.ts --noreset      # ResetAddOns keeps memory: lane D must fail, the rest not
 bun run build                 # dist/familiar-spike-<version>-{windows-x64.zip,linux-x64.tar.gz}
-bun sim/run.ts --binary dist/familiar-spike-0.4.1-linux-x64/familiar-spike
+bun sim/run.ts --binary dist/familiar-spike-0.5.0-linux-x64/familiar-spike
 ```
 
 `sim/wow.lua` stands in for the client: it runs the addon files and backs the API calls with
 real files. It measures the fonts the companion writes and renders screenshots from the
-addon's textures; the runner encodes them as JPEG or PNG. With `--binary` the simulator
-drives the built Linux program instead of the source, with the short intervals of
-`FAMILIAR_SPIKE_FAST=1`, and the game process is named `Wow.exe` the way Wine names it. None
-of this tells us what the real client does. That is what the spike is for.
+addon's textures, bent by a made-up picture curve; the runner encodes them as JPEG. With
+`--binary` the simulator drives the built Linux program instead of the source, with the short
+intervals of `FAMILIAR_SPIKE_FAST=1`, and the game process is named `Wow.exe` the way Wine
+names it. None of this tells us what the real client does. That is what the spike is for.

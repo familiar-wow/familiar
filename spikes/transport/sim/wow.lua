@@ -1,10 +1,10 @@
 -- A small stand-in for the WoW: Forever client, to test the spike without the game.
 -- It runs the real addon files against the API calls the spike uses. Files are real:
--- AddOns.txt, SavedVariables, slot data.lua and doorbell .wav files live in a client folder.
+-- AddOns.txt, SavedVariables, fonts and doorbell .wav files live in a client folder.
 --
 -- Commands on stdin, one per line; each is answered with "ok" (or "error <message>"):
 --   frame <wallMs> <preciseMs>   run one rendered frame
---   slash <text>                 run a slash command, e.g. "slash /fspike bench"
+--   slash <text>                 run a slash command typed into the chat box
 --   list open|close              show or hide the addon list
 --   combat on|off                enter or leave combat
 --   reload                       /reload: save, then start a fresh UI
@@ -13,7 +13,9 @@
 --   screenshot                   the player presses Print Screen
 -- Chat output is written as lines starting with "chat ". A screenshot is rendered as an
 -- uncompressed TGA and announced as "shot <tga> <final path> <format>"; the runner encodes it
--- the way the client would.
+-- the way the client would. The picture is the frame that called Screenshot(), as measured
+-- on build 70888, bent by a made-up curve for Gamma, Brightness and Contrast (not the
+-- client's), and without UIParent's frames while the interface is hidden.
 --
 -- Fonts are read from the real files, once per process like the real client, and are usable
 -- two frames after SetFont; until then a font string shows the font it had, and advances are
@@ -30,7 +32,7 @@
 -- flags, comma-separated:
 --   noreset     C_AddOns.ResetAddOns keeps the in-memory state instead of re-reading disk
 --   emptyplays  PlaySoundFile succeeds for an empty file and returns nothing for a missing
---               one, which then stays missing; as Sven saw on build 70888
+--               one, which then stays missing; as measured on build 70888
 
 local client, account, realm, character, namesFile, flagList = ...
 assert(namesFile, "usage: lua wow.lua <client> <account> <realm> <character> <names file> [flags]")
@@ -68,7 +70,19 @@ local processStart = wallMs
 local listShown, inCombat = false, false
 local soundHandle = 0
 local fonts = {} -- parsed font files, read once per process
-local cvars = { screenshotFormat = "jpeg", screenshotQuality = "3" }
+local cvars = {
+	screenshotFormat = "jpeg",
+	screenshotQuality = "3",
+	Gamma = "1.0",
+	Brightness = "50",
+	Contrast = "50",
+	colorblindSimulator = "0",
+	colorblindWeaknessFactor = "0.5",
+	Sound_EnableAllSound = "1",
+	Sound_MasterVolume = "1.0",
+}
+-- SavedVariablesMachine of Blizzard_AddOnList, kept across reloads and client restarts.
+local MACHINE = client .. "/WTF/machine.lua"
 local frameCount, shotRequested, shotPending = 0, false, false
 -- The UI scale makes one UI unit smaller than a pixel here; FAMILIAR_SIM_UISCALE changes it.
 local SCREEN_W, SCREEN_H, UI_SCALE = 1280, 720, tonumber(os.getenv("FAMILIAR_SIM_UISCALE")) or 0.9
@@ -317,11 +331,18 @@ end
 -- Frames and textures -------------------------------------------------------------
 local textureMethods = {}
 textureMethods.__index = textureMethods
-for _, name in ipairs({ "SetSnapToPixelGrid", "SetTexelSnappingBias" }) do
+for _, name in ipairs({ "SetSnapToPixelGrid", "SetTexelSnappingBias", "ClearAllPoints" }) do
 	textureMethods[name] = function() end
 end
+-- Only TOPLEFT to the frame's TOPLEFT, which is all the spike uses.
 function textureMethods:SetPoint(_, _, _, x, y)
 	self.x, self.y = x or 0, y or 0
+end
+function textureMethods:Show()
+	self.hidden = false
+end
+function textureMethods:Hide()
+	self.hidden = true
 end
 function textureMethods:SetSize(w, h)
 	self.w, self.h = w, h
@@ -335,8 +356,24 @@ end
 
 local frameMethods = {}
 frameMethods.__index = frameMethods
-for _, name in ipairs({ "SetFrameStrata", "SetAlpha" }) do
+for _, name in ipairs({ "SetFrameStrata", "SetAlpha", "ClearAllPoints" }) do
 	frameMethods[name] = function() end
+end
+function frameMethods:GetParent()
+	return self.parent
+end
+function frameMethods:IsShown()
+	return self.shown
+end
+function frameMethods:IsVisible()
+	return self.shown and (not self.parent or self.parent:IsVisible())
+end
+-- Set only for the chat frames, in their own units.
+function frameMethods:GetLeft()
+	return self.left
+end
+function frameMethods:GetTop()
+	return self.top
 end
 function frameMethods:RegisterEvent(event)
 	self.events[event] = true
@@ -363,9 +400,9 @@ function frameMethods:GetEffectiveScale()
 	local parent = self.parent and not self.ignoreParentScale and self.parent:GetEffectiveScale() or 1
 	return parent * self.scale
 end
--- Only TOPLEFT to the parent's TOPLEFT, which is all the spike uses.
-function frameMethods:SetPoint(_, _, _, x, y)
-	self.x, self.y = x or 0, y or 0
+-- TOPLEFT or BOTTOMLEFT to the same point of the parent, which fills the screen.
+function frameMethods:SetPoint(point, _, _, x, y)
+	self.point, self.x, self.y = point, x or 0, y or 0
 end
 function frameMethods:SetSize(w, h)
 	self.w, self.h = w, h
@@ -395,24 +432,48 @@ end
 -- Screenshots ---------------------------------------------------------------------
 local BACKGROUND = string.char(60, 120, 90)
 
--- Renders the shown textures; the block is a grid, so rows come in bands.
+-- A made-up picture curve, not the client's: Gamma as an exponent, Contrast stretching around
+-- the middle, Brightness as an offset.
+local function curve()
+	local gamma = tonumber(cvars.Gamma) or 1
+	local contrast = 0.5 + (tonumber(cvars.Contrast) or 50) / 100
+	local offset = ((tonumber(cvars.Brightness) or 50) - 50) * 0.6
+	local lut = {}
+	for v = 0, 255 do
+		local x = 255 * (v / 255) ^ (1 / gamma)
+		x = (x - 127.5) * contrast + 127.5 + offset
+		lut[v] = math.max(0, math.min(255, math.floor(x + 0.5)))
+	end
+	return lut
+end
+
+local function bend(pixel, lut)
+	local b, g, r = pixel:byte(1, 3)
+	return string.char(lut[b], lut[g], lut[r])
+end
+
+-- Renders the visible textures; the block is a grid, so rows come in bands.
 local function render()
 	local bands, keys = {}, {}
+	local lut = curve()
+	local ground = bend(BACKGROUND, lut)
 	for _, frame in ipairs(frames) do
-		if frame.shown and #frame.textures > 0 then
+		if frame:IsVisible() and #frame.textures > 0 then
 			local k = frame:GetEffectiveScale() * SCREEN_H / 768
+			local left = frame.x * k
+			local top = frame.point == "BOTTOMLEFT" and SCREEN_H - (frame.y + (frame.h or 0)) * k or -frame.y * k
 			for _, t in ipairs(frame.textures) do
-				if t.pixel then
-					local x1 = math.floor((frame.x + t.x) * k + 0.5)
-					local x2 = math.floor((frame.x + t.x + t.w) * k + 0.5)
-					local y1 = math.floor(-(frame.y + t.y) * k + 0.5)
-					local y2 = math.floor((t.h - frame.y - t.y) * k + 0.5)
+				if t.pixel and not t.hidden then
+					local x1 = math.floor(left + t.x * k + 0.5)
+					local x2 = math.floor(left + (t.x + t.w) * k + 0.5)
+					local y1 = math.floor(top - t.y * k + 0.5)
+					local y2 = math.floor(top + (t.h - t.y) * k + 0.5)
 					local key = y1 * 65536 + y2
 					if not bands[key] then
 						bands[key], keys[#keys + 1] = { y1 = y1, y2 = y2 }, key
 					end
 					local band = bands[key]
-					band[#band + 1] = { x1, x2, t.pixel }
+					band[#band + 1] = { x1, x2, bend(t.pixel, lut) }
 				end
 			end
 		end
@@ -427,20 +488,20 @@ local function render()
 		for _, r in ipairs(band) do
 			local x1, x2 = math.max(r[1], x), math.min(r[2], SCREEN_W)
 			if x1 > x then
-				parts[#parts + 1] = BACKGROUND:rep(x1 - x)
+				parts[#parts + 1] = ground:rep(x1 - x)
 			end
 			if x2 > x1 then
 				parts[#parts + 1] = r[3]:rep(x2 - x1)
 				x = x2
 			end
 		end
-		parts[#parts + 1] = BACKGROUND:rep(SCREEN_W - x)
+		parts[#parts + 1] = ground:rep(SCREEN_W - x)
 		local row = table.concat(parts)
 		for y = math.max(0, band.y1), math.min(band.y2, SCREEN_H) - 1 do
 			rowAt[y] = row
 		end
 	end
-	local plain = BACKGROUND:rep(SCREEN_W)
+	local plain = ground:rep(SCREEN_W)
 	local out = {
 		string.char(0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0),
 		string.char(SCREEN_W % 256, math.floor(SCREEN_W / 256), SCREEN_H % 256, math.floor(SCREEN_H / 256), 24, 0x20),
@@ -536,6 +597,9 @@ local function newEnvironment()
 		return false, "none"
 	end
 	env.PlaySoundFile = function(path)
+		if cvars.Sound_EnableAllSound == "0" then
+			return false
+		end
 		local file = client .. "/" .. path:gsub("\\", "/")
 		local length = sounds[file]
 		if not length then
@@ -570,6 +634,16 @@ local function newEnvironment()
 		end,
 	}
 	env.UIParent = newFrame(nil, UI_SCALE)
+	env.WorldFrame = newFrame(nil, 1)
+	env.SetUIVisibility = function(visible)
+		env.UIParent.shown = visible and true or false
+	end
+	-- The chat frame and its edit box, in UIParent units from the bottom left.
+	env.DEFAULT_CHAT_FRAME = newFrame(env.UIParent)
+	env.DEFAULT_CHAT_FRAME.left, env.DEFAULT_CHAT_FRAME.top = 20, 300
+	env.ChatFrame1EditBox = newFrame(env.UIParent)
+	env.ChatFrame1EditBox.left, env.ChatFrame1EditBox.top = 20, 150
+	env.LAST_ACTIVE_CHAT_EDIT_BOX = env.ChatFrame1EditBox
 	env.CreateFrame = function(_, _, parent)
 		local frame = newFrame(parent or env.UIParent)
 		frames[#frames + 1] = frame
@@ -662,6 +736,14 @@ end
 
 local function login(isReload)
 	newEnvironment()
+	-- Blizzard_AddOnList loads first and brings its machine-wide saved state.
+	local machine = readFile(MACHINE)
+	if machine then
+		local chunk = assert(loadstring(machine))
+		setfenv(chunk, env)
+		chunk()
+	end
+	env.g_addonCategoriesCollapsed = env.g_addonCategoriesCollapsed or {}
 	local saved = SAVED .. MAIN .. ".lua"
 	if readFile(saved) then
 		runFile(saved)
@@ -678,6 +760,9 @@ local function logout()
 	serialize(env.FamiliarSpikeDB, "", out)
 	out[#out + 1] = "\n"
 	writeFile(SAVED .. MAIN .. ".lua", table.concat(out))
+	local machine = { "g_addonCategoriesCollapsed = " }
+	serialize(env.g_addonCategoriesCollapsed, "", machine)
+	writeFile(MACHINE, table.concat(machine) .. "\n")
 end
 
 local function slash(text)
@@ -685,7 +770,7 @@ local function slash(text)
 	for key, value in pairs(env) do
 		local id = type(key) == "string" and key:match("^SLASH_(.+)%d$")
 		if id and value == command then
-			return env.SlashCmdList[id](rest)
+			return env.SlashCmdList[id](rest, env.ChatFrame1EditBox)
 		end
 	end
 	error("unknown slash command " .. tostring(command))
