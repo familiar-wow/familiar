@@ -28,7 +28,7 @@ Familiar will not play for anyone (see the rules below), will not run its own mo
 | Desktop app    | `app/`   | setup, tray icon, runs the core as a sidecar                                | Tauri 2, Svelte 5          |
 | Brain          | –        | a model behind the built-in agent, or an agent connected through ACP        | external                   |
 
-Addons cannot open network connections or files, so the addon talks to the companion through side channels of the game client. We are still measuring which channel works best, and ADR 0005 will record the decision. Until then, keep the transport behind its interface.
+Addons cannot open network connections or files, so the addon talks to the companion through side channels of the game client: up through `AddOns.txt`, down through a font bank and a doorbell sound ([ADR 0005](docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)). They rely on undocumented client behavior, so keep the transport behind its interface.
 
 Read [ADR 0001](docs/adr/0001-architecture-addon-companion-and-brains.md) before you change how the parts talk to each other, and [ADR 0002](docs/adr/0002-desktop-app-tauri-shell-with-typescript-core.md) before you work on the app or the core. All decisions are listed in the [ADR index](docs/adr/README.md).
 
@@ -57,7 +57,7 @@ These protect players and the project. Don't trade them for speed.
 - The pull request title becomes the squash commit on `main`, so it uses the same format. Fill in the template: summary, test plan and agent.
 - `main` only takes pull requests with green CI. They are squash-merged, and `main` is never force-pushed.
 - A pull request is merged only after an explicit go from @Smidelis for that pull request. The go reaches the person who merges directly, in their own chat with @Smidelis or as a GitHub review; a go passed on by someone else doesn't count. The author merges if they have write access, otherwise a maintainer does, and whoever merges notes where the go came from, for example `Go: @Smidelis in chat, 2026-11-11` ([ADR 0004](docs/adr/0004-repository-organization-and-bot-identity.md)).
-- Decisions that are hard to reverse get an ADR, proposed as a pull request. Take the next free number; 0005 is reserved for the transport decision.
+- Decisions that are hard to reverse get an ADR, proposed as a pull request. Take the next free number.
 - Update the docs in the same pull request as the behavior they describe.
 
 ## Commands

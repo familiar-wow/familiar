@@ -30,15 +30,15 @@ Familiar only advises. It never moves, casts or targets for you. The design is d
 
 ## Roadmap
 
-| Phase                     | Goal                                                                   | Status                                    |
-| ------------------------- | ---------------------------------------------------------------------- | ----------------------------------------- |
-| 0 Foundation              | repository, tooling and the first architecture decisions               | done                                      |
-| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | in progress: measuring transport channels |
-| 2 Game context and links  | the full character as context, links in both directions                |                                           |
-| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    |                                           |
-| 4 Memory                  | a memory that survives a change of brain                               |                                           |
-| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    |                                           |
-| 6 Public alpha            | release on CurseForge, website and user docs                           |                                           |
+| Phase                     | Goal                                                                   | Status                                   |
+| ------------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
+| 0 Foundation              | repository, tooling and the first architecture decisions               | done                                     |
+| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | in progress: transport chosen (ADR 0005) |
+| 2 Game context and links  | the full character as context, links in both directions                |                                          |
+| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    |                                          |
+| 4 Memory                  | a memory that survives a change of brain                               |                                          |
+| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    |                                          |
+| 6 Public alpha            | release on CurseForge, website and user docs                           |                                          |
 
 ## Repository
 
