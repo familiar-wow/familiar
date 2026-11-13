@@ -63,13 +63,13 @@ The transport stays behind its interface, and copy and paste remains the fallbac
 ## Consequences
 
 - Players see and hear nothing of the transport while they play. Sending works in combat and did not change the mean frame time on Windows.
-- The addon list shows Familiar and one collapsed category; opened, it lists 256 helpers. The client keeps the collapsed state per machine. It stayed collapsed across `/reload` on Windows; the character list after a full restart is still to be checked.
+- The addon list shows Familiar and one collapsed category; opened, it lists 256 helpers. The client keeps the collapsed state per machine, and it stayed collapsed across `/reload` on Windows. We did not check the character list after a full restart and leave that to feedback from players.
 - Familiar has to install the helpers, the font bank and the doorbell files, and the client finds new files only after a full restart. Whether the CurseForge package or the companion installs them is decided later.
 - Up, the lane carries at most about 0.9 KB/s (29 bytes every 33 ms). Messages stay small, and the brain pulls everything else through tools ([ADR 0001](0001-architecture-addon-companion-and-brains.md)).
 - Fonts and doorbell files work once per game session. The tool's 256 fonts hold about 125 KB, or about 50 replies of 2 KB, and one hour of testing used 135 of them. Familiar needs a larger bank, for example many file names as hard links to a few files, as wow-forever-codex does, or a denser reply format. Not measured yet.
-- Players who switch off all game sound get no doorbell; master volume 0 works. They need another trigger, such as a font that the addon reads at fixed intervals and that says whether a reply is ready. Not measured yet.
+- Familiar needs the game sound switched on; master volume 0 is enough. The addon's self-test at login tells players who switched it off, and the user docs say so. A trigger without sound, such as a font that the addon reads at fixed intervals, would spend a font on every check and is not planned.
 - Neither side runs code that the other wrote: the companion reads bits from a text file, the addon measures fonts.
-- Nobody measured on macOS, so Familiar supports macOS only after a run on a Mac.
-- Everything rests on undocumented behavior of build 1.60.1.70888, and a client update can break it. The transport stays isolated, and the measuring tool in [#2] can run again.
+- Nobody on the team has a Mac, so the transport is unmeasured on macOS. Familiar supports macOS once someone from the community has measured it there.
+- Everything rests on undocumented behavior of build 1.60.1.70888, and a client update can break it. Familiar keeps one channel per direction and answers a break with a quick fix release instead of a second channel in reserve. The transport stays isolated, and the measuring tool in [#2] can run again.
 
 [#2]: https://github.com/familiar-wow/familiar/pull/2
