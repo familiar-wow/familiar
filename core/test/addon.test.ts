@@ -55,7 +55,8 @@ let app: Transport | undefined;
 const chat: string[] = [];
 const errors: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
-let ticker: ReturnType<typeof setInterval>;
+let ticker: ReturnType<typeof setTimeout> | undefined;
+let nextFrame = () => {};
 
 const command = (line: string) => {
 	game.stdin.write(`${line}\n`);
@@ -88,7 +89,7 @@ async function roundTrip(
 	command(`slash /familiar say ${text}`);
 	const sent = await waitFor(/Sent in \d+\.\d+ s\.$/, from);
 	// A second attempt starts only after 3 s.
-	expect(chat[sent - 1]).toMatch(/Sent in 0\.\d+ s\.$/);
+	expect(chat[sent - 1]).toMatch(/Sent in [0-2]\.\d+ s\.$/);
 	return Math.max(sent, await waitFor(expected, from));
 }
 
@@ -137,22 +138,24 @@ beforeAll(async () => {
 			const lines = (rest + new TextDecoder().decode(chunk)).split("\n");
 			rest = lines.pop() ?? "";
 			for (const line of lines) {
+				if (line.startsWith("tick")) ticker = setTimeout(nextFrame, 17);
 				if (line.startsWith("chat ")) chat.push(line.slice(5));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
 			}
 		}
 	})();
-	// About 30 frames per second, the slowest client measured: the addon saves every second
-	// frame, so each frame of a message stays in AddOns.txt for only 34 ms.
+	// About 60 frames per second, and the addon saves every second frame: each frame of a message
+	// stays in AddOns.txt for only 34 ms, as with the slowest client measured. A frame starts
+	// 17 ms after the stub client has finished the last one, so a stalled client draws one long
+	// frame and cannot catch up on the frames it missed.
 	const started = performance.now();
-	ticker = setInterval(
-		() => command(`frame ${Math.round(performance.now() - started)}`),
-		17,
-	);
+	nextFrame = () => command(`frame ${Math.round(performance.now() - started)}`);
+	nextFrame();
 });
 
 afterAll(() => {
-	clearInterval(ticker);
+	nextFrame = () => {};
+	clearTimeout(ticker);
 	app?.stop();
 	game?.kill();
 	rmSync(root, { recursive: true, force: true });
@@ -179,6 +182,15 @@ test("messages go up and replies come down, across /reload, a character switch a
 	command("slash /familiar say lost once");
 	at = await waitFor(/Sent in [3-9]\.\d+ s\./, at);
 	at = await waitFor(/heard: lost once$/, at);
+
+	// The system holds a write up halfway: AddOns.txt stays empty for 0.3 s, which reads as all
+	// helpers off. The message must not end there.
+	command("stall 2 300");
+	at = await roundTrip(
+		"its second frame is written slowly",
+		/heard: its second frame is written slowly$/,
+		at,
+	);
 
 	command("reload");
 	at = await waitFor(/Connected to the test app\.$/, at);

@@ -26,8 +26,12 @@ export const helperName = (i: number) =>
 
 const ROW = /^Familiar_L(\d{3}):[ \t]*(enabled|disabled)[ \t]*\r?$/gm;
 
-/** A file younger than this without a valid frame may be cut short by a write in progress. */
-const MID_WRITE_MS = 200;
+/**
+ * A file younger than this without a valid frame may be cut short by a write in progress: the
+ * client empties the file before it writes it, and a busy system can hold the write up for
+ * hundreds of milliseconds. An empty file would read as the rest state and end a message early.
+ */
+const MID_WRITE_MS = 1000;
 const FAST_MS = 2;
 const SLOW_MS = 50;
 const SCAN_MS = 250;

@@ -2,7 +2,7 @@
 -- implements the calls the addon makes and the file behavior measured in FAM-15:
 --   * AddOns.txt holds rows per character, the client one enabled state per process. Logging in
 --     applies the character's rows; EnableAddOn and DisableAddOn give an addon a row only when
---     they change its state; SaveAddOns writes the logged-in character's file.
+--     they change its state; SaveAddOns empties the logged-in character's file, then writes it.
 --   * A font file loads once per process and is usable two frames after SetFont; until then a
 --     font string measures with the font it had. Advances are rounded to whole pixels.
 --   * PlaySoundFile reports even an empty file as played, C_Sound.IsPlaying tells for how long.
@@ -19,7 +19,9 @@
 --   list open|close     show or hide the addon list
 --   sound on|off        switch all game sound
 --   drop <n>            the next n AddOns.txt writes get lost
--- Output: "chat <text>" for every line the addon prints, "error <text>" for a Lua error.
+--   stall <n> <ms>      the nth AddOns.txt write from now halts <ms> with the file emptied
+-- Output: "chat <text>" for every line the addon prints, "error <text>" for a Lua error, "tick"
+-- once a frame is done.
 
 local client, account, realm, character, addonList = ...
 assert(addonList, "usage: lua client.lua <client> <account> <realm> <character> <addon list>")
@@ -77,6 +79,7 @@ local rows = {} -- addons with a row in the logged-in character's AddOns.txt
 local saved = {} -- SavedVariables of the account
 local collapsed = {} -- the addon list's categories, kept per machine
 local soundOn, drops = true, 0
+local stallIn, stallMs = 0, 0
 local handles, nextHandle = {}, 0
 
 local function startProcess()
@@ -112,6 +115,15 @@ local function saveRows()
 		end
 	end
 	local f = assert(io.open(addonsTxt(), "wb"))
+	if stallIn > 0 then
+		stallIn = stallIn - 1
+		if stallIn == 0 then
+			-- Lua 5.1 cannot sleep; the file stays empty meanwhile.
+			local stop = os.clock() + stallMs / 1000
+			repeat
+			until os.clock() >= stop
+		end
+	end
 	f:write(table.concat(lines, "\r\n"), "\r\n")
 	f:close()
 end
@@ -443,6 +455,7 @@ for line in io.lines() do
 	local command, rest = line:match("^(%S+)%s*(.-)%s*$")
 	if command == "frame" then
 		runFrame(tonumber(rest))
+		out("tick", "")
 	elseif command == "slash" then
 		local slash, text = rest:match("^(/%S+)%s*(.-)$")
 		for key, handler in pairs(env.SlashCmdList) do
@@ -473,5 +486,8 @@ for line in io.lines() do
 		soundOn = rest == "on"
 	elseif command == "drop" then
 		drops = tonumber(rest)
+	elseif command == "stall" then
+		local n, ms = rest:match("^(%d+)%s+(%d+)$")
+		stallIn, stallMs = tonumber(n), tonumber(ms)
 	end
 end
