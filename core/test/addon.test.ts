@@ -12,8 +12,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { echo } from "../src/echo.ts";
 import type { Log } from "../src/log.ts";
-import { echo } from "../src/main.ts";
 import { Transport } from "../src/transport/transport.ts";
 import { FILES, TOC } from "../src/wow/addon.ts";
 import { wowPaths } from "../src/wow/client.ts";

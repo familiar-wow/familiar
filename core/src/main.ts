@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
+import { echo } from "./echo.ts";
 import { fileLog } from "./log.ts";
 import { Transport } from "./transport/transport.ts";
 import {
@@ -55,14 +56,6 @@ async function resolveClient(option?: string): Promise<WowPaths> {
 	if (!isClientFolder(client))
 		exitWith(`${client} does not look like a WoW client folder.`);
 	return wowPaths(client);
-}
-
-/** The echo: "heard: <text>"; a number n as text asks for a reply of n bytes, up to 8000. */
-export function echo(text: string): string {
-	const heard = `heard: ${text}`;
-	const size = /^\d+$/.test(text) ? Math.min(Number(text), 8000) : 0;
-	if (size <= heard.length) return heard;
-	return `${heard}\n${"familiar ".repeat(Math.ceil(size / 9))}`.slice(0, size);
 }
 
 const stamp = () =>
@@ -176,9 +169,10 @@ async function main(): Promise<void> {
 	);
 }
 
-if (import.meta.main)
-	main().catch((error) =>
-		exitWith(
-			String(error instanceof Error ? (error.stack ?? error.message) : error),
-		),
-	);
+// No `if (import.meta.main)`: in a Windows build made with Bun.build, the entry point is named
+// without .exe, so the check fails and the app quits without a word (FAM-22).
+main().catch((error) =>
+	exitWith(
+		String(error instanceof Error ? (error.stack ?? error.message) : error),
+	),
+);

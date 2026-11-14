@@ -31,19 +31,11 @@ for (const platform of wanted) {
 	const result = await Bun.build({
 		entrypoints: [join(root, "src", "main.ts")],
 		minify: true,
+		// No Windows file details such as title and version: Bun does not write them when it
+		// cross-compiles.
 		compile: {
 			target: spec.target,
 			outfile: binary,
-			...(windows
-				? {
-						windows: {
-							title: "Familiar",
-							publisher: "The Familiar contributors",
-							version: `${pkg.version}.0`,
-							description: "Familiar app for development builds",
-						},
-					}
-				: {}),
 		},
 	});
 	if (!result.success) {
