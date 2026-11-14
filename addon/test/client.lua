@@ -80,6 +80,7 @@ local saved = {} -- SavedVariables of the account
 local collapsed = {} -- the addon list's categories, kept per machine
 local soundOn, drops = true, 0
 local stallIn, stallMs = 0, 0
+local stalled = 0 -- seconds a stalled write added to the current frame
 local handles, nextHandle = {}, 0
 
 local function startProcess()
@@ -122,6 +123,7 @@ local function saveRows()
 			local stop = os.clock() + stallMs / 1000
 			repeat
 			until os.clock() >= stop
+			stalled = stalled + stallMs / 1000
 		end
 	end
 	f:write(table.concat(lines, "\r\n"), "\r\n")
@@ -349,7 +351,10 @@ local function api()
 	e.GetTime = function()
 		return clock
 	end
-	e.GetTimePreciseSec = e.GetTime
+	-- Real time: it moves on while a write stalls, where GetTime keeps the frame's time.
+	e.GetTimePreciseSec = function()
+		return clock + stalled
+	end
 	e.GetSessionTime = function()
 		return math.floor(clock - process.started)
 	end
@@ -433,7 +438,7 @@ end
 
 local function runFrame(ms)
 	local elapsed = ms / 1000 - clock
-	clock, frameNo = ms / 1000, frameNo + 1
+	clock, frameNo, stalled = ms / 1000, frameNo + 1, 0
 	for _, frame in ipairs(frames) do
 		local script = frame.scripts.OnUpdate
 		if script then
