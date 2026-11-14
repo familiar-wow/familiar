@@ -32,7 +32,7 @@ Addons cannot open network connections or files, so the addon talks to the compa
 
 Read [ADR 0001](docs/adr/0001-architecture-addon-companion-and-brains.md) before you change how the parts talk to each other, and [ADR 0002](docs/adr/0002-desktop-app-tauri-shell-with-typescript-core.md) before you work on the app or the core. All decisions are listed in the [ADR index](docs/adr/README.md).
 
-Experiments go into `spikes/<name>/` with their own README and commands. They are throwaway code, and product code never imports them.
+Experiments go into `spikes/<name>/` on a `spike/…` branch, with their own README and commands, and their pull request stays a draft. They are throwaway code: product code never imports them, and they never reach `main`. Once an ADR records the result, close the pull request without merging. Its code stays there, and `git fetch origin pull/<number>/head` brings it back.
 
 ## Rules
 
