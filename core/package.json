@@ -1,0 +1,16 @@
+{
+	"name": "@familiar/core",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "bun src/main.ts",
+		"typecheck": "tsc --noEmit",
+		"build": "bun scripts/build.ts"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.4",
+		"opentype.js": "2.0.0",
+		"typescript": "7.0.2"
+	}
+}
