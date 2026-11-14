@@ -217,9 +217,19 @@ test("messages go up and replies come down, across /reload, a character switch a
 	expect(events.findLast((e) => e.name === "session")?.data?.silenced).toBe(1);
 	at = await roundTrip("the app is back", /heard: the app is back$/, at);
 
+	// The app restarts while the game runs, and the addon still counts as connected: the app
+	// takes over from the next message, without a hello.
+	app?.stop();
+	await startApp();
+	at = await roundTrip(
+		"after an app restart",
+		/heard: after an app restart$/,
+		at,
+	);
+
 	command("slash /familiar status");
 	await waitFor(
-		/:\|r connected, sound ok; used since the game started: 1 of 600 confirmations, 4 of 600 message doorbells, 4 of 256 fonts; probe: font yes, sound yes$/,
+		/:\|r connected, sound ok; used since the game started: 2 of 600 confirmations, 5 of 600 message doorbells, 5 of 256 fonts; probe: font yes, sound yes$/,
 		at,
 	);
 	expect(errors).toEqual([]);
