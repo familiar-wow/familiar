@@ -30,7 +30,7 @@ bun run build             # single executables for Windows and Linux in core/dis
 
 ## How the transport works
 
-Up, the addon sends a message as frames of 32 bytes: it switches 256 helper addons on and off and saves the addon list, and the app reads the bits from `AddOns.txt`. The app confirms each message by raising an ack doorbell, a `.wav` file that the addon plays. Without that confirmation the addon sends the message again.
+Up, the addon sends a message as frames of 32 bytes: it switches 256 helper addons on and off and saves the addon list, and the app reads the bits from `AddOns.txt`. The app polls these files instead of waiting for change events, which not every system delivers: the logged-in character's file every 2 ms, the others every 50 ms. So the first frame of each message stays 0.1 s, and that of a hello 0.4 s, because a hello may go into a file the client creates with it. The app confirms each message by raising an ack doorbell, a `.wav` file that the addon plays. Without that confirmation the addon sends the message again.
 
 Down, the app writes a message into the glyph widths of the next fonts in the bank, 492 bytes per font, and raises the next message doorbell. The addon hears it and measures the fonts.
 

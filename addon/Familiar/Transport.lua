@@ -29,7 +29,7 @@ local PROBE = "Interface\\AddOns\\Familiar_L000\\probe."
 local state -- FamiliarDB.transport: process, key, id, ack, bell, font
 local queue, handlers = {}, {}
 local problem -- why this session cannot send, if it cannot
-local helloBody
+local helloBody, helloSent
 local function nothing() end
 
 -- Sending -----------------------------------------------------------------------------
@@ -84,7 +84,8 @@ end
 local function connect()
 	local wait, said = HELLO_WAIT, false
 	while not Transport.connected do
-		Lane.Send(encode(true, state.ack - 1, helloBody))
+		Lane.Send(encode(true, state.ack - 1, helloBody), true)
+		helloSent = true
 		local deadline = Tasks.Now() + wait
 		repeat
 			Tasks.Sleep(0.1)
@@ -195,7 +196,12 @@ local function read()
 	end
 end
 
+-- Listens once the session's first hello is out. A doorbell that an earlier game left raised must
+-- not ring, and get its font loaded, before the app has silenced it and written the welcome.
 local function receiver()
+	while not helloSent do
+		Tasks.Sleep(0.05)
+	end
 	while true do
 		if state.bell <= Bells.COUNT and Bells.Rings(Bells.Path("msg", state.bell)) then
 			read()

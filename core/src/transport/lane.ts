@@ -2,8 +2,14 @@
 // its enabled state, and the client writes them into the character's AddOns.txt whenever the
 // addon calls C_AddOns.SaveAddOns. This reads every client write and puts the frames back
 // together into messages.
-import { type FSWatcher, readFileSync, statSync, watch } from "node:fs";
-import { join } from "node:path";
+//
+// The app only polls. File change events do not arrive on every system, and while the app relied
+// on them, messages got lost under Proton on an NTFS drive (FAM-22). The client writes only the
+// logged-in character's file, which the app reads about every 2 ms; it looks at the other files
+// every 50 ms and for new ones every 250 ms. A message can go to a file the app is not reading
+// closely, after the app's restart or a character switch, so the addon holds the first frame of
+// a message long enough for the slower looks (Lane.lua).
+import { readFileSync, statSync } from "node:fs";
 import type { Log } from "../log.ts";
 import { addonsFiles } from "../wow/client.ts";
 import {
@@ -22,6 +28,9 @@ const ROW = /^Familiar_L(\d{3}):[ \t]*(enabled|disabled)[ \t]*\r?$/gm;
 
 /** A file younger than this without a valid frame may be cut short by a write in progress. */
 const MID_WRITE_MS = 200;
+const FAST_MS = 2;
+const SLOW_MS = 50;
+const SCAN_MS = 250;
 
 /** The lane in a file's text as 32 bytes. A missing row counts as off, the helpers' default. */
 export function readLane(text: string): Uint8Array {
@@ -91,12 +100,11 @@ interface Watched {
 	assembler: Assembler;
 }
 
-/** Watches every character's AddOns.txt; the one the client wrote last is polled fastest. */
+/** Polls every character's AddOns.txt; the one the client wrote last the fastest. */
 export class LaneReader {
 	private readonly watched = new Map<string, Watched>();
 	private readonly timers: ReturnType<typeof setInterval>[] = [];
 	private active?: Watched;
-	private watcher?: FSWatcher;
 	private running = false;
 
 	constructor(
@@ -108,42 +116,26 @@ export class LaneReader {
 	start(): void {
 		this.running = true;
 		this.scan(true);
-		this.timers.push(setInterval(() => this.scan(false), 1000));
+		this.timers.push(setInterval(() => this.scan(false), SCAN_MS));
 		this.timers.push(
 			setInterval(() => {
 				for (const entry of this.watched.values())
 					if (entry !== this.active) this.check(entry);
-			}, 50),
+			}, SLOW_MS),
 		);
-		try {
-			this.watcher = watch(
-				this.accounts,
-				{ recursive: true },
-				(_event, name) => {
-					if (!name?.endsWith("AddOns.txt")) return;
-					const file = join(this.accounts, name);
-					if (!this.watched.has(file)) this.scan(false);
-					const entry = this.watched.get(file);
-					if (entry) this.check(entry);
-				},
-			);
-		} catch {
-			// Polling alone is enough; the watcher only shortens the reaction time.
-		}
 		this.poll();
 	}
 
 	stop(): void {
 		this.running = false;
 		for (const timer of this.timers) clearInterval(timer);
-		this.watcher?.close();
 	}
 
-	/** About 2 ms between looks at the active file: the client writes a frame every 33 ms. */
+	/** The client writes a frame every 33 ms or more. */
 	private poll = (): void => {
 		if (!this.running) return;
 		if (this.active) this.check(this.active);
-		setTimeout(this.poll, 2);
+		setTimeout(this.poll, FAST_MS);
 	};
 
 	private scan(initial: boolean): void {
@@ -159,8 +151,8 @@ export class LaneReader {
 				),
 			};
 			this.watched.set(file, entry);
-			// What was in the files before we started is history, not news.
 			if (initial) {
+				// What was in the files before we started is history, not news.
 				try {
 					const stat = statSync(file);
 					entry.mtime = stat.mtimeMs;
@@ -168,6 +160,9 @@ export class LaneReader {
 				} catch {
 					// Read on the next change.
 				}
+			} else {
+				// The client just created it.
+				this.check(entry);
 			}
 		}
 	}
@@ -191,9 +186,14 @@ export class LaneReader {
 			!entry.again
 		)
 			return;
+		// The client writes only the logged-in character's file: read it closely from its first
+		// change on, even if this read catches the write in progress.
+		this.active = entry;
 		let text: string;
+		let after: ReturnType<typeof statSync>;
 		try {
 			text = readFileSync(entry.file, "latin1");
+			after = statSync(entry.file);
 		} catch {
 			entry.again = true; // Windows locks the file while the client writes it.
 			return;
@@ -201,10 +201,12 @@ export class LaneReader {
 		const bits = readLane(text);
 		const frame = decodeFrame(bits);
 		// The client does not write the file atomically, and a file cut short reads as all
-		// helpers off. Read it again until it is old enough to be complete.
+		// helpers off. Read it again if it changed while we read it, or if it shows no frame and
+		// is too young to be complete.
 		if (
-			(!frame || frame === "rest") &&
-			Date.now() - stat.mtimeMs < MID_WRITE_MS
+			after.mtimeMs !== stat.mtimeMs ||
+			after.size !== stat.size ||
+			((!frame || frame === "rest") && Date.now() - stat.mtimeMs < MID_WRITE_MS)
 		) {
 			entry.again = true;
 			return;
@@ -212,8 +214,6 @@ export class LaneReader {
 		entry.mtime = stat.mtimeMs;
 		entry.size = stat.size;
 		entry.again = false;
-		// The client writes only the logged-in character's file.
-		this.active = entry;
 		const message = entry.assembler.push(bits);
 		if (message) this.receive(message);
 	}

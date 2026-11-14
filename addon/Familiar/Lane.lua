@@ -12,6 +12,10 @@ ns.Lane = Lane
 
 local CHUNK = 29 -- message bytes per frame, between the head byte and the CRC-16
 local GAP = 0.033 -- seconds between saves; at this pace the client lost no frame in FAM-15
+-- Seconds the first frame of a message stays. The app may not be reading this character's file
+-- closely yet: it looks at the other files every 50 ms and for new ones every 250 ms
+-- (core/src/transport/lane.ts). A hello may go into a file the client creates with it.
+local HOLD, HOLD_HELLO = 0.1, 0.4
 local REST = rep("\0", 32)
 local POW2 = { [0] = 1, 2, 4, 8, 16, 32, 64, 128 }
 
@@ -86,10 +90,11 @@ local function apply(frame, character)
 	C_AddOns.SaveAddOns()
 end
 
--- At most one save per rendered frame and GAP apart: a second save in the same frame would
--- overwrite the first before the app could read it. Never while the addon list is open.
-local function save(frame, character)
-	while listOpen() or Tasks.frame == lastFrame or Tasks.Now() - lastSave < GAP do
+-- At most one save per rendered frame and `gap` seconds after the last one: a second save in the
+-- same frame would overwrite the first before the app could read it. Never while the addon list
+-- is open.
+local function save(frame, character, gap)
+	while listOpen() or Tasks.frame == lastFrame or Tasks.Now() - lastSave < gap do
 		Tasks.Sleep(listOpen() and 0.25 or 0)
 	end
 	apply(frame, character)
@@ -98,13 +103,18 @@ end
 
 -- Sends a message (task context), then switches every helper off. That rest state also keeps the
 -- addon list's OK button from turning into Reload UI.
-function Lane.Send(bytes)
+function Lane.Send(bytes, hello)
 	local character = UnitGUID("player")
-	for k = 0, ceil(#bytes / CHUNK) - 1 do
-		local head = char((k == 0 and 128 or 0) + k % 128) .. sub(bytes, k * CHUNK + 1, (k + 1) * CHUNK)
-		head = head .. rep("\0", CHUNK + 1 - #head)
-		local crc = Codec.Crc16(head)
-		save(head .. char(crc % 256, floor(crc / 256)), character)
+	local frames = ceil(#bytes / CHUNK)
+	for k = 0, frames do
+		local frame = REST
+		if k < frames then
+			frame = char((k == 0 and 128 or 0) + k % 128) .. sub(bytes, k * CHUNK + 1, (k + 1) * CHUNK)
+			frame = frame .. rep("\0", CHUNK + 1 - #frame)
+			local crc = Codec.Crc16(frame)
+			frame = frame .. char(crc % 256, floor(crc / 256))
+		end
+		-- The save after the first frame waits longest.
+		save(frame, character, k == 1 and (hello and HOLD_HELLO or HOLD) or GAP)
 	end
-	save(REST, character)
 end

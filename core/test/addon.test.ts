@@ -79,14 +79,17 @@ async function waitFor(
 	);
 }
 
-/** Sends a test message and waits for the echo. */
+/** Sends a test message and waits for the echo. It must go through at the first attempt. */
 async function roundTrip(
 	text: string,
 	expected: RegExp,
 	from: number,
 ): Promise<number> {
 	command(`slash /familiar say ${text}`);
-	return waitFor(expected, from);
+	const sent = await waitFor(/Sent in \d+\.\d+ s\.$/, from);
+	// A second attempt starts only after 3 s.
+	expect(chat[sent - 1]).toMatch(/Sent in 0\.\d+ s\.$/);
+	return Math.max(sent, await waitFor(expected, from));
 }
 
 /** Starts the app's end, which answers every message with the echo. */
@@ -139,10 +142,12 @@ beforeAll(async () => {
 			}
 		}
 	})();
+	// About 30 frames per second, the slowest client measured: the addon saves every second
+	// frame, so each frame of a message stays in AddOns.txt for only 34 ms.
 	const started = performance.now();
 	ticker = setInterval(
 		() => command(`frame ${Math.round(performance.now() - started)}`),
-		16,
+		17,
 	);
 });
 
@@ -171,7 +176,8 @@ test("messages go up and replies come down, across /reload, a character switch a
 
 	// A message that gets lost goes out again.
 	command("drop 1");
-	at = await roundTrip("lost once", /Sent in [3-9]\.\d+ s\./, at);
+	command("slash /familiar say lost once");
+	at = await waitFor(/Sent in [3-9]\.\d+ s\./, at);
 	at = await waitFor(/heard: lost once$/, at);
 
 	command("reload");
@@ -182,6 +188,7 @@ test("messages go up and replies come down, across /reload, a character switch a
 		at,
 	);
 
+	// Alt's AddOns.txt does not exist yet: the client creates it with the hello.
 	command("login Alt");
 	at = await waitFor(/Connected to the test app\.$/, at);
 	at = await roundTrip("from Alt", /heard: from Alt$/, at);
@@ -197,10 +204,25 @@ test("messages go up and replies come down, across /reload, a character switch a
 	at = await waitFor(/Connected to the test app\.$/, at);
 	at = await roundTrip("after restart", /heard: after restart$/, at);
 
+	// The new process starts before the old one has quit, so the app empties nothing. It
+	// silences what the old process raised once the hello names the new session.
+	pids = [2, 3];
+	command("restart");
+	at = await waitFor(/Connected to the test app\.$/, at);
+	expect(events.findLast((e) => e.name === "session")?.data?.silenced).toBe(3);
+	pids = [3];
+	at = await roundTrip(
+		"after an overlapping restart",
+		/heard: after an overlapping restart$/,
+		at,
+	);
+	// Every hello so far got its welcome at the first attempt.
+	expect(chat.filter((line) => line.includes("does not answer"))).toEqual([]);
+
 	// The app quits while the game runs, then the game restarts on its own: the doorbells the
 	// app raised are still raised. They must not pass for an app that answers.
 	app?.stop();
-	pids = [3];
+	pids = [4];
 	const restarted = chat.length;
 	command("restart");
 	at = await waitFor(/The Familiar app does not answer/, restarted);
