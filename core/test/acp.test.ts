@@ -1,9 +1,10 @@
-// The ACP brain against a stand-in agent (fake-agent.ts), over a real child process and stdio.
+// The ACP bridge against a stand-in agent (fake-agent.ts), over a real child process and stdio.
 import { afterEach, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AcpBrain } from "../src/brain/acp.ts";
 import type { Log } from "../src/log.ts";
+import type { Settings } from "../src/settings.ts";
 
 const FAKE = [process.execPath, join(import.meta.dir, "fake-agent.ts")];
 const events: { name: string; data?: Record<string, unknown> }[] = [];
@@ -13,9 +14,9 @@ const log: Log = {
 };
 const brains: AcpBrain[] = [];
 
-function brain(command = FAKE, timeout = 10): AcpBrain {
+function brain(settings: Partial<Settings["brain"]> = {}): AcpBrain {
 	const created = new AcpBrain(
-		{ name: "Fake", command, timeout },
+		{ command: FAKE, permissions: "deny", timeout: 10, ...settings },
 		{ cwd: tmpdir(), log, version: "0.0.0-test" },
 	);
 	brains.push(created);
@@ -39,24 +40,29 @@ test("answers with the last message, in one session per character", async () => 
 	expect(starts()).toBe(1);
 });
 
-test("declines what the agent asks permission for", async () => {
-	expect(await ask(brain(), "permission")).toBe("got no");
-	expect(events.find((e) => e.name === "brain-permission")?.data).toEqual({
-		tool: "rm -rf ~",
-		declined: "no",
-	});
+test("answers a permission request once, as the settings say", async () => {
+	expect(await ask(brain(), "permission")).toBe("got reject-once");
+	expect(await ask(brain({ permissions: "allow" }), "permission")).toBe(
+		"got allow-once",
+	);
+	expect(
+		events.filter((e) => e.name === "brain-permission").map((e) => e.data),
+	).toEqual([
+		{ tool: "rm -rf ~", answer: "reject-once" },
+		{ tool: "rm -rf ~", answer: "allow-once" },
+	]);
 });
 
 test("cancels a question that takes too long", async () => {
-	const fake = brain(FAKE, 0.5);
-	expect(await ask(fake, "slow")).toBe("Fake did not answer within 0.5 s.");
+	const fake = brain({ timeout: 0.5 });
+	expect(await ask(fake, "slow")).toBe("No answer within 0.5 s.");
 	expect(await ask(fake, "hello")).toBe("session 1: hello");
 	expect(starts()).toBe(1);
 });
 
 test("kills an agent that ignores the cancel and starts a new one", async () => {
-	const fake = brain(FAKE, 0.5);
-	expect(await ask(fake, "hang")).toBe("Fake did not answer within 0.5 s.");
+	const fake = brain({ timeout: 0.5 });
+	expect(await ask(fake, "hang")).toBe("No answer within 0.5 s.");
 	expect(await ask(fake, "hello")).toBe("session 1: hello");
 	expect(starts()).toBe(2);
 }, 15_000);
@@ -64,21 +70,24 @@ test("kills an agent that ignores the cancel and starts a new one", async () => 
 test("reports a crash and starts again with the next question", async () => {
 	const fake = brain();
 	expect(await ask(fake, "crash")).toBe(
-		"Fake stopped: fake-agent: crashed on purpose",
+		"The agent stopped: fake-agent: crashed on purpose",
 	);
 	expect(await ask(fake, "hello")).toBe("session 1: hello");
 });
 
 test("reports an agent that cannot start", async () => {
-	expect(await ask(brain(["familiar-no-such-agent"]), "hello")).toMatch(
-		/^Fake could not start: .*familiar-no-such-agent/,
+	const missing = brain({ command: ["familiar-no-such-agent"] });
+	expect(await ask(missing, "hello")).toMatch(
+		/^Could not start familiar-no-such-agent: /,
 	);
-	const quits = brain([
-		process.execPath,
-		"-e",
-		"console.error(\"Error: Profile 'familiar' does not exist.\"); process.exit(1)",
-	]);
-	expect(await ask(quits, "hello")).toBe(
-		"Fake could not start: Profile 'familiar' does not exist.",
+	const quits = brain({
+		command: [
+			process.execPath,
+			"-e",
+			'console.error("Error: no such profile"); process.exit(1)',
+		],
+	});
+	expect(await ask(quits, "hello")).toMatch(
+		/^Could not start .+: no such profile$/,
 	);
 });

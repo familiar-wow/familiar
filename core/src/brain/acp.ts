@@ -1,10 +1,10 @@
-// A brain reached through the Agent Client Protocol (ADR 0001), such as Hermes. Familiar starts
-// the agent as a child process on the first question and talks JSON-RPC with it over stdin and
-// stdout. Each character gets its own session, so a conversation goes on where it stopped.
+// The bridge to a brain that speaks the Agent Client Protocol, such as Hermes, or Codex and
+// Claude Code through their adapters (ADR 0001, ADR 0006). Familiar starts the agent as a child
+// process on the first question and talks JSON-RPC with it over stdin and stdout. Each character
+// gets its own session, so a conversation goes on where it stopped.
 //
-// Game text is data, never an instruction: Familiar offers the agent no file or terminal access
-// and declines every permission request. Which tools the agent brings along is set in the
-// agent itself; core/README.md shows how for Hermes.
+// The player sets the agent up in the agent itself. Familiar only bridges: it offers no file
+// system or terminal of its own and answers each permission request once, as its settings say.
 import {
 	type ActiveSession,
 	type ClientConnection,
@@ -62,12 +62,12 @@ export class AcpBrain {
 		question: Question,
 		reply: (text: string) => void,
 	): Promise<void> {
-		const { name, timeout } = this.settings;
+		const { command, timeout } = this.settings;
 		let agent: Agent;
 		try {
 			agent = this.agent ?? (await this.start());
 		} catch (error) {
-			return reply(`${name} could not start: ${message(error)}`);
+			return reply(`Could not start ${command.join(" ")}: ${message(error)}`);
 		}
 		const started = performance.now();
 		let timedOut = false;
@@ -77,7 +77,7 @@ export class AcpBrain {
 			const session = await this.session(agent, question);
 			timer = setTimeout(() => {
 				timedOut = true;
-				reply(`${name} did not answer within ${timeout} s.`);
+				reply(`No answer within ${timeout} s.`);
 				void agent.connection.agent
 					.notify(methods.agent.session.cancel, {
 						sessionId: session.sessionId,
@@ -85,7 +85,7 @@ export class AcpBrain {
 					.catch(() => {});
 				killer = setTimeout(() => this.drop(agent), GRACE_MS);
 			}, timeout * 1000);
-			// A command the agent offers, such as /tools, goes to it as typed (ACP slash commands).
+			// A command the agent offers, such as /tools in Hermes, goes to it as typed.
 			const input = question.text.startsWith("/")
 				? question.text
 				: prompt(question);
@@ -97,11 +97,11 @@ export class AcpBrain {
 				stopReason,
 				chars: text.length,
 			});
-			reply(answerFor(name, stopReason, text));
+			reply(answerFor(stopReason, text));
 		} catch (error) {
 			// The agent quit or broke the protocol: the next question starts a new one.
 			this.drop(agent);
-			if (!timedOut) reply(`${name} stopped: ${await why(agent, error)}`);
+			if (!timedOut) reply(`The agent stopped: ${await why(agent, error)}`);
 		} finally {
 			clearTimeout(timer);
 			clearTimeout(killer);
@@ -114,7 +114,7 @@ export class AcpBrain {
 	}
 
 	private async start(): Promise<Agent> {
-		const { name, command } = this.settings;
+		const { command, permissions } = this.settings;
 		const { cwd, log, version } = this.options;
 		const started = performance.now();
 		const child = Bun.spawn(command, {
@@ -136,16 +136,14 @@ export class AcpBrain {
 		});
 		const connection = client({ name: "familiar" })
 			.onRequest(methods.client.session.requestPermission, ({ params }) => {
-				const decline =
-					params.options.find((o) => o.kind === "reject_once") ??
-					params.options.find((o) => o.kind === "reject_always");
+				const choice = choose(params.options, permissions);
 				log.event("brain-permission", {
 					tool: params.toolCall.title,
-					declined: decline?.optionId ?? "cancelled",
+					answer: choice?.optionId ?? "cancelled",
 				});
 				return {
-					outcome: decline
-						? { outcome: "selected", optionId: decline.optionId }
+					outcome: choice
+						? { outcome: "selected", optionId: choice.optionId }
 						: { outcome: "cancelled" },
 				};
 			})
@@ -159,7 +157,7 @@ export class AcpBrain {
 		try {
 			const init = await connection.agent.request(methods.agent.initialize, {
 				protocolVersion: PROTOCOL_VERSION,
-				// No file system and no terminal for the agent.
+				// The agent works with its own tools; Familiar lends it no file system or terminal.
 				clientCapabilities: {},
 				clientInfo: { name: "familiar", title: "Familiar", version },
 			});
@@ -167,10 +165,11 @@ export class AcpBrain {
 				throw new Error(
 					`it speaks ACP version ${init.protocolVersion}, Familiar version ${PROTOCOL_VERSION}`,
 				);
+			const info = init.agentInfo;
 			const ms = Math.round(performance.now() - started);
-			log.event("brain-start", { ms, agent: init.agentInfo });
+			log.event("brain-start", { ms, agent: info });
 			log.say(
-				`${name} is ready: ${init.agentInfo?.name ?? command[0]} ${init.agentInfo?.version ?? ""}`.trim(),
+				`Brain ready: ${info?.title ?? info?.name ?? command[0]} ${info?.version ?? ""}`.trim(),
 			);
 		} catch (error) {
 			child.kill();
@@ -199,6 +198,18 @@ export class AcpBrain {
 }
 
 /**
+ * Answers a permission request once, as the settings say. Never "always": that would change the
+ * agent's own settings, which are the player's (ADR 0006).
+ */
+function choose(
+	options: { optionId: string; kind: string }[],
+	permissions: Settings["brain"]["permissions"],
+): { optionId: string } | undefined {
+	const once = (kind: string) => options.find((o) => o.kind === kind);
+	return (permissions === "allow" && once("allow_once")) || once("reject_once");
+}
+
+/**
  * Reads a turn to its end. Text before a tool call is the agent thinking aloud, so the answer
  * is the last text.
  */
@@ -223,10 +234,10 @@ async function lastMessage(session: ActiveSession): Promise<string> {
 	}
 }
 
-function answerFor(name: string, stopReason: StopReason, text: string): string {
-	if (stopReason === "refusal") return `${name} declined to answer.`;
-	if (stopReason === "cancelled") return `${name} stopped answering.`;
-	if (!text) return `${name} gave no answer.`;
+function answerFor(stopReason: StopReason, text: string): string {
+	if (stopReason === "refusal") return "The agent declined to answer.";
+	if (stopReason === "cancelled") return "The agent stopped answering.";
+	if (!text) return "The agent gave no answer.";
 	return stopReason === "end_turn" ? text : `${text} …`;
 }
 

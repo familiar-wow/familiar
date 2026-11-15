@@ -1,19 +1,17 @@
-// The settings file, until the desktop app has a settings page (FAM-6).
+// The settings file, until the desktop app has a settings page (FAM-6). It holds the bridge's
+// settings only: the brain itself is set up in the agent (ADR 0006).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
-const Settings = z.object({
+const Settings = z.strictObject({
 	brain: z
-		.object({
-			/** How the player sees the brain in messages. */
-			name: z.string().min(1).default("Hermes"),
+		.strictObject({
 			/** Starts an agent that speaks ACP on stdin and stdout. */
-			command: z
-				.array(z.string().min(1))
-				.min(1)
-				.default(["hermes", "--profile", "familiar", "acp"]),
+			command: z.array(z.string().min(1)).min(1).default(["hermes", "acp"]),
+			/** The answer to the agent's permission requests: deny, or allow each one once. */
+			permissions: z.enum(["deny", "allow"]).default("deny"),
 			/** Seconds to wait for an answer. */
 			timeout: z.number().positive().default(120),
 			/**

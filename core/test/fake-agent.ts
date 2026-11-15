@@ -63,8 +63,18 @@ agent({ name: "fake-agent" })
 					sessionId,
 					toolCall: { toolCallId: "1", title: "rm -rf ~" },
 					options: [
-						{ optionId: "yes", name: "Allow once", kind: "allow_once" },
-						{ optionId: "no", name: "Deny", kind: "reject_once" },
+						{ optionId: "allow-once", name: "Allow", kind: "allow_once" },
+						{
+							optionId: "allow-always",
+							name: "Always allow",
+							kind: "allow_always",
+						},
+						{ optionId: "reject-once", name: "Deny", kind: "reject_once" },
+						{
+							optionId: "reject-always",
+							name: "Never allow",
+							kind: "reject_always",
+						},
 					],
 				},
 			);

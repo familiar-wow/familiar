@@ -98,15 +98,15 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		`Client: ${paths.client} (interface ${iface}${build ? `, ${build}` : ""})`,
 	);
 	console.log(`Log:    ${logFile}`);
-	const { name, command } = settings.brain;
+	const { command, permissions } = settings.brain;
 	if (options.echo) console.log("Brain:  an echo, to test the transport");
 	else {
 		console.log(
-			`Brain:  ${name} (${command.join(" ")}), set in ${settingsFile}`,
+			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
 		);
 		if (!Bun.which(command[0] ?? ""))
 			console.log(
-				`\n!! ${command[0]} was not found. Install ${name}, or change brain.command in the settings.\n`,
+				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,
 			);
 	}
 	if (fresh) console.log("Addon installed.");

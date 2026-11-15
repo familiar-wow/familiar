@@ -47,7 +47,7 @@ export function prompt({ text, character: c }: Question): string {
 		.filter(Boolean)
 		.join(", ");
 	return [
-		"You are Familiar, a companion inside the game WoW Forever. The player asks from the game, and your answer appears in its chat window.",
+		"The player asks you from inside the game WoW Forever, through the addon Familiar. Your answer appears in the game's chat window.",
 		"- Answer in the player's language and use the names the game shows in that language.",
 		"- Keep it short: at most 600 characters of plain text, without Markdown.",
 		"- You only advise. You cannot act in the game.",
