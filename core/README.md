@@ -61,9 +61,11 @@ On the first start, `familiar` writes its settings with the defaults: `%APPDATA%
 | Hermes                   | `["hermes", "acp"]`                                      |
 | Codex                    | `["npx", "-y", "@agentclientprotocol/codex-acp"]`        |
 | Claude Code              | `["npx", "-y", "@agentclientprotocol/claude-agent-acp"]` |
-| an agent on another host | `["ssh", "<host>", "hermes", "acp"]`                     |
+| an agent on another host | `["ssh", "<host>", "~/.local/bin/hermes", "acp"]`        |
 
-Hermes takes `--profile <name>` before `acp` for another profile. Codex and Claude Code speak ACP through adapters from the ACP project, which `npx` starts until Familiar ships them itself. Claude Code works only with an Anthropic API key in `ANTHROPIC_API_KEY`, not with a Claude subscription (ADR 0001). For an agent on another host, set `cwd` to a folder on that host.
+Hermes takes `--profile <name>` before `acp` for another profile. Codex and Claude Code speak ACP through adapters from the ACP project, which `npx` starts until Familiar ships them itself. Claude Code works only with an Anthropic API key in `ANTHROPIC_API_KEY`, not with a Claude subscription (ADR 0001).
+
+For an agent on another host, set `cwd` to a folder on that host; Familiar itself starts `ssh` in its settings folder. SSH runs the command without your login profile, so give the agent's full path. Sign in with a key: Familiar cannot answer a password prompt, and `-o BatchMode=yes` after `ssh` turns a missing key into an error message instead of a wait.
 
 `familiar` starts the agent at the first question and keeps it running. Each character gets its own session, so a conversation goes on where it stopped. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Answers longer than four fonts of the bank (1968 bytes) are cut.
 

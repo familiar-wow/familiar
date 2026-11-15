@@ -15,10 +15,13 @@ const log: Log = {
 };
 const brains: AcpBrain[] = [];
 
-function brain(settings: Partial<Settings["brain"]> = {}): AcpBrain {
+function brain(
+	settings: Partial<Settings["brain"]> = {},
+	folder = tmpdir(),
+): AcpBrain {
 	const created = new AcpBrain(
 		{ command: FAKE, permissions: "deny", timeout: 10, ...settings },
-		{ folder: tmpdir(), log, version: "0.0.0-test" },
+		{ folder, log, version: "0.0.0-test" },
 	);
 	brains.push(created);
 	return created;
@@ -46,6 +49,21 @@ test("opens sessions in the folder from the settings, which may exist only where
 	const remote = join(tmpdir(), "folder-on-another-host");
 	expect(await ask(brain({ cwd: remote }), "where")).toBe(remote);
 });
+
+// Codex and Claude Code start through npx, which is a .cmd file on Windows. Bun finds such files
+// on the PATH and in the folder it starts in, but ignores PATH changes made at run time.
+test.skipIf(process.platform !== "win32")(
+	"starts an agent through a .cmd file on Windows",
+	async () => {
+		const folder = mkdtempSync(join(tmpdir(), "familiar-cmd-"));
+		writeFileSync(
+			join(folder, "fake-agent.cmd"),
+			`@"${FAKE[0]}" "${FAKE[1]}" %*\r\n`,
+		);
+		const fake = brain({ command: ["fake-agent"] }, folder);
+		expect(await ask(fake, "hello")).toBe("session 1: hello");
+	},
+);
 
 test("answers a permission request once, as the settings say", async () => {
 	expect(await ask(brain(), "permission")).toBe("got reject-once");
@@ -98,42 +116,3 @@ test("reports an agent that cannot start", async () => {
 		/^Could not start .+: no such profile$/,
 	);
 });
-
-// TEMPORARY probe (FAM-24): how Bun starts commands on Windows. Removed in the next commit.
-test.skipIf(process.platform !== "win32")(
-	"probe Windows spawn",
-	async () => {
-		const out: string[] = [];
-		const run = async (label: string, argv: string[], cwd?: string) => {
-			try {
-				const p = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
-				const text = (await new Response(p.stdout).text())
-					.trim()
-					.split(/\r?\n/)[0];
-				out.push(`${label}: exit ${await p.exited}, "${text}"`);
-			} catch (error) {
-				out.push(`${label}: throws ${(error as Error).message}`);
-			}
-		};
-		const npx = Bun.which("npx");
-		out.push(`which npx: ${npx}`);
-		await run("npx", ["npx", "--version"]);
-		if (npx) await run("npx by path", [npx, "--version"]);
-		await run("cmd /c npx", ["cmd.exe", "/d", "/s", "/c", "npx --version"]);
-		const folder = mkdtempSync(join(tmpdir(), "probe-"));
-		writeFileSync(join(folder, "probe.cmd"), "@echo probe-ok %*\r\n");
-		await run("probe.cmd by path", [join(folder, "probe.cmd"), "a b"]);
-		await run("probe in cwd", ["probe"], folder);
-		await run(
-			"cmd /c probe in cwd",
-			["cmd.exe", "/d", "/s", "/c", "probe"],
-			folder,
-		);
-		process.env.PATH = `${folder};${process.env.PATH}`;
-		out.push(`which probe after PATH change: ${Bun.which("probe")}`);
-		await run("probe after PATH change", ["probe"]);
-		console.log(`PROBE\n${out.join("\n")}\nPROBE END`);
-		expect(true).toBe(true);
-	},
-	60_000,
-);
