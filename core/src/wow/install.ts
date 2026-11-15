@@ -14,8 +14,15 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { atomicWrite } from "../files.ts";
-import { BELLS, bellPath, FONTS, fontPath } from "../transport/bank.ts";
+import { atomicLink, atomicWrite } from "../files.ts";
+import {
+	BELLS,
+	basePath,
+	bellPath,
+	EMPTY_FONT,
+	FONTS,
+	fontPath,
+} from "../transport/bank.ts";
 import { HELPERS } from "../transport/codec.ts";
 import { emptyFont } from "../transport/font.ts";
 import { helperName } from "../transport/lane.ts";
@@ -101,8 +108,15 @@ export function install(
 	write(join(main, `${MAIN}.toc`), mainToc(iface, version));
 	for (const [name, source] of Object.entries(FILES))
 		write(join(main, name), source);
-	for (let slot = 1; slot <= FONTS; slot++)
-		write(fontPath(main, slot), emptyFont(slot), false);
+	// The bank's names exist from the start, as links to a few empty fonts (bank.ts).
+	for (let slot = 1; slot <= FONTS; slot += 1000)
+		write(basePath(main, slot), EMPTY_FONT);
+	for (let slot = 1; slot <= FONTS; slot++) {
+		const file = fontPath(main, slot);
+		if (existsSync(file)) continue;
+		atomicLink(basePath(main, slot), file);
+		result.added++;
+	}
 	for (let n = 1; n <= BELLS; n++) {
 		write(bellPath(main, "ack", n), "", false);
 		write(bellPath(main, "msg", n), "", false);

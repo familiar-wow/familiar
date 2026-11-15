@@ -283,7 +283,7 @@ test("messages go up and replies come down, across /reload, a character switch a
 
 	command("slash /familiar status");
 	await waitFor(
-		/:\|r connected, sound ok; used since the game started: 2 of 600 confirmations, 5 of 600 message doorbells, 5 of 256 fonts; probe: font yes, sound yes$/,
+		/:\|r connected, sound ok; used since the game started: 2 of 4096 confirmations, 5 of 4096 message doorbells, 5 of 8192 fonts; probe: font yes, sound yes$/,
 		at,
 	);
 	expect(errors).toEqual([]);

@@ -1,26 +1,38 @@
 // Down, app to addon: the font bank and the doorbells in the addon's folder (ADR 0005).
-//   bank\NNN.ttf  256 fonts, each carries one packet per game start
-//   ack\NNN.wav   600 doorbells that confirm messages from the addon
-//   msg\NNN.wav   600 doorbells that announce a message in the bank
-// An empty .wav is a silent doorbell; the app raises it by writing 1.5 s of silence. The client
-// loads every file once per process, so all of them are used once per game start, and only an
+//   bank\N.ttf    8192 fonts, each carries one packet per game start
+//   bank\base\    the empty fonts that the unused names of the bank point to
+//   ack\N.wav     4096 doorbells that confirm messages from the addon
+//   msg\N.wav     4096 doorbells that announce a message in the bank
+// Names have at least three digits. An empty .wav is a silent doorbell; the app raises it by
+// writing 1.5 s of silence. The client loads every file once per game start and sees only the
+// names that existed when it started, so all of them are used once per game start, and only an
 // empty bank and silent doorbells may face a new game process.
+//
+// An empty font takes 25 KB, so the unused names of the bank are hard links to a few empty fonts
+// (FAM-25). Writing a font replaces its name with a file of its own; emptying it links the name
+// again. Windows allows 1023 names per file.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWrite } from "../files.ts";
+import { atomicLink, atomicWrite } from "../files.ts";
 import { encodePacket, packets } from "./codec.ts";
 import { emptyFont, fontFile } from "./font.ts";
 import { RAISED } from "./wav.ts";
 
-export const FONTS = 256;
-export const BELLS = 600;
+export const FONTS = 8192;
+export const BELLS = 4096;
+const NAMES_PER_BASE = 1000;
 
 const number = (n: number) => String(n).padStart(3, "0");
 
 export const fontPath = (addon: string, slot: number) =>
 	join(addon, "bank", `${number(slot)}.ttf`);
+export const basePath = (addon: string, slot: number) =>
+	join(addon, "bank", "base", `${Math.ceil(slot / NAMES_PER_BASE)}.ttf`);
 export const bellPath = (addon: string, row: "ack" | "msg", n: number) =>
 	join(addon, row, `${number(n)}.wav`);
+
+/** What every empty name of the bank holds. */
+export const EMPTY_FONT = emptyFont(0);
 
 const sizeOf = (file: string) => {
 	try {
@@ -30,8 +42,17 @@ const sizeOf = (file: string) => {
 	}
 };
 
-const isEmptyFont = (file: string, slot: number) =>
-	!existsSync(file) || Buffer.from(emptyFont(slot)).equals(readFileSync(file));
+/** Whether `file` still is the empty font: another name of `base`, or a copy of it. */
+export function isEmptyFont(file: string, base: string): boolean {
+	const a = statSync(file, { throwIfNoEntry: false, bigint: true });
+	const b = statSync(base, { throwIfNoEntry: false, bigint: true });
+	if (!a || !b) return false;
+	if (a.ino !== 0n && a.ino === b.ino && a.dev === b.dev) return true;
+	return (
+		a.size === BigInt(EMPTY_FONT.length) &&
+		Buffer.from(EMPTY_FONT).equals(readFileSync(file))
+	);
+}
 
 export class Bank {
 	/** The next message doorbell and font. */
@@ -56,8 +77,9 @@ export class Bank {
 			changed += this.silence("ack", n) + this.silence("msg", n);
 		for (let slot = 1; slot <= FONTS; slot++) {
 			const file = fontPath(this.addon, slot);
-			if (!isEmptyFont(file, slot)) {
-				atomicWrite(file, emptyFont(slot));
+			const base = basePath(this.addon, slot);
+			if (existsSync(file) && !isEmptyFont(file, base)) {
+				atomicLink(base, file);
 				changed++;
 			}
 		}

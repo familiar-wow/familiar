@@ -277,7 +277,8 @@ export function fontFile(packet: Uint8Array, slot: number): Uint8Array {
 			["hmtx", hmtx.done()],
 			["loca", loca.done()],
 			["maxp", maxp.done()],
-			["name", name(`Familiar${String(slot).padStart(3, "0")}`)],
+			// Five digits for every slot: a written font is as large as an empty one.
+			["name", name(`Familiar${String(slot).padStart(5, "0")}`)],
 			["post", post.done()],
 		] as [string, Uint8Array][]
 	).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
