@@ -45,6 +45,10 @@ test("every name of the bank starts as a link to an empty font, and a reset link
 	console.log(
 		`install: ${result.added} files in ${Math.round(performance.now() - started)} ms`,
 	);
+	// Every start of the app installs again, which must find everything in place.
+	const again = performance.now();
+	expect(install(paths, 16001, "0.0.0-test")).toEqual({ added: 0, updated: 0 });
+	console.log(`install again: ${Math.round(performance.now() - again)} ms`);
 	// Every name has the size of a written font: the client may note sizes when it starts.
 	expect(EMPTY_FONT.length).toBe(fontFile(new Uint8Array(512), FONTS).length);
 	for (const slot of [1, 1000, 1001, FONTS]) {
@@ -68,7 +72,8 @@ test("every name of the bank starts as a link to an empty font, and a reset link
 	expect(readFileSync(written)).toEqual(Buffer.from(EMPTY_FONT));
 	expect(isEmptyFont(written, basePath(addon, 2))).toBe(true);
 	expect(bank.reset()).toBe(0);
-});
+	// Windows takes about 13 s for the first install.
+}, 60_000);
 
 test("a copy of the empty font counts as empty, where the file system has no links", () => {
 	const copy = join(root, "copy.ttf");
