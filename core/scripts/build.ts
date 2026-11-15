@@ -1,6 +1,12 @@
 // Builds test builds into dist/: bun scripts/build.ts [windows-x64] [linux-x64]
 // Baseline builds also run on CPUs without AVX2. Packing needs zip and tar.
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 
@@ -14,6 +20,17 @@ const root = join(import.meta.dir, "..");
 const dist = join(root, "dist");
 const args = Bun.argv.slice(2);
 const wanted = (args.length > 0 ? args : Object.keys(PLATFORMS)) as Platform[];
+
+// The binary bundles the dependencies, so their licenses ship with it.
+const licenses = Object.keys(pkg.dependencies)
+	.map((name) => {
+		const text = readFileSync(
+			join(root, "node_modules", name, "LICENSE"),
+			"utf8",
+		);
+		return `${name}\n\n${text.trim()}\n`;
+	})
+	.join(`\n${"-".repeat(72)}\n\n`);
 
 for (const platform of wanted) {
 	const spec = PLATFORMS[platform];
@@ -43,6 +60,7 @@ for (const platform of wanted) {
 		process.exit(1);
 	}
 	if (!windows) chmodSync(binary, 0o755);
+	writeFileSync(join(folder, "THIRD-PARTY-LICENSES.txt"), licenses);
 
 	// tar keeps the executable bit; Windows users expect a zip.
 	const archive = `${name}.${windows ? "zip" : "tar.gz"}`;

@@ -1,6 +1,6 @@
 # ADR 0001: Architecture — addon, companion and brains
 
-- **Status:** Accepted (2026-11-11)
+- **Status:** Accepted (2026-11-11); the rule on untrusted game text is superseded in part by [ADR 0006](0006-brains-a-bridge-to-the-players-agent.md)
 - **Date:** 2026-11-10
 - **Deciders:** @Smidelis, @hermes-smidelis
 

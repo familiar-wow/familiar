@@ -14,7 +14,7 @@ So far it holds the transport to the app ([ADR 0005](../docs/adr/0005-transport-
 | `Familiar/Transport.lua` | hello and welcome, messages up with confirmation, messages down         |
 | `Familiar/Familiar.lua`  | saved state, events, the frame loop and `/familiar`                     |
 
-The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md). Until the chat window exists (FAM-23), `/familiar say <text>` sends a test message and the app answers with an echo. `/familiar status` shows the state of the transport.
+The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md). Until the chat window exists (FAM-23), `/familiar say <question>` asks the brain, and the answer appears in the chat frame. Each question starts with a header about the character (`Familiar.lua`, `header`). A `|` in an answer shows as text, so an answer cannot create a link. `/familiar status` shows the state of the transport.
 
 ## Test
 

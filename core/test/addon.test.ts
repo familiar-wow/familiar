@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseQuestion, type Question } from "../src/brain/chat.ts";
 import { echo } from "../src/echo.ts";
 import type { Log } from "../src/log.ts";
 import { Transport } from "../src/transport/transport.ts";
@@ -52,6 +53,7 @@ const log: Log = {
 };
 let pids = [1];
 let app: Transport | undefined;
+const questions: Question[] = [];
 const chat: string[] = [];
 const errors: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -93,7 +95,7 @@ async function roundTrip(
 	return Math.max(sent, await waitFor(expected, from));
 }
 
-/** Starts the app's end, which answers every message with the echo. */
+/** Starts the app's end, which answers every question with the echo. */
 async function startApp(): Promise<void> {
 	const transport = new Transport({
 		paths,
@@ -103,10 +105,10 @@ async function startApp(): Promise<void> {
 		processPollMs: 50,
 	});
 	transport.onMessage((body, { hello }) => {
-		if (!hello)
-			transport.send(
-				new TextEncoder().encode(echo(new TextDecoder().decode(body))),
-			);
+		if (hello) return;
+		const question = parseQuestion(new TextDecoder().decode(body));
+		questions.push(question);
+		transport.send(new TextEncoder().encode(echo(question.text)));
 	});
 	await transport.start();
 	app = transport;
@@ -163,9 +165,27 @@ afterAll(() => {
 
 test("messages go up and replies come down, across /reload, a character switch and a restart", async () => {
 	let at = await waitFor(/Connected to the test app\.$/, 0);
-	at = await roundTrip("hello", /Reply after .*: heard: hello$/, at);
-	// 2000 bytes take five fonts.
-	at = await roundTrip("2000", /Reply after .*, 2000 bytes: heard: 2000$/, at);
+	at = await roundTrip("hello", /:\|r heard: hello$/, at);
+	expect(questions[0]?.character).toEqual({
+		name: "Hero",
+		realm: "Realm",
+		level: "60",
+		race: "Orc",
+		class: "Warrior",
+		faction: "Horde",
+		zone: "Orgrimmar",
+		subzone: "Valley of Strength",
+		locale: "enUS",
+	});
+	// 2000 bytes take five fonts, and every line of the answer reaches the chat.
+	at = await roundTrip("2000", /^familiar familiar /, at);
+	expect(chat[at - 2]).toMatch(/:\|r heard: 2000$/);
+	// A | in an answer shows as text and never starts a link (AGENTS.md, rule 3).
+	at = await roundTrip(
+		"|Hitem:19019|h[Thunderfury]|h",
+		/:\|r heard: \|\|Hitem:19019\|\|h\[Thunderfury\]\|\|h$/,
+		at,
+	);
 
 	// Nothing goes out while the addon list is open.
 	command("list open");

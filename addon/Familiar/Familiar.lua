@@ -24,14 +24,44 @@ local function collapse()
 	end
 end
 
--- For testing the transport until the chat window exists: /familiar say <text> -----------
-local asked
+-- Questions and answers until the chat window exists (FAM-23): /familiar say <question> -----
 
+-- Who asks and from where, with every question (ADR 0001): "key: value" lines and a blank
+-- line, as core/src/brain/chat.ts reads them.
+local function header()
+	local rows = {}
+	local function add(key, value)
+		if value and value ~= "" then
+			rows[#rows + 1] = key .. ": " .. tostring(value)
+		end
+	end
+	local faction, localizedFaction = UnitFactionGroup("player")
+	local zone, subzone = GetRealZoneText(), GetSubZoneText()
+	add("name", UnitName("player"))
+	add("realm", GetRealmName())
+	add("level", UnitLevel("player"))
+	add("race", (UnitRace("player")))
+	add("class", (UnitClass("player")))
+	add("faction", localizedFaction or faction)
+	add("zone", zone)
+	add("subzone", subzone ~= zone and subzone or nil)
+	add("locale", GetLocale())
+	return table.concat(rows, "\n") .. "\n\n"
+end
+
+-- A | starts an escape sequence such as a link, and only validated IDs may become links
+-- (AGENTS.md, rule 3): || shows the character itself.
 Transport.OnMessage(function(body)
-	local line = body:match("^[^\n]*")
-	local took = asked and format(" after %.2f s", Tasks.Now() - asked) or ""
-	ns.Print(format("Reply%s, %d bytes: %s", took, #body, line))
-	asked = nil
+	local text = body:gsub("\r", ""):gsub("|", "||")
+	local first = true
+	for line in text:gmatch("[^\n]+") do
+		if first then
+			ns.Print(line)
+			first = false
+		else
+			print(line)
+		end
+	end
 end)
 
 SLASH_FAMILIAR1 = "/familiar"
@@ -40,8 +70,7 @@ SlashCmdList.FAMILIAR = function(input)
 	command = command:lower()
 	if command == "say" and rest ~= "" then
 		local started = Tasks.Now()
-		asked = started
-		Transport.Send(rest, function(ok, why)
+		Transport.Send(header() .. rest, function(ok, why)
 			if ok then
 				ns.Print(format("Sent in %.2f s.", Tasks.Now() - started))
 			else
@@ -51,7 +80,7 @@ SlashCmdList.FAMILIAR = function(input)
 	elseif command == "status" then
 		ns.Print(Transport.Status())
 	else
-		ns.Print("/familiar say <text> sends a test message to the app; /familiar status shows the transport.")
+		ns.Print("/familiar say <question> asks your Familiar; /familiar status shows the transport.")
 	end
 end
 

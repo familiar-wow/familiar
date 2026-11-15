@@ -1,13 +1,16 @@
 // familiar: the companion for development builds, until the desktop app exists (FAM-6). It
-// installs the addon and carries messages between the game and an echo that stands in for a
-// brain until Hermes is connected (FAM-24).
+// installs the addon and carries questions from the game to a brain and the answers back.
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
+import { AcpBrain } from "./brain/acp.ts";
+import { clip, parseQuestion, type Question } from "./brain/chat.ts";
 import { echo } from "./echo.ts";
 import { fileLog } from "./log.ts";
+import { loadSettings, type Settings, settingsFolder } from "./settings.ts";
+import { DOWN_PAYLOAD } from "./transport/codec.ts";
 import { Transport } from "./transport/transport.ts";
 import {
 	addonsFiles,
@@ -21,16 +24,20 @@ import {
 import { install, isInstalled, uninstall } from "./wow/install.ts";
 
 const VERSION = pkg.version;
+/** An answer may take four fonts of the bank, which has 256 per game start. */
+const MAX_ANSWER = 4 * DOWN_PAYLOAD;
 
 const USAGE = `familiar ${VERSION}: the Familiar app for development builds
 
-  familiar              install or update the addon, then carry messages until Ctrl+C
+  familiar              install or update the addon, then answer questions until Ctrl+C
   familiar check        show which client it found, without changing anything
   familiar uninstall    remove the addon and its helpers (close WoW first)
 
 Options:
-  --wow <folder>    the _forever_ client folder, if it is not found automatically
-  --logs <folder>   where the log goes (default: familiar-logs in the current folder)`;
+  --wow <folder>       the _forever_ client folder, if it is not found automatically
+  --logs <folder>      where the log goes (default: familiar-logs in the current folder)
+  --settings <file>    the settings file (default: settings.json in ${settingsFolder()})
+  --echo               answer with an echo instead of the brain, to test the transport`;
 
 const NOT_FOUND = `WoW: Forever was not found. Pass the client folder, for example:
   familiar --wow ${
@@ -61,7 +68,15 @@ async function resolveClient(option?: string): Promise<WowPaths> {
 const stamp = () =>
 	new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
 
-async function run(paths: WowPaths, logs: string): Promise<void> {
+interface RunOptions {
+	logs: string;
+	settingsFile: string;
+	settings: Settings;
+	echo: boolean;
+}
+
+async function run(paths: WowPaths, options: RunOptions): Promise<void> {
+	const { logs, settingsFile, settings } = options;
 	const { interface: iface, version: build } = clientVersion(paths.client);
 	const running = (await clientProcesses()).length > 0;
 	const fresh = !isInstalled(paths);
@@ -76,12 +91,25 @@ async function run(paths: WowPaths, logs: string): Promise<void> {
 		interface: iface,
 		build,
 		install: result,
+		brain: options.echo ? "echo" : settings.brain.command,
 	});
 	console.log(`familiar ${VERSION}`);
 	console.log(
 		`Client: ${paths.client} (interface ${iface}${build ? `, ${build}` : ""})`,
 	);
 	console.log(`Log:    ${logFile}`);
+	const { command, permissions, cwd } = settings.brain;
+	if (options.echo) console.log("Brain:  an echo, to test the transport");
+	else {
+		console.log(
+			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
+		);
+		console.log(`        sessions open in ${cwd ?? dirname(settingsFile)}`);
+		if (!Bun.which(command[0] ?? ""))
+			console.log(
+				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,
+			);
+	}
 	if (fresh) console.log("Addon installed.");
 	else if (result.added + result.updated > 0) console.log("Addon updated.");
 	if (running && result.added > 0)
@@ -91,6 +119,16 @@ async function run(paths: WowPaths, logs: string): Promise<void> {
 	else if (running && result.updated > 0)
 		console.log("WoW is running: type /reload in game.");
 
+	// Starts nothing until the first question.
+	const brain = new AcpBrain(settings.brain, {
+		folder: dirname(settingsFile),
+		log,
+		version: VERSION,
+	});
+	const answer = async (question: Question): Promise<string> =>
+		options.echo
+			? echo(question.text)
+			: clip(await brain.ask(question), MAX_ANSWER);
 	const transport = new Transport({
 		paths,
 		log,
@@ -99,19 +137,29 @@ async function run(paths: WowPaths, logs: string): Promise<void> {
 	transport.onMessage((body, { hello }) => {
 		const text = new TextDecoder().decode(body);
 		if (hello) return log.say(`The addon says hello: ${text}`);
-		log.say(`Message: ${text.split("\n")[0]}`);
-		try {
-			transport.send(new TextEncoder().encode(echo(text)));
-		} catch (error) {
-			log.say(
-				`Could not answer: ${error instanceof Error ? error.message : error}`,
-			);
-		}
+		const question = parseQuestion(text);
+		log.say(`Question: ${question.text}`);
+		const asked = performance.now();
+		void answer(question).then((reply) => {
+			const bytes = new TextEncoder().encode(reply);
+			try {
+				transport.send(bytes);
+				const s = ((performance.now() - asked) / 1000).toFixed(1);
+				log.say(`Answered after ${s} s, ${bytes.length} bytes.`);
+			} catch (error) {
+				log.say(
+					`Could not answer: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		});
 	});
 	await transport.start();
-	console.log("\nReady. In game, type /familiar say hello. Ctrl+C stops.\n");
+	console.log(
+		"\nReady. In game, ask with /familiar say <question>. Ctrl+C stops.\n",
+	);
 	const stop = () => {
 		transport.stop();
+		brain.stop();
 		process.exit(0);
 	};
 	process.on("SIGINT", stop);
@@ -144,6 +192,8 @@ async function main(): Promise<void> {
 		options: {
 			wow: { type: "string" },
 			logs: { type: "string" },
+			settings: { type: "string" },
+			echo: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean" },
 		},
@@ -163,10 +213,21 @@ async function main(): Promise<void> {
 		);
 	}
 	if (command !== "run") exitWith(USAGE);
-	await run(
-		await resolveClient(values.wow),
-		resolve(values.logs ?? "familiar-logs"),
+	const settingsFile = resolve(
+		values.settings ?? join(settingsFolder(), "settings.json"),
 	);
+	let settings: Settings;
+	try {
+		settings = loadSettings(settingsFile);
+	} catch (error) {
+		exitWith(error instanceof Error ? error.message : String(error));
+	}
+	await run(await resolveClient(values.wow), {
+		logs: resolve(values.logs ?? "familiar-logs"),
+		settingsFile,
+		settings,
+		echo: values.echo ?? false,
+	});
 }
 
 // No `if (import.meta.main)`: in a Windows build made with Bun.build, the entry point is named
