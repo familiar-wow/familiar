@@ -28,14 +28,28 @@ function brain(
 	return created;
 }
 
+const tools: string[] = [];
+/** How the player answers a permission request in game; undefined: not at all. */
+let player: boolean | undefined;
 const ask = (from: AcpBrain, text: string, name = "Hero") =>
-	from.ask({ text, character: { name, realm: "Realm" } });
+	from.ask(
+		{ text, character: { name, realm: "Realm" } },
+		{
+			onTool: (title) => void tools.push(title),
+			onPermission: (title) =>
+				player === undefined
+					? new Promise(() => {})
+					: Promise.resolve(player && title === "rm -rf ~"),
+		},
+	);
 const starts = () => events.filter((e) => e.name === "brain-start").length;
 
 afterEach(() => {
 	for (const created of brains.splice(0)) created.stop();
 	events.length = 0;
 	said.length = 0;
+	tools.length = 0;
+	player = undefined;
 });
 
 test("answers with the last message, in one session per character", async () => {
@@ -52,6 +66,7 @@ test("says which tools the agent calls and which fail", async () => {
 		"  > web_search: hello",
 		"  ! web_search: hello failed",
 	]);
+	expect(tools).toEqual(["web_search: hello"]);
 });
 
 test("opens sessions in the folder from the settings, which may exist only where the agent runs", async () => {
@@ -105,6 +120,20 @@ test("answers a permission request once, as the settings say", async () => {
 		{ tool: "rm -rf ~", answer: "reject-once" },
 		{ tool: "rm -rf ~", answer: "allow-once" },
 	]);
+});
+
+test("asks the player, and answers as cancelled when the question times out first", async () => {
+	const fake = brain({ permissions: "ask", timeout: 1 });
+	player = true;
+	expect(await ask(fake, "permission")).toBe("got allow-once");
+	player = false;
+	expect(await ask(fake, "permission")).toBe("got reject-once");
+	player = undefined;
+	expect(await ask(fake, "permission")).toBe("No answer within 1 s.");
+	// The agent heard "cancelled", so it runs on and answers the next question.
+	await Bun.sleep(200);
+	expect(await ask(fake, "hello")).toBe("session 1: hello");
+	expect(starts()).toBe(1);
 });
 
 test("cancels a question that takes too long", async () => {

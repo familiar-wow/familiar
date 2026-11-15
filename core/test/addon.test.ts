@@ -12,8 +12,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseQuestion, type Question } from "../src/brain/chat.ts";
-import { echo } from "../src/echo.ts";
+import type { Question } from "../src/brain/chat.ts";
+import { Conversation } from "../src/conversation.ts";
+import { echoBrain } from "../src/echo.ts";
 import type { Log } from "../src/log.ts";
 import { Transport } from "../src/transport/transport.ts";
 import { FILES, TOC } from "../src/wow/addon.ts";
@@ -55,6 +56,8 @@ let pids = [1];
 let app: Transport | undefined;
 const questions: Question[] = [];
 const chat: string[] = [];
+/** Lines the window restored from the saved history. */
+const restored: string[] = [];
 const errors: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
 let ticker: ReturnType<typeof setTimeout> | undefined;
@@ -104,11 +107,18 @@ async function startApp(): Promise<void> {
 		processes: async () => pids,
 		processPollMs: 50,
 	});
+	const conversation = new Conversation(
+		{
+			ask: (question, turn) => {
+				questions.push(question);
+				return echoBrain.ask(question, turn);
+			},
+		},
+		(body) => transport.send(body),
+		log,
+	);
 	transport.onMessage((body, { hello }) => {
-		if (hello) return;
-		const question = parseQuestion(new TextDecoder().decode(body));
-		questions.push(question);
-		transport.send(new TextEncoder().encode(echo(question.text)));
+		if (!hello) conversation.receive(body);
 	});
 	await transport.start();
 	app = transport;
@@ -141,7 +151,10 @@ beforeAll(async () => {
 			rest = lines.pop() ?? "";
 			for (const line of lines) {
 				if (line.startsWith("tick")) ticker = setTimeout(nextFrame, 17);
+				// What the player reads: the window, and the chat while it is closed.
 				if (line.startsWith("chat ")) chat.push(line.slice(5));
+				if (line.startsWith("window ")) chat.push(line.slice(7));
+				if (line.startsWith("backfill ")) restored.push(line.slice(9));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
 			}
 		}
@@ -177,7 +190,18 @@ test("messages go up and replies come down, across /reload, a character switch a
 		subzone: "Valley of Strength",
 		locale: "enUS",
 	});
-	// 2000 bytes take five fonts, and every line of the answer reaches the chat.
+	// The window: a question typed into its input line, the tool the agent calls, and a
+	// permission request the player answers in game.
+	command("enter tools");
+	at = await waitFor(/^ {2}> web_search: echo$/, at);
+	at = await waitFor(/:\|r heard: tools$/, at);
+	command("enter permission");
+	at = await waitFor(/^The agent asks: echo a test$/, at);
+	command("slash /familiar allow");
+	at = await waitFor(/^Allowed once: echo a test$/, at);
+	at = await waitFor(/:\|r heard: permission, allowed$/, at);
+
+	// 2000 bytes take five fonts, and every line of the answer reaches the window.
 	at = await roundTrip("2000", /^familiar familiar /, at);
 	expect(chat[at - 2]).toMatch(/:\|r heard: 2000$/);
 	// A | in an answer shows as text and never starts a link (AGENTS.md, rule 3).
@@ -192,7 +216,7 @@ test("messages go up and replies come down, across /reload, a character switch a
 	command("slash /familiar say wait for the list");
 	await Bun.sleep(600);
 	expect(
-		chat.slice(at).some((line) => line.includes("wait for the list")),
+		chat.slice(at).some((line) => line.includes("heard: wait for the list")),
 	).toBe(false);
 	command("list close");
 	at = await waitFor(/heard: wait for the list$/, at);
@@ -214,6 +238,8 @@ test("messages go up and replies come down, across /reload, a character switch a
 
 	command("reload");
 	at = await waitFor(/Connected to the test app\.$/, at);
+	// The window keeps its history across /reload.
+	expect(restored).toContain("|cff8fd1ffFamiliar:|r heard: tools");
 	at = await roundTrip(
 		"grüße nach dem Reload",
 		/heard: grüße nach dem Reload$/,
@@ -283,7 +309,7 @@ test("messages go up and replies come down, across /reload, a character switch a
 
 	command("slash /familiar status");
 	await waitFor(
-		/:\|r connected, sound ok; used since the game started: 2 of 4096 confirmations, 5 of 4096 message doorbells, 5 of 8192 fonts; probe: font yes, sound yes$/,
+		/^connected, sound ok; used since the game started: 2 of 4096 confirmations, 5 of 4096 message doorbells, 5 of 8192 fonts; probe: font yes, sound yes$/,
 		at,
 	);
 	expect(errors).toEqual([]);

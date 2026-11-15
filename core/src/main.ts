@@ -6,11 +6,10 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { AcpBrain } from "./brain/acp.ts";
-import { clip, parseQuestion, type Question } from "./brain/chat.ts";
-import { echo } from "./echo.ts";
+import { Conversation } from "./conversation.ts";
+import { echoBrain } from "./echo.ts";
 import { fileLog } from "./log.ts";
 import { loadSettings, type Settings, settingsFolder } from "./settings.ts";
-import { DOWN_PAYLOAD } from "./transport/codec.ts";
 import { Transport } from "./transport/transport.ts";
 import {
 	addonsFiles,
@@ -24,8 +23,6 @@ import {
 import { install, isInstalled, uninstall } from "./wow/install.ts";
 
 const VERSION = pkg.version;
-/** An answer may take four fonts of the bank. */
-const MAX_ANSWER = 4 * DOWN_PAYLOAD;
 
 const USAGE = `familiar ${VERSION}: the Familiar app for development builds
 
@@ -125,38 +122,23 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		log,
 		version: VERSION,
 	});
-	const answer = async (question: Question): Promise<string> =>
-		options.echo
-			? echo(question.text)
-			: clip(await brain.ask(question), MAX_ANSWER);
 	const transport = new Transport({
 		paths,
 		log,
 		welcome: `Familiar app ${VERSION}`,
 	});
+	const conversation = new Conversation(
+		options.echo ? echoBrain : brain,
+		(body) => transport.send(body),
+		log,
+	);
 	transport.onMessage((body, { hello }) => {
-		const text = new TextDecoder().decode(body);
-		if (hello) return log.say(`The addon says hello: ${text}`);
-		const question = parseQuestion(text);
-		log.say(`Question: ${question.text}`);
-		const asked = performance.now();
-		void answer(question).then((reply) => {
-			const bytes = new TextEncoder().encode(reply);
-			try {
-				transport.send(bytes);
-				const s = ((performance.now() - asked) / 1000).toFixed(1);
-				log.say(`Answered after ${s} s, ${bytes.length} bytes.`);
-			} catch (error) {
-				log.say(
-					`Could not answer: ${error instanceof Error ? error.message : error}`,
-				);
-			}
-		});
+		if (hello)
+			return log.say(`The addon says hello: ${new TextDecoder().decode(body)}`);
+		conversation.receive(body);
 	});
 	await transport.start();
-	console.log(
-		"\nReady. In game, ask with /familiar say <question>. Ctrl+C stops.\n",
-	);
+	console.log("\nReady. In game, /familiar opens the window. Ctrl+C stops.\n");
 	const stop = () => {
 		transport.stop();
 		brain.stop();

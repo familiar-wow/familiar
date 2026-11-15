@@ -16,6 +16,7 @@ local byte, char, format, sub = string.byte, string.char, string.format, string.
 local abs, floor, min, random = math.abs, math.floor, math.min, math.random
 local U16, U32, ReadU16, ReadU32 = Codec.U16, Codec.U32, Codec.ReadU16, Codec.ReadU32
 
+-- problem: why this session cannot send, if it cannot
 local Transport = { connected = false }
 ns.Transport = Transport
 
@@ -28,7 +29,6 @@ local PROBE = "Interface\\AddOns\\Familiar_L000\\probe."
 
 local state -- FamiliarDB.transport: process, key, id, ack, bell, font
 local queue, handlers = {}, {}
-local problem -- why this session cannot send, if it cannot
 local helloBody, helloSent
 local function nothing() end
 
@@ -116,8 +116,8 @@ end
 -- Queues `body` for the app. done(ok, why) runs once the app confirmed it or the addon gave up.
 function Transport.Send(body, done)
 	done = done or nothing
-	if problem or not Transport.connected then
-		return done(false, problem or "not connected to the Familiar app")
+	if Transport.problem or not Transport.connected then
+		return done(false, Transport.problem or "not connected to the Familiar app")
 	end
 	queue[#queue + 1] = { body = body, done = done }
 end
@@ -232,7 +232,7 @@ local function hello()
 end
 
 local function fail(text)
-	problem = text
+	Transport.problem = text
 	ns.Print(text)
 end
 
@@ -254,7 +254,7 @@ local function session()
 			Tasks.Sleep(10)
 			sound = Bells.SelfTest()
 		until sound == "ok"
-		Transport.sound, problem = sound, nil
+		Transport.sound, Transport.problem = sound, nil
 	end
 
 	local started = time() - floor(GetSessionTime())

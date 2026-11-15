@@ -2,6 +2,7 @@
 // Familiar.toc; a test compares them.
 import bank from "../../../addon/Familiar/Bank.lua" with { type: "text" };
 import bells from "../../../addon/Familiar/Bells.lua" with { type: "text" };
+import chat from "../../../addon/Familiar/Chat.lua" with { type: "text" };
 import codec from "../../../addon/Familiar/Codec.lua" with { type: "text" };
 import familiar from "../../../addon/Familiar/Familiar.lua" with {
 	type: "text",
@@ -22,5 +23,6 @@ export const FILES: Record<string, string> = {
 	"Bells.lua": bells,
 	"Bank.lua": bank,
 	"Transport.lua": transport,
+	"Chat.lua": chat,
 	"Familiar.lua": familiar,
 };

@@ -16,7 +16,7 @@ ADR 0001 has Familiar run its sessions in a restricted harness profile without s
 ## Decision
 
 - **Familiar is a bridge.** It starts the agent the player chose and carries questions and answers. The player sets the agent up in the agent itself: model, tools, skills, MCP servers and what it may do without asking. Familiar's settings cover only the bridge: the command that starts the agent, the answer to permission requests, the timeout and the working folder.
-- **Permission requests:** Familiar answers each one once, `deny` by default or `allow` if the player sets it, and never "always", so it never changes the agent's own settings. Once the chat window exists, Familiar can ask the player instead. Familiar lends the agent no file system or terminal through ACP; the agent uses its own tools.
+- **Permission requests:** Familiar answers each one once, `deny` by default or `allow` if the player sets it, and never "always", so it never changes the agent's own settings. Once the chat window exists, Familiar can ask the player instead. _Since FAM-23, `ask` is the default: the game window shows each request with Allow once and Deny._ Familiar lends the agent no file system or terminal through ACP; the agent uses its own tools.
 - **Other players' text stays out.** The agent gets the player's questions, a header about the character and, from phase 2, game state from the `wow` server. Names of players, guilds and pets are data in that state. Chat, whispers, mail and guild notes do not reach the agent; a feature that wants to pass such text on needs its own decision.
 
 ## Alternatives

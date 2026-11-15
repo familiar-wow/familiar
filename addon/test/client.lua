@@ -7,6 +7,7 @@
 --     font string measures with the font it had. Advances are rounded to whole pixels.
 --   * PlaySoundFile reports even an empty file as played, C_Sound.IsPlaying tells for how long.
 --     A file that played with sound stays cached for the process, a missing one stays missing.
+--   * Widgets take any call; only what the tests read is modelled: text, shown, points, sizes.
 -- What it shows is our own logic, never the client's behavior.
 --
 -- usage: lua client.lua <client folder> <account> <realm> <character> <file listing the addons>
@@ -20,8 +21,10 @@
 --   sound on|off        switch all game sound
 --   drop <n>            the next n AddOns.txt writes get lost
 --   stall <n> <ms>      the nth AddOns.txt write from now halts <ms> with the file emptied
--- Output: "chat <text>" for every line the addon prints, "error <text>" for a Lua error, "tick"
--- once a frame is done.
+--   enter <text>        type <text> into the addon's input line and press Enter
+-- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
+-- a message frame, "backfill <text>" for every line restored into one, "error <text>" for a Lua
+-- error, "tick" once a frame is done.
 
 local client, account, realm, character, addonList = ...
 assert(addonList, "usage: lua client.lua <client> <account> <realm> <character> <addon list>")
@@ -182,11 +185,16 @@ local function advance(font, code)
 	return font.advance[0]
 end
 
-local FontString = {}
-FontString.__index = FontString
-for _, name in ipairs({ "SetPoint", "SetAlpha", "SetWordWrap", "SetNonSpaceWrap", "Show", "Hide" }) do
-	FontString[name] = function() end
+local function nothing() end
+-- Any method a widget does not model does nothing; fields start lowercase and stay nil.
+local function method(_, key)
+	if type(key) == "string" and key:match("^%u") then
+		return nothing
+	end
 end
+
+local FontString = setmetatable({}, { __index = method })
+FontString.__index = FontString
 
 local function current(self)
 	local pending = self.pending
@@ -219,6 +227,10 @@ end
 
 function FontString:SetText(text)
 	self.text = tostring(text or "")
+end
+
+function FontString:GetText()
+	return self.text
 end
 
 function FontString:GetStringWidth()
@@ -273,18 +285,66 @@ local function playSoundFile(path)
 end
 
 -- Frames -----------------------------------------------------------------------------
-local Frame = {}
+local Frame = setmetatable({}, { __index = method })
 Frame.__index = Frame
-local frames = {}
+local frames, editBoxes = {}, {}
 
-local function newFrame(parent)
-	local frame = setmetatable({ parent = parent, events = {}, scripts = {}, shown = true, scale = 1 }, Frame)
+local function newFrame(parent, kind)
+	local frame = setmetatable({ parent = parent, kind = kind, events = {}, scripts = {}, shown = true, scale = 1 }, Frame)
 	frames[#frames + 1] = frame
+	if kind == "EditBox" then
+		editBoxes[#editBoxes + 1] = frame
+	end
 	return frame
 end
 
-for _, name in ipairs({ "SetPoint", "SetSize", "SetAlpha" }) do
-	Frame[name] = function() end
+function Frame:SetPoint(point, ...)
+	local relative, relativePoint, x, y = ...
+	if type(relative) ~= "table" then
+		relative, relativePoint, x, y = nil, point, ...
+	end
+	self.point = { point, relative, relativePoint, x, y }
+end
+function Frame:GetPoint()
+	return unpack(self.point or {})
+end
+function Frame:SetSize(width, height)
+	self.width, self.height = width, height
+end
+function Frame:GetWidth()
+	return self.width
+end
+function Frame:GetHeight()
+	return self.height
+end
+function Frame:GetScript(script)
+	return self.scripts[script]
+end
+function Frame:HookScript(script, handler)
+	local before = self.scripts[script] or nothing
+	self.scripts[script] = function(...)
+		before(...)
+		handler(...)
+	end
+end
+function Frame:SetShown(shown)
+	if shown then
+		self:Show()
+	else
+		self:Hide()
+	end
+end
+function Frame:SetText(text)
+	self.text = tostring(text or "")
+end
+function Frame:GetText()
+	return self.text or ""
+end
+function Frame:AddMessage(text)
+	out("window", text)
+end
+function Frame:BackFillMessage(text)
+	out("backfill", text)
 end
 function Frame:RegisterEvent(event)
 	self.events[event] = true
@@ -293,9 +353,15 @@ function Frame:SetScript(script, handler)
 	self.scripts[script] = handler
 end
 function Frame:Show()
+	if not self.shown and self.scripts.OnShow then
+		self.scripts.OnShow(self)
+	end
 	self.shown = true
 end
 function Frame:Hide()
+	if self.shown and self.scripts.OnHide then
+		self.scripts.OnHide(self)
+	end
 	self.shown = false
 end
 function Frame:IsShown()
@@ -313,6 +379,9 @@ function Frame:GetEffectiveScale()
 end
 function Frame:CreateFontString()
 	return setmetatable({ parent = self }, FontString)
+end
+function Frame:IsVisible()
+	return self.shown and (not self.parent or self.parent:IsVisible())
 end
 
 -- UI sessions ------------------------------------------------------------------------
@@ -395,9 +464,17 @@ local function api()
 	e.UnitGUID = function()
 		return "Player-1-" .. character
 	end
-	e.CreateFrame = function(_, _, parent)
-		return newFrame(parent)
+	e.CreateFrame = function(kind, name, parent, template)
+		local frame = newFrame(parent, kind)
+		if template == "BasicFrameTemplateWithInset" then
+			frame.TitleText = frame:CreateFontString()
+		end
+		if name then
+			e[name] = frame
+		end
+		return frame
 	end
+	e.UISpecialFrames = {}
 	e.UIParent = newFrame(nil)
 	e.UIParent.scale = UI_SCALE
 	e.AddonList = newFrame(e.UIParent)
@@ -444,7 +521,7 @@ local function api()
 end
 
 local function startUI(isLogin, isReload)
-	frames = {}
+	frames, editBoxes = {}, {}
 	env = api()
 	env.FamiliarDB = copy(saved.FamiliarDB)
 	local ns = {}
@@ -519,6 +596,13 @@ for line in io.lines() do
 		soundOn = rest == "on"
 	elseif command == "drop" then
 		drops = tonumber(rest)
+	elseif command == "enter" then
+		local box = editBoxes[#editBoxes]
+		box:SetText(rest)
+		local ok, err = pcall(box.scripts.OnEnterPressed, box)
+		if not ok then
+			out("error", err)
+		end
 	elseif command == "stall" then
 		local n, ms = rest:match("^(%d+)%s+(%d+)$")
 		stallIn, stallMs = tonumber(n), tonumber(ms)
