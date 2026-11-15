@@ -64,16 +64,18 @@ These protect players and the project. Don't trade them for speed.
 
 ```sh
 bun install
-bun run check   # Biome lint and format check; must pass before every commit
-bun run fix     # apply safe fixes and formatting
+bun run check       # Biome lint and format check; must pass before every commit
+bun run fix         # apply safe fixes and formatting
+bun run typecheck   # TypeScript
+bun test            # tests; the addon test needs Lua 5.1 with the bit library, see addon/README.md
 ```
 
-Checks for Lua and Rust arrive with the first addon and app code. Spikes list their own commands in their README.
+Checks for Rust arrive with the desktop app. Spikes list their own commands in their README.
 
 ## Done means verified
 
 - You ran the change. The test plan lists the commands you ran and what they returned, not what you expect them to return.
-- `bun run check` passes.
+- `bun run check`, `bun run typecheck` and `bun test` pass.
 - Docs and ADRs match the change.
 - Anything you could not verify is listed as unverified in the pull request.
 

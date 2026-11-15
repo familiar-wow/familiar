@@ -1,5 +1,6 @@
 node_modules/
 dist/
+familiar-logs/
 target/
 .env
 .env.*

@@ -1,0 +1,16 @@
+## Interface: 16001
+## Title: Familiar
+## Notes: Your AI companion in World of Warcraft. Needs the Familiar app.
+## Author: The Familiar contributors
+## Version: @project-version@
+## SavedVariables: FamiliarDB
+## X-License: MIT
+## X-Website: https://github.com/familiar-wow/familiar
+
+Codec.lua
+Tasks.lua
+Lane.lua
+Bells.lua
+Bank.lua
+Transport.lua
+Familiar.lua

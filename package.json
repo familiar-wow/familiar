@@ -2,9 +2,13 @@
 	"name": "familiar",
 	"private": true,
 	"packageManager": "bun@1.4.4",
+	"workspaces": [
+		"core"
+	],
 	"scripts": {
 		"check": "biome check",
-		"fix": "biome check --write"
+		"fix": "biome check --write",
+		"typecheck": "bun run --filter @familiar/core typecheck"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.6.6"
