@@ -98,12 +98,13 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		`Client: ${paths.client} (interface ${iface}${build ? `, ${build}` : ""})`,
 	);
 	console.log(`Log:    ${logFile}`);
-	const { command, permissions } = settings.brain;
+	const { command, permissions, cwd } = settings.brain;
 	if (options.echo) console.log("Brain:  an echo, to test the transport");
 	else {
 		console.log(
 			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
 		);
+		console.log(`        sessions open in ${cwd ?? dirname(settingsFile)}`);
 		if (!Bun.which(command[0] ?? ""))
 			console.log(
 				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,

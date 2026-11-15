@@ -50,6 +50,25 @@ test("opens sessions in the folder from the settings, which may exist only where
 	expect(await ask(brain({ cwd: remote }), "where")).toBe(remote);
 });
 
+test("names the folder an agent refuses and keeps the agent", async () => {
+	const fake = brain({ cwd: "C:\\Users\\player\\missing" });
+	const refused =
+		"The agent could not open a session in C:\\Users\\player\\missing: Internal error (invalid_params). If it runs on another host, set brain.cwd to a folder there.";
+	expect(await ask(fake, "hello")).toBe(refused);
+	expect(await ask(fake, "hello")).toBe(refused);
+	expect(starts()).toBe(1);
+});
+
+test("reports the agent's error, not its last log line, and keeps the agent", async () => {
+	const fake = brain();
+	expect(await ask(fake, "hello")).toBe("session 1: hello");
+	expect(await ask(fake, "fail")).toBe(
+		"The agent stopped: Internal error (model unavailable)",
+	);
+	expect(await ask(fake, "hello")).toBe("session 1: hello");
+	expect(starts()).toBe(1);
+});
+
 // Codex and Claude Code start through npx, which is a .cmd file on Windows. Bun finds such files
 // on the PATH and in the folder it starts in, but ignores PATH changes made at run time.
 test.skipIf(process.platform !== "win32")(

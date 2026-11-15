@@ -12,6 +12,7 @@ import {
 	methods,
 	ndJsonStream,
 	PROTOCOL_VERSION,
+	RequestError,
 	type StopReason,
 } from "@agentclientprotocol/sdk";
 import type { Log } from "../log.ts";
@@ -76,8 +77,23 @@ export class AcpBrain {
 		let timedOut = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let killer: ReturnType<typeof setTimeout> | undefined;
+		const folder = this.settings.cwd ?? this.options.folder;
+		let session: ActiveSession;
 		try {
-			const session = await this.session(agent, question);
+			session = await this.session(agent, question, folder);
+		} catch (error) {
+			// The agent runs on; it only refused this folder, which happens when it runs on another
+			// host and the settings name no folder there.
+			this.options.log.event("brain-error", {
+				during: "session/new",
+				folder,
+				error: message(error),
+			});
+			return reply(
+				`The agent could not open a session in ${folder}: ${message(error)}. If it runs on another host, set brain.cwd to a folder there.`,
+			);
+		}
+		try {
 			timer = setTimeout(() => {
 				timedOut = true;
 				reply(`No answer within ${timeout} s.`);
@@ -102,9 +118,17 @@ export class AcpBrain {
 			});
 			reply(answerFor(stopReason, text));
 		} catch (error) {
-			// The agent quit or broke the protocol: the next question starts a new one.
-			this.drop(agent);
-			if (!timedOut) reply(`The agent stopped: ${await why(agent, error)}`);
+			// An error the agent answered with leaves it running with its sessions. If it quit or
+			// broke the protocol, the next question starts a new one. The reason comes first, so the
+			// agent's own last words are not mistaken for ours.
+			const { quit, reason } = await why(agent, error);
+			this.options.log.event("brain-error", {
+				during: "prompt",
+				quit,
+				error: reason,
+			});
+			if (quit || !(error instanceof RequestError)) this.drop(agent);
+			if (!timedOut) reply(`The agent stopped: ${reason}`);
 		} finally {
 			clearTimeout(timer);
 			clearTimeout(killer);
@@ -175,8 +199,9 @@ export class AcpBrain {
 				`Brain ready: ${info?.title ?? info?.name ?? command[0]} ${info?.version ?? ""}`.trim(),
 			);
 		} catch (error) {
+			const { reason } = await why(agent, error);
 			child.kill();
-			throw new Error(await why(agent, error));
+			throw new Error(reason);
 		}
 		this.agent = agent;
 		return agent;
@@ -186,13 +211,12 @@ export class AcpBrain {
 	private async session(
 		agent: Agent,
 		{ character }: Question,
+		folder: string,
 	): Promise<ActiveSession> {
 		const key = `${character.name ?? ""}-${character.realm ?? ""}`;
 		let session = agent.sessions.get(key);
 		if (!session) {
-			session = await agent.connection.agent
-				.buildSession(this.settings.cwd ?? this.options.folder)
-				.start();
+			session = await agent.connection.agent.buildSession(folder).start();
 			agent.sessions.set(key, session);
 			this.options.log.event("brain-session", { session: session.sessionId });
 		}
@@ -244,18 +268,35 @@ function answerFor(stopReason: StopReason, text: string): string {
 	return stopReason === "end_turn" ? text : `${text} …`;
 }
 
-/** The agent's last words if it quit, otherwise the error. */
-async function why(agent: Agent, error: unknown): Promise<string> {
+/**
+ * Why a request failed: the agent's last words if it quit by itself within half a second,
+ * otherwise the error. Log lines at the levels INFO and DEBUG are skipped, because agents such
+ * as Hermes log to stderr while they work.
+ */
+async function why(
+	agent: Agent,
+	error: unknown,
+): Promise<{ quit: boolean; reason: string }> {
 	const quit = await Promise.race([
 		agent.child.exited.then(() => true),
 		Bun.sleep(500).then(() => false),
 	]);
-	const last = agent.stderr.findLast((line) => line.trim() !== "");
-	return quit && last ? last.trim().replace(/^Error:\s*/, "") : message(error);
+	const last = agent.stderr.findLast(
+		(line) => line.trim() !== "" && !/\b(INFO|DEBUG)\b/.test(line),
+	);
+	const reason =
+		quit && last ? last.trim().replace(/^Error:\s*/, "") : message(error);
+	return { quit, reason };
 }
 
+/** The error's message, with the details a JSON-RPC error carries, such as "invalid_params". */
 function message(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+	if (!(error instanceof Error)) return String(error);
+	const { data } = error as { data?: { details?: unknown } };
+	const details = typeof data?.details === "string" ? data.details : undefined;
+	return details && !error.message.includes(details)
+		? `${error.message} (${details})`
+		: error.message;
 }
 
 /** Keeps the last lines of a stream. Reading it also keeps the agent from blocking on a full pipe. */

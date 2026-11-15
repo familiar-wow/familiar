@@ -1,6 +1,8 @@
-// A stand-in ACP agent for acp.test.ts. The question picks what it does:
+// A stand-in ACP agent for acp.test.ts. It logs to stderr as it works, as Hermes does, and
+// refuses sessions in folders whose path contains "missing". The question picks what it does:
 //   permission  asks to run a command and says which option it got
 //   where       names the session's folder
+//   fail        answers with a JSON-RPC error and runs on
 //   slow        answers only once Familiar cancels
 //   hang        ignores the cancel too
 //   crash       quits with a message on stderr
@@ -10,10 +12,13 @@ import {
 	methods,
 	ndJsonStream,
 	PROTOCOL_VERSION,
+	RequestError,
 } from "@agentclientprotocol/sdk";
 
 const folders = new Map<string, string>();
 const cancelled = new Map<string, () => void>();
+const log = (line: string) =>
+	process.stderr.write(`2026-11-15 22:47:25 [INFO] fake-agent: ${line}\n`);
 
 const output = new WritableStream<Uint8Array>({
 	write(chunk) {
@@ -22,12 +27,18 @@ const output = new WritableStream<Uint8Array>({
 });
 
 agent({ name: "fake-agent" })
-	.onRequest(methods.agent.initialize, () => ({
-		protocolVersion: PROTOCOL_VERSION,
-		agentCapabilities: {},
-		agentInfo: { name: "fake-agent", version: "1.0.0" },
-	}))
+	.onRequest(methods.agent.initialize, () => {
+		log("ready");
+		return {
+			protocolVersion: PROTOCOL_VERSION,
+			agentCapabilities: {},
+			agentInfo: { name: "fake-agent", version: "1.0.0" },
+		};
+	})
 	.onRequest(methods.agent.session.new, ({ params }) => {
+		log(`new session in ${params.cwd}`);
+		if (params.cwd.includes("missing"))
+			throw RequestError.internalError({ details: "invalid_params" });
 		const sessionId = `session ${folders.size + 1}`;
 		folders.set(sessionId, params.cwd);
 		return { sessionId };
@@ -41,6 +52,7 @@ agent({ name: "fake-agent" })
 			.map((b) => (b.type === "text" ? b.text : ""))
 			.join("");
 		const question = text.slice(text.lastIndexOf("Question: ") + 10);
+		log(`question: ${question}`);
 		const say = (answer: string) =>
 			client.notify(methods.client.session.update, {
 				sessionId,
@@ -51,8 +63,11 @@ agent({ name: "fake-agent" })
 			});
 		if (question === "crash") {
 			process.stderr.write("fake-agent: crashed on purpose\n");
+			log("shutting down");
 			process.exit(3);
 		}
+		if (question === "fail")
+			throw RequestError.internalError({ details: "model unavailable" });
 		if (question === "where") {
 			await say(folders.get(sessionId) ?? "");
 			return { stopReason: "end_turn" };
