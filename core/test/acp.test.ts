@@ -9,9 +9,10 @@ import type { Settings } from "../src/settings.ts";
 
 const FAKE = [process.execPath, join(import.meta.dir, "fake-agent.ts")];
 const events: { name: string; data?: Record<string, unknown> }[] = [];
+const said: string[] = [];
 const log: Log = {
 	event: (name, data) => void events.push({ name, data }),
-	say: () => {},
+	say: (text) => void said.push(text),
 };
 const brains: AcpBrain[] = [];
 
@@ -34,6 +35,7 @@ const starts = () => events.filter((e) => e.name === "brain-start").length;
 afterEach(() => {
 	for (const created of brains.splice(0)) created.stop();
 	events.length = 0;
+	said.length = 0;
 });
 
 test("answers with the last message, in one session per character", async () => {
@@ -42,6 +44,14 @@ test("answers with the last message, in one session per character", async () => 
 	expect(await ask(fake, "and again")).toBe("session 1: and again");
 	expect(await ask(fake, "hi", "Alt")).toBe("session 2: hi");
 	expect(starts()).toBe(1);
+});
+
+test("says which tools the agent calls and which fail", async () => {
+	await ask(brain(), "hello");
+	expect(said.filter((line) => line.startsWith("  "))).toEqual([
+		"  > web_search: hello",
+		"  ! web_search: hello failed",
+	]);
 });
 
 test("opens sessions in the folder from the settings, which may exist only where the agent runs", async () => {

@@ -112,7 +112,15 @@ agent({ name: "fake-agent" })
 			update: {
 				sessionUpdate: "tool_call",
 				toolCallId: "2",
-				title: "web_search",
+				title: "web_search: hello",
+			},
+		});
+		await client.notify(methods.client.session.update, {
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call_update",
+				toolCallId: "2",
+				status: "failed",
 			},
 		});
 		await say(`${sessionId}: `);

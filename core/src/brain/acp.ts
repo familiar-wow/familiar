@@ -109,7 +109,9 @@ export class AcpBrain {
 				? question.text
 				: prompt(question);
 			const turn = session.prompt(input);
-			const text = await lastMessage(session);
+			const text = await lastMessage(session, (line) =>
+				this.options.log.say(line),
+			);
 			const { stopReason } = await turn;
 			this.options.log.event("answer", {
 				ms: Math.round(performance.now() - started),
@@ -236,12 +238,22 @@ function choose(
 	return (permissions === "allow" && once("allow_once")) || once("reject_once");
 }
 
+/** How long a tool's title may be on the console. */
+const TITLE_CHARS = 120;
+
 /**
  * Reads a turn to its end. Text before a tool call is the agent thinking aloud, so the answer
- * is the last text.
+ * is the last text. Each tool the agent calls, and each one that fails, goes to `say`, so the
+ * person at the console sees that the agent works and on what.
  */
-async function lastMessage(session: ActiveSession): Promise<string> {
+async function lastMessage(
+	session: ActiveSession,
+	say: (line: string) => void,
+): Promise<string> {
 	const texts = [""];
+	const titles = new Map<string, string>();
+	const short = (title: string) =>
+		title.length > TITLE_CHARS ? `${title.slice(0, TITLE_CHARS - 1)}…` : title;
 	for (;;) {
 		const next = await session.nextUpdate();
 		if (next.kind === "stop")
@@ -252,8 +264,17 @@ async function lastMessage(session: ActiveSession): Promise<string> {
 					.at(-1) ?? ""
 			);
 		const { update } = next;
-		if (update.sessionUpdate === "tool_call") texts.push("");
-		else if (
+		if (update.sessionUpdate === "tool_call") {
+			texts.push("");
+			titles.set(update.toolCallId, update.title);
+			say(`  > ${short(update.title)}`);
+		} else if (
+			update.sessionUpdate === "tool_call_update" &&
+			update.status === "failed"
+		) {
+			const title = update.title ?? titles.get(update.toolCallId) ?? "a tool";
+			say(`  ! ${short(title)} failed`);
+		} else if (
 			update.sessionUpdate === "agent_message_chunk" &&
 			update.content.type === "text"
 		)
