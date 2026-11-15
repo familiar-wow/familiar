@@ -10,12 +10,16 @@ local format, floor = string.format, math.floor
 local Chat = {}
 ns.Chat = Chat
 
-local HISTORY = 200 -- lines kept across /reload
+local HISTORY = 200 -- lines kept per character across /reload
 local MAX_BYTES = 400 -- per question: the lane carries about 0.9 KB/s
 local YOU, FAMILIAR = "|cffffd100You:|r ", "|cff8fd1ffFamiliar:|r "
 local GREY, TOOL = { 0.6, 0.6, 0.6 }, { 0.5, 0.7, 0.8 }
 
-local db -- FamiliarDB.window: point, relativePoint, x, y, width, height, shown, history
+-- FamiliarDB.window: point, relativePoint, x, y, width, height and shown for every character;
+-- histories["name-realm"]: the lines of each character, whose agent session is its own too
+-- (core/src/brain/acp.ts).
+local db
+local kept -- the logged-in character's lines, once known
 local frame, history, input, status, ask, askText
 local pending, since, tool = 0, 0, nil
 local requests = {} -- permission requests the player has not answered, oldest first
@@ -28,7 +32,9 @@ end
 local function add(text, color)
 	color = color or {}
 	history:AddMessage(text, color[1], color[2], color[3])
-	local kept = db.history
+	if not kept then
+		return
+	end
 	kept[#kept + 1] = { text, color[1], color[2], color[3] }
 	if #kept > HISTORY then
 		table.remove(kept, 1)
@@ -222,11 +228,6 @@ local function create()
 			self:ScrollDown()
 		end
 	end)
-	for i = #db.history, 1, -1 do
-		local line = db.history[i]
-		history:BackFillMessage(line[1], line[2], line[3], line[4])
-	end
-
 	status = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	status:SetPoint("BOTTOMLEFT", 14, 40)
 	status:SetPoint("BOTTOMRIGHT", -14, 40)
@@ -270,9 +271,22 @@ local function create()
 	frame:SetShown(db.shown ~= false)
 end
 
+-- Shows the logged-in character's lines above what the window holds so far.
+function Chat.Login()
+	local key = format("%s-%s", UnitName("player") or "?", GetRealmName() or "?")
+	db.histories[key] = db.histories[key] or {}
+	local lines = db.histories[key]
+	for i = #lines, 1, -1 do
+		local line = lines[i]
+		history:BackFillMessage(line[1], line[2], line[3], line[4])
+	end
+	kept = lines
+end
+
 function Chat.Init(saved)
 	db = saved
-	db.history = db.history or {}
+	db.history = nil -- one history for all characters, before 0.3.1
+	db.histories = db.histories or {}
 	create()
 	Tasks.Spawn("chat", function()
 		while true do

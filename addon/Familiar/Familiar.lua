@@ -62,6 +62,7 @@ frame:SetScript("OnEvent", function(_, event, name)
 		collapse()
 	elseif event == "PLAYER_ENTERING_WORLD" and not ns.started then
 		ns.started = true
+		Chat.Login()
 		collapse()
 		Transport.Start(ns.db.transport)
 	end

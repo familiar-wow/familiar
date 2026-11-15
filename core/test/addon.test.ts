@@ -246,10 +246,20 @@ test("messages go up and replies come down, across /reload, a character switch a
 		at,
 	);
 
-	// Alt's AddOns.txt does not exist yet: the client creates it with the hello.
+	// Alt's AddOns.txt does not exist yet: the client creates it with the hello. Alt has its
+	// own history in the window, as it has its own session with the agent.
+	let since = restored.length;
 	command("login Alt");
 	at = await waitFor(/Connected to the test app\.$/, at);
+	expect(restored.slice(since)).toEqual([]);
 	at = await roundTrip("from Alt", /heard: from Alt$/, at);
+	since = restored.length;
+	command("login Hero");
+	at = await waitFor(/Connected to the test app\.$/, at);
+	expect(restored.slice(since)).toContain(
+		"|cff8fd1ffFamiliar:|r heard: grüße nach dem Reload",
+	);
+	expect(restored.slice(since).join("\n")).not.toContain("from Alt");
 
 	// The app sees the game close and a new process start; the new process starts over.
 	pids = [];

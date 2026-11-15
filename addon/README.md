@@ -17,7 +17,7 @@ So far it holds the chat window and the transport to the app ([ADR 0005](../docs
 
 The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md).
 
-`/familiar` opens and closes the window; it can be moved and resized, and keeps its place and its last 200 lines. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
+`/familiar` opens and closes the window; it can be moved and resized, and keeps its place and the last 200 lines of each character, who also has a session of their own with the agent. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
 
 Each question starts with a header about the character (`Chat.lua`, `header`). A `|` in an answer shows as text, so an answer cannot create a link. The window reads nothing from the game's chat.
 
