@@ -120,7 +120,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 
 	// Starts nothing until the first question.
 	const brain = new AcpBrain(settings.brain, {
-		cwd: settings.brain.cwd ?? dirname(settingsFile),
+		folder: dirname(settingsFile),
 		log,
 		version: VERSION,
 	});

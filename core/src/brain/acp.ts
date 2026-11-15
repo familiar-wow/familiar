@@ -31,8 +31,11 @@ interface Agent {
 }
 
 export interface AcpBrainOptions {
-	/** The agent's working folder. */
-	cwd: string;
+	/**
+	 * The settings folder. The agent process starts here, and the session too unless the settings
+	 * name a `cwd`, which is a folder where the agent runs and may not exist on this machine.
+	 */
+	folder: string;
 	log: Log;
 	/** Familiar's version, for the agent. */
 	version: string;
@@ -115,10 +118,10 @@ export class AcpBrain {
 
 	private async start(): Promise<Agent> {
 		const { command, permissions } = this.settings;
-		const { cwd, log, version } = this.options;
+		const { folder, log, version } = this.options;
 		const started = performance.now();
 		const child = Bun.spawn(command, {
-			cwd,
+			cwd: folder,
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -188,7 +191,7 @@ export class AcpBrain {
 		let session = agent.sessions.get(key);
 		if (!session) {
 			session = await agent.connection.agent
-				.buildSession(this.options.cwd)
+				.buildSession(this.settings.cwd ?? this.options.folder)
 				.start();
 			agent.sessions.set(key, session);
 			this.options.log.event("brain-session", { session: session.sessionId });

@@ -1,5 +1,6 @@
 // A stand-in ACP agent for acp.test.ts. The question picks what it does:
 //   permission  asks to run a command and says which option it got
+//   where       names the session's folder
 //   slow        answers only once Familiar cancels
 //   hang        ignores the cancel too
 //   crash       quits with a message on stderr
@@ -11,7 +12,7 @@ import {
 	PROTOCOL_VERSION,
 } from "@agentclientprotocol/sdk";
 
-let sessions = 0;
+const folders = new Map<string, string>();
 const cancelled = new Map<string, () => void>();
 
 const output = new WritableStream<Uint8Array>({
@@ -26,9 +27,11 @@ agent({ name: "fake-agent" })
 		agentCapabilities: {},
 		agentInfo: { name: "fake-agent", version: "1.0.0" },
 	}))
-	.onRequest(methods.agent.session.new, () => ({
-		sessionId: `session ${++sessions}`,
-	}))
+	.onRequest(methods.agent.session.new, ({ params }) => {
+		const sessionId = `session ${folders.size + 1}`;
+		folders.set(sessionId, params.cwd);
+		return { sessionId };
+	})
 	.onNotification(methods.agent.session.cancel, ({ params }) => {
 		cancelled.get(params.sessionId)?.();
 	})
@@ -49,6 +52,10 @@ agent({ name: "fake-agent" })
 		if (question === "crash") {
 			process.stderr.write("fake-agent: crashed on purpose\n");
 			process.exit(3);
+		}
+		if (question === "where") {
+			await say(folders.get(sessionId) ?? "");
+			return { stopReason: "end_turn" };
 		}
 		if (question === "slow" || question === "hang") {
 			await new Promise<void>((resolve) => {
