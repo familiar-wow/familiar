@@ -33,7 +33,7 @@ Familiar only advises. It never moves, casts or targets for you. The design is d
 | Phase                     | Goal                                                                   | Status                                  |
 | ------------------------- | ---------------------------------------------------------------------- | --------------------------------------- |
 | 0 Foundation              | repository, tooling and the first architecture decisions               | done                                    |
-| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | in progress: transport built (ADR 0005) |
+| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | in progress: Hermes answers through ACP |
 | 2 Game context and links  | the full character as context, links in both directions                |                                         |
 | 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    |                                         |
 | 4 Memory                  | a memory that survives a change of brain                               |                                         |

@@ -1,6 +1,6 @@
 {
 	"name": "@familiar/core",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"scripts": {
@@ -12,5 +12,9 @@
 		"@types/bun": "1.4.4",
 		"opentype.js": "2.0.0",
 		"typescript": "7.0.2"
+	},
+	"dependencies": {
+		"@agentclientprotocol/sdk": "2.7.0",
+		"zod": "4.6.7"
 	}
 }

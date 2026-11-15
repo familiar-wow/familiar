@@ -364,6 +364,34 @@ local function api()
 	e.GetPhysicalScreenSize = function()
 		return SCREEN_W, SCREEN_H
 	end
+	-- Who asks, for the header of a question.
+	e.UnitName = function()
+		return character
+	end
+	e.GetRealmName = function()
+		return realm
+	end
+	e.UnitLevel = function()
+		return 60
+	end
+	e.UnitRace = function()
+		return "Orc", "Orc", 2
+	end
+	e.UnitClass = function()
+		return "Warrior", "WARRIOR", 1
+	end
+	e.UnitFactionGroup = function()
+		return "Horde", "Horde"
+	end
+	e.GetRealZoneText = function()
+		return "Orgrimmar"
+	end
+	e.GetSubZoneText = function()
+		return "Valley of Strength"
+	end
+	e.GetLocale = function()
+		return "enUS"
+	end
 	e.UnitGUID = function()
 		return "Player-1-" .. character
 	end
