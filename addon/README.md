@@ -2,7 +2,7 @@
 
 The part of Familiar that runs inside World of Warcraft: the chat window, game-state collectors, link hooks and rendering of validated links. It is written in Lua 5.1 for the game's sandbox and contains nothing specific to a model or agent. See [ADR 0001](../docs/adr/0001-architecture-addon-companion-and-brains.md).
 
-So far it holds the transport to the app ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)):
+So far it holds the chat window and the transport to the app ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)):
 
 | File                     | Job                                                                     |
 | ------------------------ | ----------------------------------------------------------------------- |
@@ -12,9 +12,14 @@ So far it holds the transport to the app ([ADR 0005](../docs/adr/0005-transport-
 | `Familiar/Bells.lua`     | doorbells: plays a `.wav` file and asks whether it still plays          |
 | `Familiar/Bank.lua`      | down: reads a packet from the glyph widths of a font                    |
 | `Familiar/Transport.lua` | hello and welcome, messages up with confirmation, messages down         |
+| `Familiar/Chat.lua`      | the window: history, input line, status, Allow and Deny                 |
 | `Familiar/Familiar.lua`  | saved state, events, the frame loop and `/familiar`                     |
 
-The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md). Until the chat window exists (FAM-23), `/familiar say <question>` asks the brain, and the answer appears in the chat frame. Each question starts with a header about the character (`Familiar.lua`, `header`). A `|` in an answer shows as text, so an answer cannot create a link. `/familiar status` shows the state of the transport.
+The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md).
+
+`/familiar` opens and closes the window; it can be moved and resized, and keeps its place and the last 200 lines of each character, who also has a session of their own with the agent. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
+
+Each question starts with a header about the character (`Chat.lua`, `header`). A `|` in an answer shows as text, so an answer cannot create a link. The window reads nothing from the game's chat.
 
 ## Test
 

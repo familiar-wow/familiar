@@ -10,8 +10,11 @@ const Settings = z.strictObject({
 		.strictObject({
 			/** Starts an agent that speaks ACP on stdin and stdout. */
 			command: z.array(z.string().min(1)).min(1).default(["hermes", "acp"]),
-			/** The answer to the agent's permission requests: deny, or allow each one once. */
-			permissions: z.enum(["deny", "allow"]).default("deny"),
+			/**
+			 * The answer to the agent's permission requests, each one once: deny, allow, or ask the
+			 * player in game.
+			 */
+			permissions: z.enum(["ask", "deny", "allow"]).default("ask"),
 			/** Seconds to wait for an answer. */
 			timeout: z.number().positive().default(120),
 			/**

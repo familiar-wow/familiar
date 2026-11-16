@@ -1,14 +1,17 @@
 -- Familiar's entry point: saved state, events, the frame loop and /familiar.
 local addonName, ns = ...
-local Tasks, Lane, Transport = ns.Tasks, ns.Lane, ns.Transport
+local Tasks, Lane, Transport, Chat = ns.Tasks, ns.Lane, ns.Transport, ns.Chat
 
 local format = string.format
 
 -- The helpers' category in the addon list, as core/src/wow/install.ts names it.
 local CATEGORY = "Familiar transport"
 
+-- A line from Familiar: into its window, and into the chat while the window is closed.
 function ns.Print(text)
-	print("|cff8fd1ffFamiliar:|r " .. text)
+	if not (ns.Chat and ns.Chat.System(text)) then
+		print("|cff8fd1ffFamiliar:|r " .. text)
+	end
 end
 
 function ns.Error(where, err)
@@ -24,63 +27,23 @@ local function collapse()
 	end
 end
 
--- Questions and answers until the chat window exists (FAM-23): /familiar say <question> -----
-
--- Who asks and from where, with every question (ADR 0001): "key: value" lines and a blank
--- line, as core/src/brain/chat.ts reads them.
-local function header()
-	local rows = {}
-	local function add(key, value)
-		if value and value ~= "" then
-			rows[#rows + 1] = key .. ": " .. tostring(value)
-		end
-	end
-	local faction, localizedFaction = UnitFactionGroup("player")
-	local zone, subzone = GetRealZoneText(), GetSubZoneText()
-	add("name", UnitName("player"))
-	add("realm", GetRealmName())
-	add("level", UnitLevel("player"))
-	add("race", (UnitRace("player")))
-	add("class", (UnitClass("player")))
-	add("faction", localizedFaction or faction)
-	add("zone", zone)
-	add("subzone", subzone ~= zone and subzone or nil)
-	add("locale", GetLocale())
-	return table.concat(rows, "\n") .. "\n\n"
-end
-
--- A | starts an escape sequence such as a link, and only validated IDs may become links
--- (AGENTS.md, rule 3): || shows the character itself.
-Transport.OnMessage(function(body)
-	local text = body:gsub("\r", ""):gsub("|", "||")
-	local first = true
-	for line in text:gmatch("[^\n]+") do
-		if first then
-			ns.Print(line)
-			first = false
-		else
-			print(line)
-		end
-	end
-end)
+local HELP = "/familiar opens and closes the window; /familiar say <question> asks from the chat line; "
+	.. "/familiar allow or deny answers the agent's request; /familiar status shows the transport."
 
 SLASH_FAMILIAR1 = "/familiar"
 SlashCmdList.FAMILIAR = function(input)
 	local command, rest = (input or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	command = command:lower()
-	if command == "say" and rest ~= "" then
-		local started = Tasks.Now()
-		Transport.Send(header() .. rest, function(ok, why)
-			if ok then
-				ns.Print(format("Sent in %.2f s.", Tasks.Now() - started))
-			else
-				ns.Print("Not sent: " .. why .. ".")
-			end
-		end)
+	if command == "" then
+		Chat.Toggle()
+	elseif command == "say" and rest ~= "" then
+		Chat.Ask(rest)
+	elseif command == "allow" or command == "deny" then
+		Chat.Answer(command == "allow")
 	elseif command == "status" then
 		ns.Print(Transport.Status())
 	else
-		ns.Print("/familiar say <question> asks your Familiar; /familiar status shows the transport.")
+		ns.Print(HELP)
 	end
 end
 
@@ -92,11 +55,14 @@ frame:SetScript("OnEvent", function(_, event, name)
 	if event == "ADDON_LOADED" and name == addonName then
 		FamiliarDB = FamiliarDB or {}
 		FamiliarDB.transport = FamiliarDB.transport or {}
+		FamiliarDB.window = FamiliarDB.window or {}
 		ns.db = FamiliarDB
+		Chat.Init(FamiliarDB.window)
 	elseif event == "ADDON_LOADED" and name == "Blizzard_AddOnList" then
 		collapse()
 	elseif event == "PLAYER_ENTERING_WORLD" and not ns.started then
 		ns.started = true
+		Chat.Login()
 		collapse()
 		Transport.Start(ns.db.transport)
 	end

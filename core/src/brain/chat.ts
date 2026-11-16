@@ -1,7 +1,12 @@
-// What goes between the player and the brain. The addon sends a question as "key: value" lines
-// about the character, a blank line and the question (addon/Familiar/Familiar.lua). The brain
-// gets the question with that header, as ADR 0001 has it: everything else it will fetch through
-// tools (P2).
+// What goes between the player and the brain. Each transport message carries its kind on the
+// first line, then its text (addon/Familiar/Chat.lua):
+//   up    question    "key: value" lines about the character, a blank line, the question
+//         permission  the request's number, a newline, "allow" or "deny"
+//   down  answer      the brain's answer, or why there is none
+//         status      the tool the agent calls now
+//         permission  the request's number, a newline, what the agent wants to do
+// The brain gets the question with the header, as ADR 0001 has it: everything else it will fetch
+// through tools (P2).
 
 const FIELDS = [
 	"name",
@@ -33,6 +38,44 @@ export function parseQuestion(body: string): Question {
 	return { text: body.slice(end + 2).trim(), character };
 }
 
+/** What a brain reports while it answers one question. */
+export interface Turn {
+	/** The agent calls a tool. */
+	onTool(title: string): void;
+	/** The agent asks for permission; true allows it once. */
+	onPermission(title: string): Promise<boolean>;
+}
+
+export interface Brain {
+	ask(question: Question, turn: Turn): Promise<string>;
+}
+
+export type Up =
+	| { kind: "question"; question: Question }
+	| { kind: "permission"; id: number; allow: boolean };
+
+export type Down =
+	| { kind: "answer" | "status"; text: string }
+	| { kind: "permission"; id: number; text: string };
+
+/** A message from the addon, or undefined if it is none. */
+export function parseUp(body: string): Up | undefined {
+	const end = body.indexOf("\n");
+	const kind = end < 0 ? body : body.slice(0, end);
+	const rest = end < 0 ? "" : body.slice(end + 1);
+	if (kind === "question") return { kind, question: parseQuestion(rest) };
+	const [, id, answer] = /^(\d+)\n(allow|deny)$/.exec(rest) ?? [];
+	if (kind === "permission" && id)
+		return { kind, id: Number(id), allow: answer === "allow" };
+	return undefined;
+}
+
+export function formatDown(m: Down): string {
+	return m.kind === "permission"
+		? `${m.kind}\n${m.id}\n${m.text}`
+		: `${m.kind}\n${m.text}`;
+}
+
 /** The prompt for the brain: how to answer, who asks and from where, and the question. */
 export function prompt({ text, character: c }: Question): string {
 	const kind = [c.level && `level ${c.level}`, c.race, c.class]
@@ -47,7 +90,7 @@ export function prompt({ text, character: c }: Question): string {
 		.filter(Boolean)
 		.join(", ");
 	return [
-		"The player asks you from inside the game WoW Forever, through the addon Familiar. Your answer appears in the game's chat window.",
+		"The player asks you from inside the game WoW Forever, through the addon Familiar. Your answer appears in Familiar's window in the game.",
 		"- Answer in the player's language and use the names the game shows in that language.",
 		"- Keep it short: at most 600 characters of plain text, without Markdown.",
 		"- You only advise. You cannot act in the game.",

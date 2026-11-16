@@ -29,7 +29,7 @@ bun run start uninstall   # remove the addon and its helpers; close WoW first
 bun run build             # single executables for Windows and Linux in core/dist/
 ```
 
-`--wow <folder>` names the `_forever_` client folder if `familiar` does not find it. The game sees new files only after a full restart, not after `/reload`, so restart WoW after the first install. `--echo` answers with an echo instead of the brain, to test the transport.
+`--wow <folder>` names the `_forever_` client folder if `familiar` does not find it. The game sees new files only after a full restart, not after `/reload`, so restart WoW after the first install. `--echo` answers with an echo instead of the brain, to test the transport. Asked `tools`, the echo reports two tools first; asked `permission`, it asks the player.
 
 ## Brain
 
@@ -41,20 +41,20 @@ On the first start, `familiar` writes its settings with the defaults: `%APPDATA%
 {
 	"brain": {
 		"command": ["hermes", "acp"],
-		"permissions": "deny",
+		"permissions": "ask",
 		"timeout": 120
 	}
 }
 ```
 
-| Setting       | Meaning                                                          |
-| ------------- | ---------------------------------------------------------------- |
-| `command`     | starts the agent, which must speak ACP on stdin and stdout       |
-| `permissions` | the answer when the agent asks for permission: `deny` or `allow` |
-| `timeout`     | seconds until Familiar cancels a question                        |
-| `cwd`         | the agent's working folder, by default the settings folder       |
+| Setting       | Meaning                                                                         |
+| ------------- | ------------------------------------------------------------------------------- |
+| `command`     | starts the agent, which must speak ACP on stdin and stdout                      |
+| `permissions` | the answer when the agent asks for permission: `ask` (default), `deny`, `allow` |
+| `timeout`     | seconds until Familiar cancels a question                                       |
+| `cwd`         | the agent's working folder, by default the settings folder                      |
 
-`allow` allows the one request the agent asks about. Familiar never answers "always", so the agent's own settings stay as they are. Until the chat window can ask the player (FAM-23), the default is `deny`.
+`ask` shows the request in the game window with _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer it too. A request still open when the question times out counts as cancelled. `allow` allows each request without asking. Every answer covers the one request: Familiar never answers "always", so the agent's own settings stay as they are.
 
 | Agent                    | `command`                                                |
 | ------------------------ | -------------------------------------------------------- |
@@ -67,7 +67,9 @@ Hermes takes `--profile <name>` before `acp` for another profile. Codex and Clau
 
 For an agent on another host, set `cwd` to a folder on that host; Familiar itself starts `ssh` in its settings folder. SSH runs the command without your login profile, so give the agent's full path. Sign in with a key: Familiar cannot answer a password prompt, and `-o BatchMode=yes` after `ssh` turns a missing key into an error message instead of a wait.
 
-`familiar` starts the agent at the first question and keeps it running. While the agent works, the console shows each tool it calls, such as `> web_search: …`, and each one that fails. Each character gets its own session, so a conversation goes on where it stopped. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Answers longer than four fonts of the bank (1968 bytes) are cut.
+`familiar` starts the agent at the first question and keeps it running. While the agent works, the console shows each tool it calls, such as `> web_search: …`, and each one that fails. The game window shows the tool too, at most one every four seconds, because each line costs a font of the bank. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Answers longer than four fonts of the bank (1968 bytes) are cut.
+
+Each character gets its own session in the agent, and it lasts as long as `familiar` runs: after `/reload` or a restart of WoW, the conversation goes on where it stopped. Another character starts its own session, and switching back continues the first one. Starting `familiar` again starts a new session, and so does the agent's next start after it quit or ignored a timeout. The agent keeps its sessions as it keeps any other, so Hermes, for example, lists them with the sessions from its other clients. The game window keeps the last 200 lines of each character, like its session, even after a new start, so it may then show lines the agent no longer knows.
 
 ## How the transport works
 

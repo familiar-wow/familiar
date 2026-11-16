@@ -4,7 +4,8 @@
 // gets its own session, so a conversation goes on where it stopped.
 //
 // The player sets the agent up in the agent itself. Familiar only bridges: it offers no file
-// system or terminal of its own and answers each permission request once, as its settings say.
+// system or terminal of its own and answers each permission request once, as its settings say:
+// deny, allow, or ask the player in game.
 import {
 	type ActiveSession,
 	type ClientConnection,
@@ -17,7 +18,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { Log } from "../log.ts";
 import type { Settings } from "../settings.ts";
-import { prompt, type Question } from "./chat.ts";
+import { type Brain, prompt, type Question, type Turn } from "./chat.ts";
 
 /** How long an agent may take to stop after a cancelled question before it is killed. */
 const GRACE_MS = 5000;
@@ -42,9 +43,11 @@ export interface AcpBrainOptions {
 	version: string;
 }
 
-export class AcpBrain {
+export class AcpBrain implements Brain {
 	private agent?: Agent;
 	private queue: Promise<void> = Promise.resolve();
+	/** The question being answered; `ended` settles once it is done or cancelled. */
+	private turn?: Turn & { ended: Promise<void>; end: () => void };
 
 	constructor(
 		private readonly settings: Settings["brain"],
@@ -52,9 +55,19 @@ export class AcpBrain {
 	) {}
 
 	/** Asks one question at a time. Resolves with the answer or a message for the player. */
-	ask(question: Question): Promise<string> {
+	ask(question: Question, turn: Turn): Promise<string> {
 		return new Promise((reply) => {
-			this.queue = this.queue.then(() => this.answer(question, reply));
+			this.queue = this.queue.then(async () => {
+				let end = () => {};
+				const ended = new Promise<void>((resolve) => (end = resolve));
+				this.turn = { ...turn, ended, end };
+				try {
+					await this.answer(question, reply);
+				} finally {
+					this.turn = undefined;
+					end();
+				}
+			});
 		});
 	}
 
@@ -96,6 +109,7 @@ export class AcpBrain {
 		try {
 			timer = setTimeout(() => {
 				timedOut = true;
+				this.turn?.end();
 				reply(`No answer within ${timeout} s.`);
 				void agent.connection.agent
 					.notify(methods.agent.session.cancel, {
@@ -109,8 +123,10 @@ export class AcpBrain {
 				? question.text
 				: prompt(question);
 			const turn = session.prompt(input);
-			const text = await lastMessage(session, (line) =>
-				this.options.log.say(line),
+			const text = await lastMessage(
+				session,
+				(line) => this.options.log.say(line),
+				(title) => this.turn?.onTool(title),
 			);
 			const { stopReason } = await turn;
 			this.options.log.event("answer", {
@@ -164,18 +180,26 @@ export class AcpBrain {
 			},
 		});
 		const connection = client({ name: "familiar" })
-			.onRequest(methods.client.session.requestPermission, ({ params }) => {
-				const choice = choose(params.options, permissions);
-				log.event("brain-permission", {
-					tool: params.toolCall.title,
-					answer: choice?.optionId ?? "cancelled",
-				});
-				return {
-					outcome: choice
-						? { outcome: "selected", optionId: choice.optionId }
-						: { outcome: "cancelled" },
-				};
-			})
+			.onRequest(
+				methods.client.session.requestPermission,
+				async ({ params }) => {
+					const title = params.toolCall.title ?? "a tool";
+					const allow =
+						permissions === "ask"
+							? await this.askPlayer(title)
+							: permissions === "allow";
+					const choice = choose(params.options, allow);
+					log.event("brain-permission", {
+						tool: title,
+						answer: choice?.optionId ?? "cancelled",
+					});
+					return {
+						outcome: choice
+							? { outcome: "selected", optionId: choice.optionId }
+							: { outcome: "cancelled" },
+					};
+				},
+			)
 			.connect(ndJsonStream(output, child.stdout));
 		const agent: Agent = { child, connection, sessions: new Map(), stderr };
 		void child.exited.then((code) => {
@@ -209,6 +233,19 @@ export class AcpBrain {
 		return agent;
 	}
 
+	/**
+	 * Asks the player. Undefined if the question ends first, such as after a timeout: ACP wants
+	 * a cancelled question's requests answered as cancelled.
+	 */
+	private askPlayer(title: string): Promise<boolean | undefined> {
+		const turn = this.turn;
+		if (!turn) return Promise.resolve(undefined);
+		return Promise.race([
+			turn.onPermission(title),
+			turn.ended.then(() => undefined),
+		]);
+	}
+
 	/** One session per character; the realm keeps two characters of the same name apart. */
 	private async session(
 		agent: Agent,
@@ -232,10 +269,11 @@ export class AcpBrain {
  */
 function choose(
 	options: { optionId: string; kind: string }[],
-	permissions: Settings["brain"]["permissions"],
+	allow: boolean | undefined,
 ): { optionId: string } | undefined {
+	if (allow === undefined) return undefined;
 	const once = (kind: string) => options.find((o) => o.kind === kind);
-	return (permissions === "allow" && once("allow_once")) || once("reject_once");
+	return (allow && once("allow_once")) || once("reject_once");
 }
 
 /** How long a tool's title may be on the console. */
@@ -244,11 +282,12 @@ const TITLE_CHARS = 120;
 /**
  * Reads a turn to its end. Text before a tool call is the agent thinking aloud, so the answer
  * is the last text. Each tool the agent calls, and each one that fails, goes to `say`, so the
- * person at the console sees that the agent works and on what.
+ * person at the console sees that the agent works and on what; each call goes to `tool` too.
  */
 async function lastMessage(
 	session: ActiveSession,
 	say: (line: string) => void,
+	tool: (title: string) => void,
 ): Promise<string> {
 	const texts = [""];
 	const titles = new Map<string, string>();
@@ -268,6 +307,7 @@ async function lastMessage(
 			texts.push("");
 			titles.set(update.toolCallId, update.title);
 			say(`  > ${short(update.title)}`);
+			tool(update.title);
 		} else if (
 			update.sessionUpdate === "tool_call_update" &&
 			update.status === "failed"
