@@ -29,6 +29,9 @@ function brain(
 }
 
 const tools: string[] = [];
+const notes: string[] = [];
+/** The permission requests that reached the player. */
+const asked: string[] = [];
 /** How the player answers a permission request in game; undefined: not at all. */
 let player: boolean | undefined;
 const ask = (from: AcpBrain, text: string, name = "Hero") =>
@@ -36,10 +39,13 @@ const ask = (from: AcpBrain, text: string, name = "Hero") =>
 		{ text, character: { name, realm: "Realm" } },
 		{
 			onTool: (title) => void tools.push(title),
-			onPermission: (title) =>
-				player === undefined
+			onNote: (text) => void notes.push(text),
+			onPermission: (title) => {
+				asked.push(title);
+				return player === undefined
 					? new Promise(() => {})
-					: Promise.resolve(player && title === "rm -rf ~"),
+					: Promise.resolve(player && title === "rm -rf ~");
+			},
 		},
 	);
 const starts = () => events.filter((e) => e.name === "brain-start").length;
@@ -49,6 +55,8 @@ afterEach(() => {
 	events.length = 0;
 	said.length = 0;
 	tools.length = 0;
+	notes.length = 0;
+	asked.length = 0;
 	player = undefined;
 });
 
@@ -134,6 +142,25 @@ test("asks the player, and answers as cancelled when the question times out firs
 	await Bun.sleep(200);
 	expect(await ask(fake, "hello")).toBe("session 1: hello");
 	expect(starts()).toBe(1);
+});
+
+test("denies a request that could only be allowed for good, and says why", async () => {
+	const note =
+		'Denied: rm -rf ~. The agent offers no "allow once", and Familiar never answers "always". To allow it, change the agent\'s own settings.';
+	player = true;
+	expect(await ask(brain({ permissions: "ask" }), "always")).toBe(
+		"got reject-once",
+	);
+	// The player is not asked: "Allow once" would not be true.
+	expect(asked).toEqual([]);
+	expect(notes).toEqual([note]);
+	expect(await ask(brain({ permissions: "allow" }), "always")).toBe(
+		"got reject-once",
+	);
+	expect(notes).toEqual([note, note]);
+	// Denied as the settings say: nothing to explain.
+	expect(await ask(brain(), "always")).toBe("got reject-once");
+	expect(notes).toEqual([note, note]);
 });
 
 test("cancels a question that takes too long", async () => {

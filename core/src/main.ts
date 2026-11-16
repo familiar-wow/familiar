@@ -23,6 +23,8 @@ import {
 import { install, isInstalled, uninstall } from "./wow/install.ts";
 
 const VERSION = pkg.version;
+/** Seconds the window waits for an answer beyond the brain's timeout. */
+const PATIENCE_S = 30;
 
 const USAGE = `familiar ${VERSION}: the Familiar app for development builds
 
@@ -125,7 +127,10 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 	const transport = new Transport({
 		paths,
 		log,
-		welcome: `Familiar app ${VERSION}`,
+		// The brain answers every question within its timeout, if only to say that there is no
+		// answer. PATIENCE_S on top covers starting the agent and the way back; after that the
+		// window stops waiting (addon/Familiar/Chat.lua).
+		welcome: `Familiar app ${VERSION}\npatience: ${Math.ceil(settings.brain.timeout) + PATIENCE_S}`,
 	});
 	const conversation = new Conversation(
 		options.echo ? echoBrain : brain,

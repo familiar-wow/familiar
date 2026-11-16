@@ -15,6 +15,8 @@ import { DOWN_PAYLOAD } from "./transport/codec.ts";
 const MAX_ANSWER = 4 * DOWN_PAYLOAD;
 /** A status line, such as the tool's title, fits one font. */
 const MAX_STATUS = 200;
+/** A note fits one font too, but explains something, so it may be longer. */
+const MAX_NOTE = 400;
 /** At most one status line per this many milliseconds: each costs a font and a doorbell. */
 export const STATUS_MS = 4000;
 
@@ -50,6 +52,10 @@ export class Conversation {
 		);
 		const reply = await this.brain.ask(question, {
 			onTool: status.tool,
+			onNote: (note) => {
+				this.log.say(`  ${note}`);
+				this.down({ kind: "note", text: clip(note, MAX_NOTE) });
+			},
 			onPermission: (title) => this.permission(title),
 		});
 		status.stop();

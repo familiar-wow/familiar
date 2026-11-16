@@ -36,6 +36,29 @@ test(
 	STATUS_MS + 1000,
 );
 
+test("sends a note at once", async () => {
+	const sent: string[] = [];
+	const conversation = new Conversation(
+		{
+			ask: async (_, turn) => {
+				turn.onTool("terminal: rm -rf ~");
+				turn.onNote("Denied: rm -rf ~");
+				return "done";
+			},
+		},
+		(body) => void sent.push(new TextDecoder().decode(body)),
+		log,
+	);
+	conversation.receive(encode("question\n\nclean up"));
+	await Bun.sleep(10);
+	// Unlike a status line, a note is never held back or dropped.
+	expect(sent).toEqual([
+		"status\nterminal: rm -rf ~",
+		"note\nDenied: rm -rf ~",
+		"answer\ndone",
+	]);
+});
+
 test("hands a permission request to the player and the answer back to the brain", async () => {
 	const sent: string[] = [];
 	const conversation = new Conversation(

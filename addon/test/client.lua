@@ -26,9 +26,11 @@
 --   focus               put the focus into the addon's input line
 --   shiftclick <link>   shift-click something that has <link>, as the game's frames do
 --   enter <text>        type <text> into the addon's input line and press Enter
+--   poke <addon>        something other than Familiar enables an addon, as an addon manager does
+--   texts               report what the font strings show
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
--- a message frame, "backfill <text>" for every line restored into one, "error <text>" for a Lua
--- error, "tick" once a frame is done.
+-- a message frame, "backfill <text>" for every line restored into one, "texts <a | b>" for the
+-- texts command, "error <text>" for a Lua error, "tick" once a frame is done.
 
 local client, account, realm, character, addonList = ...
 assert(addonList, "usage: lua client.lua <client> <account> <realm> <character> <addon list>")
@@ -291,7 +293,7 @@ end
 -- Frames -----------------------------------------------------------------------------
 local Frame = setmetatable({}, { __index = method })
 Frame.__index = Frame
-local frames, editBoxes = {}, {}
+local frames, editBoxes, strings = {}, {}, {}
 
 local function newFrame(parent, kind)
 	local frame = setmetatable({ parent = parent, kind = kind, events = {}, scripts = {}, shown = true, scale = 1 }, Frame)
@@ -397,7 +399,9 @@ function Frame:GetEffectiveScale()
 	return parent * self.scale
 end
 function Frame:CreateFontString()
-	return setmetatable({ parent = self }, FontString)
+	local fontString = setmetatable({ parent = self }, FontString)
+	strings[#strings + 1] = fontString
+	return fontString
 end
 function Frame:IsVisible()
 	return self.shown and (not self.parent or self.parent:IsVisible())
@@ -635,7 +639,7 @@ local function api()
 end
 
 local function startUI(isLogin, isReload)
-	frames, editBoxes = {}, {}
+	frames, editBoxes, strings = {}, {}, {}
 	env = api()
 	env.FamiliarDB = copy(saved.FamiliarDB)
 	local ns = {}
@@ -721,6 +725,16 @@ for line in io.lines() do
 		if not ok then
 			out("error", err)
 		end
+	elseif command == "poke" then
+		env.C_AddOns.EnableAddOn(rest)
+	elseif command == "texts" then
+		local shown = {}
+		for _, fontString in ipairs(strings) do
+			if (fontString.text or "") ~= "" then
+				shown[#shown + 1] = fontString.text:gsub("%c", "?")
+			end
+		end
+		out("texts", table.concat(shown, " | "))
 	elseif command == "stall" then
 		local n, ms = rest:match("^(%d+)%s+(%d+)$")
 		stallIn, stallMs = tonumber(n), tonumber(ms)
