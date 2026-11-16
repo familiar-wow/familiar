@@ -12,6 +12,7 @@ So far it holds the chat window and the transport to the app ([ADR 0005](../docs
 | `Familiar/Bells.lua`     | doorbells: plays a `.wav` file and asks whether it still plays          |
 | `Familiar/Bank.lua`      | down: reads a packet from the glyph widths of a font                    |
 | `Familiar/Transport.lua` | hello and welcome, messages up with confirmation, messages down         |
+| `Familiar/Links.lua`     | links from the player to the brain and from the brain back to the game  |
 | `Familiar/Chat.lua`      | the window: history, input line, status, Allow and Deny                 |
 | `Familiar/Familiar.lua`  | saved state, events, the frame loop and `/familiar`                     |
 
@@ -19,7 +20,9 @@ The app installs the addon together with the helpers, fonts and doorbell files; 
 
 `/familiar` opens and closes the window; it can be moved and resized, and keeps its place and the last 200 lines of each character, who also has a session of their own with the agent. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
 
-Each question starts with a header about the character (`Chat.lua`, `header`). A `|` in an answer shows as text, so an answer cannot create a link. The window reads nothing from the game's chat.
+Each question starts with a header about the character (`Chat.lua`, `header`). The window reads nothing from the game's chat.
+
+**Links.** With the focus in the input line, a shift-click on an item, spell, quest or profession inserts its link, as into the chat. The brain gets each link as `[item:19019 Thunderfury]` with the text of its tooltip, and for an item also the items the character wears in its slots; that adds up to 1.8 KB per question, about two seconds on the lane. The brain links with `[item:ID]`, `[spell:ID]` or `[quest:ID]`. The addon asks the client for each ID and shows its link, with a tooltip on hover; an ID the client does not know within two seconds stays text. Any other `|` in an answer shows as text, so an answer cannot create a link of its own (AGENTS.md, rule 3).
 
 ## Test
 
