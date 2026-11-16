@@ -10,6 +10,7 @@ import familiar from "../../../addon/Familiar/Familiar.lua" with {
 import toc from "../../../addon/Familiar/Familiar.toc" with { type: "text" };
 import lane from "../../../addon/Familiar/Lane.lua" with { type: "text" };
 import links from "../../../addon/Familiar/Links.lua" with { type: "text" };
+import style from "../../../addon/Familiar/Style.lua" with { type: "text" };
 import tasks from "../../../addon/Familiar/Tasks.lua" with { type: "text" };
 import transport from "../../../addon/Familiar/Transport.lua" with {
 	type: "text",
@@ -25,6 +26,7 @@ export const FILES: Record<string, string> = {
 	"Bank.lua": bank,
 	"Transport.lua": transport,
 	"Links.lua": links,
+	"Style.lua": style,
 	"Chat.lua": chat,
 	"Familiar.lua": familiar,
 };

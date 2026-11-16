@@ -58,6 +58,8 @@ const questions: Question[] = [];
 const chat: string[] = [];
 /** Lines the window restored from the saved history. */
 const restored: string[] = [];
+/** The font of the window's history, each time the addon sets it. */
+const fonts: string[] = [];
 const errors: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
 let ticker: ReturnType<typeof setTimeout> | undefined;
@@ -155,6 +157,7 @@ beforeAll(async () => {
 				if (line.startsWith("chat ")) chat.push(line.slice(5));
 				if (line.startsWith("window ")) chat.push(line.slice(7));
 				if (line.startsWith("backfill ")) restored.push(line.slice(9));
+				if (line.startsWith("font ")) fonts.push(line.slice(5));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
 			}
 		}
@@ -364,3 +367,34 @@ test("messages go up and replies come down, across /reload, a character switch a
 	expect(errors).toEqual([]);
 	expect(events.filter((e) => e.name === "lane-broken")).toEqual([]);
 }, 120_000);
+
+test("the window's settings apply at once, survive /reload and reset", async () => {
+	/** Waits until the history got `font` after the first `from` times. */
+	const shows = async (font: string, from = 0) => {
+		const deadline = Date.now() + 5_000;
+		while (!fonts.slice(from).includes(font)) {
+			if (Date.now() > deadline)
+				throw new Error(`no font ${font}; fonts: ${fonts.slice(from)}`);
+			await Bun.sleep(20);
+		}
+	};
+	// The window starts with the client's chat font.
+	expect(fonts[0]).toBe("Fonts\\ARIALN.TTF 14 plain");
+
+	command("slash /familiar config");
+	command("slide Size 18");
+	await shows("Fonts\\ARIALN.TTF 18 plain");
+	command("click Outline");
+	command("click Font");
+	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE");
+
+	const reloaded = fonts.length;
+	command("reload");
+	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE", reloaded);
+	expect(fonts[reloaded]).toBe("Fonts\\FRIZQT__.TTF 18 OUTLINE");
+
+	command("slash /familiar config");
+	command("click Reset");
+	await shows("Fonts\\ARIALN.TTF 14 plain", reloaded + 1);
+	expect(errors).toEqual([]);
+});

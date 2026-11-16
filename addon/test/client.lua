@@ -8,8 +8,8 @@
 --   * PlaySoundFile reports even an empty file as played, C_Sound.IsPlaying tells for how long.
 --     A file that played with sound stays cached for the process, a missing one stays missing.
 --   * Widgets take any call; only what the tests read is modelled: text, shown, points, sizes,
---     focus. A few items, a spell and a quest stand in for the game's data; one item and the
---     quest load only once asked for, as uncached data does in the client.
+--     focus, clicks and slider values. A few items, a spell and a quest stand in for the game's
+--     data; one item and the quest load only once asked for, as uncached data does in the client.
 -- What it shows is our own logic, never the client's behavior.
 --
 -- usage: lua client.lua <client folder> <account> <realm> <character> <file listing the addons>
@@ -26,9 +26,12 @@
 --   focus               put the focus into the addon's input line
 --   shiftclick <link>   shift-click something that has <link>, as the game's frames do
 --   enter <text>        type <text> into the addon's input line and press Enter
+--   click <caption>     click the button with this caption
+--   slide <caption> <n> drag the slider with this caption to <n> and let go
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
--- a message frame, "backfill <text>" for every line restored into one, "error <text>" for a Lua
--- error, "tick" once a frame is done.
+-- a message frame, "backfill <text>" for every line restored into one, "font <file> <height>
+-- <flags>" whenever a message frame gets its font, "error <text>" for a Lua error, "tick" once a
+-- frame is done.
 
 local client, account, realm, character, addonList = ...
 assert(addonList, "usage: lua client.lua <client> <account> <realm> <character> <addon list>")
@@ -291,7 +294,7 @@ end
 -- Frames -----------------------------------------------------------------------------
 local Frame = setmetatable({}, { __index = method })
 Frame.__index = Frame
-local frames, editBoxes = {}, {}
+local frames, editBoxes, strings = {}, {}, {}
 
 local function newFrame(parent, kind)
 	local frame = setmetatable({ parent = parent, kind = kind, events = {}, scripts = {}, shown = true, scale = 1 }, Frame)
@@ -314,6 +317,12 @@ function Frame:GetPoint()
 end
 function Frame:SetSize(width, height)
 	self.width, self.height = width, height
+end
+function Frame:SetWidth(width)
+	self.width = width
+end
+function Frame:SetHeight(height)
+	self.height = height
 end
 function Frame:GetWidth()
 	return self.width
@@ -397,7 +406,29 @@ function Frame:GetEffectiveScale()
 	return parent * self.scale
 end
 function Frame:CreateFontString()
-	return setmetatable({ parent = self }, FontString)
+	local fontString = setmetatable({ parent = self }, FontString)
+	strings[#strings + 1] = fontString
+	return fontString
+end
+function Frame:CreateTexture()
+	return setmetatable({ parent = self, scripts = {}, shown = true }, Frame)
+end
+-- The font of the history shows what the settings did to the window.
+function Frame:SetFont(path, size, flags)
+	if self.kind == "ScrollingMessageFrame" then
+		out("font", ("%s %d %s"):format(path, size, flags ~= "" and flags or "plain"))
+	end
+end
+function Frame:SetValue(value)
+	if self.value ~= value then
+		self.value = value
+		if self.scripts.OnValueChanged then
+			self.scripts.OnValueChanged(self, value)
+		end
+	end
+end
+function Frame:GetValue()
+	return self.value or 0
 end
 function Frame:IsVisible()
 	return self.shown and (not self.parent or self.parent:IsVisible())
@@ -485,15 +516,20 @@ local function api()
 	end
 	e.CreateFrame = function(kind, name, parent, template)
 		local frame = newFrame(parent, kind)
-		if template == "BasicFrameTemplateWithInset" then
-			frame.TitleText = frame:CreateFontString()
-		end
 		if name then
 			e[name] = frame
 		end
 		return frame
 	end
 	e.UISpecialFrames = {}
+	local fontObjects = { ChatFontNormal = "ARIALN", GameFontNormal = "FRIZQT__", QuestFont = "MORPHEUS" }
+	for name, file in pairs(fontObjects) do
+		e[name] = {
+			GetFont = function()
+				return "Fonts\\" .. file .. ".TTF", 14, ""
+			end,
+		}
+	end
 	e.UIParent = newFrame(nil)
 	e.UIParent.scale = UI_SCALE
 	e.AddonList = newFrame(e.UIParent)
@@ -635,7 +671,7 @@ local function api()
 end
 
 local function startUI(isLogin, isReload)
-	frames, editBoxes = {}, {}
+	frames, editBoxes, strings = {}, {}, {}
 	env = api()
 	env.FamiliarDB = copy(saved.FamiliarDB)
 	local ns = {}
@@ -720,6 +756,31 @@ for line in io.lines() do
 		local ok, err = pcall(box.scripts.OnEnterPressed, box)
 		if not ok then
 			out("error", err)
+		end
+	elseif command == "click" or command == "slide" then
+		-- A click on the button with this caption, or the slider with this caption set to a value.
+		local caption, value = rest, nil
+		if command == "slide" then
+			caption, value = rest:match("^(.-)%s+(%S+)$")
+		end
+		for _, label in ipairs(strings) do
+			if label.text == caption then
+				local ok, err = true, nil
+				if command == "click" and label.parent.scripts.OnClick then
+					ok, err = pcall(label.parent.scripts.OnClick, label.parent, "LeftButton")
+				end
+				for _, frame in ipairs(command == "slide" and frames or {}) do
+					if frame.kind == "Slider" and frame.parent == label.parent then
+						ok, err = pcall(function()
+							frame:SetValue(tonumber(value))
+							frame.scripts.OnMouseUp(frame, "LeftButton")
+						end)
+					end
+				end
+				if not ok then
+					out("error", err)
+				end
+			end
 		end
 	elseif command == "stall" then
 		local n, ms = rest:match("^(%d+)%s+(%d+)$")
