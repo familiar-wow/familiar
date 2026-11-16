@@ -7,7 +7,9 @@
 --     font string measures with the font it had. Advances are rounded to whole pixels.
 --   * PlaySoundFile reports even an empty file as played, C_Sound.IsPlaying tells for how long.
 --     A file that played with sound stays cached for the process, a missing one stays missing.
---   * Widgets take any call; only what the tests read is modelled: text, shown, points, sizes.
+--   * Widgets take any call; only what the tests read is modelled: text, shown, points, sizes,
+--     focus. A few items, a spell and a quest stand in for the game's data; one item and the
+--     quest load only once asked for, as uncached data does in the client.
 -- What it shows is our own logic, never the client's behavior.
 --
 -- usage: lua client.lua <client folder> <account> <realm> <character> <file listing the addons>
@@ -21,6 +23,8 @@
 --   sound on|off        switch all game sound
 --   drop <n>            the next n AddOns.txt writes get lost
 --   stall <n> <ms>      the nth AddOns.txt write from now halts <ms> with the file emptied
+--   focus               put the focus into the addon's input line
+--   shiftclick <link>   shift-click something that has <link>, as the game's frames do
 --   enter <text>        type <text> into the addon's input line and press Enter
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
 -- a message frame, "backfill <text>" for every line restored into one, "error <text>" for a Lua
@@ -337,6 +341,21 @@ end
 function Frame:SetText(text)
 	self.text = tostring(text or "")
 end
+local focused
+function Frame:SetFocus()
+	focused = self
+end
+function Frame:ClearFocus()
+	if focused == self then
+		focused = nil
+	end
+end
+function Frame:HasFocus()
+	return focused == self
+end
+function Frame:Insert(text)
+	self.text = (self.text or "") .. text
+end
 function Frame:GetText()
 	return self.text or ""
 end
@@ -499,6 +518,101 @@ local function api()
 			process.enabled[name], rows[name] = on, true
 		end
 	end
+	-- Game data: items, a spell and a quest, with their tooltips.
+	local function itemLink(id, quality, name)
+		return ("|cnIQ%d:|Hitem:%d::::::::60:::::|h[%s]|h|r"):format(quality, id, name)
+	end
+	local items = {
+		[19019] = { link = itemLink(19019, 5, "Thunderfury, Blessed Blade of the Windseeker"), equip = "INVTYPE_WEAPON" },
+		[13262] = { link = itemLink(13262, 5, "Ashbringer"), equip = "INVTYPE_2HWEAPON" },
+		[2589] = { link = itemLink(2589, 1, "Linen Cloth"), equip = "", loads = true },
+	}
+	local quests = { [783] = { link = "|cffffff00|Hquest:783:1|h[A Threat Within]|h|r", loads = true } }
+	local tooltips = {
+		["item:19019"] = { "Thunderfury, Blessed Blade of the Windseeker", "Binds when picked up", { "One-Hand", "Sword" } },
+		["item:13262"] = { "Ashbringer", "Binds when picked up" },
+	}
+	local function itemID(info)
+		return tonumber(info) or tonumber(tostring(info):match("item:(%d+)"))
+	end
+	e.C_Item = {
+		DoesItemExistByID = function(id)
+			return items[id] ~= nil
+		end,
+		GetItemInfo = function(info)
+			local item = items[itemID(info)]
+			if item and not item.loads then
+				return item.link:match("%[(.-)%]"), item.link
+			end
+		end,
+		GetItemInfoInstant = function(info)
+			local id = itemID(info)
+			return id, "Weapon", "Sword", items[id] and items[id].equip or ""
+		end,
+		RequestLoadItemDataByID = function(id)
+			if items[id] then
+				items[id].loads = nil
+			end
+		end,
+	}
+	e.C_Spell = {
+		DoesSpellExist = function(id)
+			return id == 133
+		end,
+		IsSpellDataCached = function()
+			return true
+		end,
+		RequestLoadSpellData = function() end,
+		GetSpellLink = function(id)
+			return id == 133 and "|cff71d5ff|Hspell:133:0|h[Fireball]|h|r" or nil
+		end,
+	}
+	e.GetQuestLink = function(id)
+		local quest = quests[id]
+		return quest and not quest.loads and quest.link or nil
+	end
+	e.C_QuestLog = {
+		RequestLoadQuestByID = function(id)
+			if quests[id] then
+				quests[id].loads = nil
+			end
+		end,
+	}
+	e.C_TooltipInfo = {
+		GetHyperlink = function(hyperlink)
+			local lines = tooltips[hyperlink:match("^%a+:%d+")]
+			if not lines then
+				return nil
+			end
+			local data = { lines = {} }
+			for i, line in ipairs(lines) do
+				local left, right = line, nil
+				if type(line) == "table" then
+					left, right = line[1], line[2]
+				end
+				data.lines[i] = { leftText = left, rightText = right }
+			end
+			return data
+		end,
+	}
+	e.GetInventoryItemLink = function(_, slot)
+		return slot == 16 and items[13262].link or nil
+	end
+	e.hooksecurefunc = function(target, name, hook)
+		local original = target[name]
+		target[name] = function(...)
+			local result = original(...)
+			hook(...)
+			return result
+		end
+	end
+	e.ChatFrameUtil = {
+		InsertLink = function()
+			return false
+		end,
+	}
+	e.SetItemRef = function() end
+	e.GameTooltip = newFrame(nil)
 	e.C_AddOns = {
 		GetNumAddOns = function()
 			return #names
@@ -596,9 +710,13 @@ for line in io.lines() do
 		soundOn = rest == "on"
 	elseif command == "drop" then
 		drops = tonumber(rest)
+	elseif command == "focus" then
+		editBoxes[#editBoxes]:SetFocus()
+	elseif command == "shiftclick" then
+		env.ChatFrameUtil.InsertLink(rest)
 	elseif command == "enter" then
 		local box = editBoxes[#editBoxes]
-		box:SetText(rest)
+		box:SetText(box.text and box.text ~= "" and box.text .. " " .. rest or rest)
 		local ok, err = pcall(box.scripts.OnEnterPressed, box)
 		if not ok then
 			out("error", err)

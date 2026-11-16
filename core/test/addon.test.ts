@@ -201,13 +201,52 @@ test("messages go up and replies come down, across /reload, a character switch a
 	at = await waitFor(/^Allowed once: echo a test$/, at);
 	at = await waitFor(/:\|r heard: permission, allowed$/, at);
 
+	// Links in: a shift-click while the input line has the focus inserts the link. The brain
+	// gets it as [item:id name] with its tooltip and the item worn in that slot.
+	const thunderfury =
+		"|cnIQ5:|Hitem:19019::::::::60:::::|h[Thunderfury, Blessed Blade of the Windseeker]|h|r";
+	command("focus");
+	command(`shiftclick ${thunderfury}`);
+	command("enter better than mine?");
+	at = await waitFor(
+		/^\|cffffd100You:\|r \|cnIQ5:\|Hitem:19019:.*\|h\|r better than mine\?$/,
+		at,
+	);
+	at = await waitFor(
+		/:\|r heard: \|cnIQ5:\|Hitem:19019:.*\|h\|r better than mine\?$/,
+		at,
+	);
+	expect(questions.at(-1)?.text).toBe(
+		[
+			"[item:19019 Thunderfury, Blessed Blade of the Windseeker] better than mine?",
+			"",
+			"Linked by the player (game data):",
+			"[item:19019 Thunderfury, Blessed Blade of the Windseeker]",
+			"  Binds when picked up",
+			"  One-Hand  Sword",
+			"Worn: [item:13262 Ashbringer]",
+			"  Binds when picked up",
+		].join("\n"),
+	);
+	at = await waitFor(
+		/^Worn: \|cnIQ5:\|Hitem:13262:.*\|h\[Ashbringer\]\|h\|r$/,
+		at,
+	);
+
+	// Links out: what the client knows becomes a link, once loaded; unknown IDs stay text.
+	command("enter [item:2589] [spell:133] [quest:783] [item:999999] [spell:1]");
+	at = await waitFor(
+		/:\|r heard: \|cnIQ1:\|Hitem:2589:[^|]*\|h\[Linen Cloth\]\|h\|r \|cff71d5ff\|Hspell:133:0\|h\[Fireball\]\|h\|r \|cffffff00\|Hquest:783:1\|h\[A Threat Within\]\|h\|r \[item:999999\] \[spell:1\]$/,
+		at,
+	);
+
 	// 2000 bytes take five fonts, and every line of the answer reaches the window.
 	at = await roundTrip("2000", /^familiar familiar /, at);
 	expect(chat[at - 2]).toMatch(/:\|r heard: 2000$/);
 	// A | in an answer shows as text and never starts a link (AGENTS.md, rule 3).
 	at = await roundTrip(
-		"|Hitem:19019|h[Thunderfury]|h",
-		/:\|r heard: \|\|Hitem:19019\|\|h\[Thunderfury\]\|\|h$/,
+		"|Hitem:19019|h[Thunderfury]",
+		/:\|r heard: \|\|Hitem:19019\|\|h\[Thunderfury\]$/,
 		at,
 	);
 

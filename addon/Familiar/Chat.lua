@@ -1,9 +1,9 @@
 -- The chat window (FAM-23): history, an input line, a status line that counts while the brain
 -- works, and Allow/Deny when the agent asks for permission. Messages carry their kind on the
 -- first line; formats: core/src/brain/chat.ts. Nothing here reads the game's chat (AGENTS.md,
--- rule 2), and text from the brain never becomes a link (rule 3).
+-- rule 2), and text from the brain becomes a link only through Links.Render (rule 3).
 local _, ns = ...
-local Tasks, Transport = ns.Tasks, ns.Transport
+local Tasks, Transport, Links = ns.Tasks, ns.Transport, ns.Links
 
 local format, floor = string.format, math.floor
 
@@ -11,7 +11,7 @@ local Chat = {}
 ns.Chat = Chat
 
 local HISTORY = 200 -- lines kept per character across /reload
-local MAX_BYTES = 400 -- per question: the lane carries about 0.9 KB/s
+local MAX_BYTES = 1000 -- per question, with links: the lane carries about 0.9 KB/s
 local YOU, FAMILIAR = "|cffffd100You:|r ", "|cff8fd1ffFamiliar:|r "
 local GREY, TOOL = { 0.6, 0.6, 0.6 }, { 0.5, 0.7, 0.8 }
 
@@ -24,10 +24,7 @@ local frame, history, input, status, ask, askText
 local pending, since, tool = 0, 0, nil
 local requests = {} -- permission requests the player has not answered, oldest first
 
--- A | starts an escape sequence such as a link: || shows the character itself.
-local function plain(text)
-	return (text:gsub("\r", ""):gsub("|", "||"))
-end
+local plain = Links.Plain
 
 local function add(text, color)
 	color = color or {}
@@ -41,9 +38,10 @@ local function add(text, color)
 	end
 end
 
+-- Adds `text`, which is already escaped, line by line.
 local function addLines(prefix, text, color)
 	local first = true
-	for line in plain(text):gmatch("[^\n]+") do
+	for line in text:gmatch("[^\n]+") do
 		add(first and prefix .. line or line, color)
 		first = false
 	end
@@ -114,13 +112,13 @@ function Chat.Ask(text)
 	if text == "" then
 		return
 	end
-	addLines(YOU, text)
+	addLines(YOU, Links.Show(text))
 	if pending == 0 then
 		since, tool = Tasks.Now(), nil
 	end
 	pending = pending + 1
 	local started = Tasks.Now()
-	Transport.Send("question\n" .. header() .. text, function(ok, why)
+	Transport.Send("question\n" .. header() .. Links.Describe(text), function(ok, why)
 		if ok then
 			add(format("Sent in %.2f s.", Tasks.Now() - started), GREY)
 		else
@@ -148,7 +146,9 @@ Transport.OnMessage(function(body)
 			-- Requests of a question that has ended can no longer be answered.
 			requests = {}
 		end
-		addLines(FAMILIAR, rest or body)
+		Links.Render(plain(rest or body), function(text)
+			addLines(FAMILIAR, text)
+		end)
 	end
 	refresh()
 end)
@@ -220,6 +220,27 @@ local function create()
 	history:SetJustifyH("LEFT")
 	history:SetFading(false)
 	history:SetMaxLines(HISTORY * 2)
+	-- Links show their tooltip on hover and open like in the chat on click; dragging the history
+	-- moves the window.
+	history:SetHyperlinksEnabled(true)
+	history:EnableMouse(true)
+	history:RegisterForDrag("LeftButton")
+	history:SetScript("OnDragStart", function()
+		frame:StartMoving()
+	end)
+	history:SetScript("OnDragStop", frame:GetScript("OnDragStop"))
+	history:SetScript("OnHyperlinkClick", function(self, link, text, button)
+		SetItemRef(link, text, button, self)
+	end)
+	history:SetScript("OnHyperlinkEnter", function(self, link)
+		GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+		if pcall(GameTooltip.SetHyperlink, GameTooltip, link) then
+			GameTooltip:Show()
+		end
+	end)
+	history:SetScript("OnHyperlinkLeave", function()
+		GameTooltip:Hide()
+	end)
 	history:EnableMouseWheel(true)
 	history:SetScript("OnMouseWheel", function(self, delta)
 		if delta > 0 then
@@ -262,6 +283,14 @@ local function create()
 		Chat.Ask(text)
 	end)
 	input:SetScript("OnEscapePressed", input.ClearFocus)
+	-- A shift-click inserts its link here while the input line has the focus, as into the chat.
+	if ChatFrameUtil and ChatFrameUtil.InsertLink then
+		hooksecurefunc(ChatFrameUtil, "InsertLink", function(link)
+			if type(link) == "string" and input:HasFocus() then
+				input:Insert(link)
+			end
+		end)
+	end
 
 	local resize = CreateFrame("Button", nil, frame, "PanelResizeButtonTemplate")
 	resize:SetPoint("BOTTOMRIGHT", -2, 2)
