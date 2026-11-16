@@ -24,7 +24,7 @@ import {
 import { install, isInstalled, uninstall } from "./wow/install.ts";
 
 const VERSION = pkg.version;
-/** An answer may take four fonts of the bank, which has 256 per game start. */
+/** An answer may take four fonts of the bank. */
 const MAX_ANSWER = 4 * DOWN_PAYLOAD;
 
 const USAGE = `familiar ${VERSION}: the Familiar app for development builds

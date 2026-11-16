@@ -93,7 +93,8 @@ jobs:
           if (-not (Select-String -Path out.txt -Pattern 'Ready\.' -Quiet)) { throw 'familiar.exe never got ready' }
           if (-not (Test-Path (Join-Path $client 'Interface\AddOns\Familiar\Familiar.toc'))) { throw 'the addon was not installed' }
 
-  # The brain runs as a child process on stdin and stdout, which Windows handles differently.
+  # The brain runs as a child process on stdin and stdout, and the font bank uses hard links:
+  # both work differently on Windows.
   windows-test:
     name: Windows test
     runs-on: windows-latest
@@ -106,7 +107,7 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - run: bun test acp.test
+      - run: bun test acp.test bank.test
         working-directory: core
 
   # The only check the ruleset for main requires. Add every new job to `needs`.

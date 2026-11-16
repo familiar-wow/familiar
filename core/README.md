@@ -75,7 +75,7 @@ Up, the addon sends a message as frames of 32 bytes: it switches 256 helper addo
 
 Down, the app writes a message into the glyph widths of the next fonts in the bank, 492 bytes per font, and raises the next message doorbell. The addon hears it and measures the fonts.
 
-The client loads each file once per game start. Per game start the transport therefore has 600 messages up, 600 messages down and 256 fonts. The app resets them when the game starts. Every `/reload` costs one font, for the welcome. A larger bank is FAM-25.
+The client loads each file once per game start, and it sees only the files that existed when it started. Per game start the transport therefore has 4096 messages up, 4096 messages down and 8192 fonts, about 4 MB. The app resets them when the game starts. Every `/reload` costs one font, for the welcome. An empty font takes 25 KB, so the unused names of the bank are hard links to nine empty fonts in `bank/base` (Windows allows 1023 names per file), and the bank takes less than 1 MB on disk. Where the file system has no hard links, such as exFAT, the app copies them, about 200 MB.
 
 When the addon starts, it says hello, and the app answers with a welcome in the font bank. Only that welcome counts as a connection: it carries the session key, which is random per game start. Doorbells, in contrast, can still be raised from an earlier game if the app was not running when that game ended. If the app starts while the game is running, it adopts the addon's position from the hello and silences the doorbells after it.
 

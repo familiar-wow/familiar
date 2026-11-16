@@ -14,7 +14,7 @@ local Codec, Tasks = ns.Codec, ns.Tasks
 local char, format, rep = string.char, string.format, string.rep
 local floor = math.floor
 
-local Bank = { FONTS = 256, BYTES = 512 }
+local Bank = { FONTS = 8192, BYTES = 512 }
 ns.Bank = Bank
 
 local ROOT = "Interface\\AddOns\\Familiar\\bank\\"

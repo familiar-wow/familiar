@@ -9,7 +9,7 @@ local Tasks = ns.Tasks
 
 local format = string.format
 
-local Bells = { COUNT = 600 }
+local Bells = { COUNT = 4096 }
 ns.Bells = Bells
 
 local ROOT = "Interface\\AddOns\\Familiar\\"
