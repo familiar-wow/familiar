@@ -26,7 +26,8 @@ import { fontFile } from "./font.ts";
 const root = mkdtempSync(join(tmpdir(), "familiar-bank-"));
 const paths = wowPaths(join(root, "_forever_"));
 const addon = join(paths.addons, "Familiar");
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+// Deleting the 16,000 files takes Windows longer than the default five seconds.
+afterAll(() => rmSync(root, { recursive: true, force: true }), 60_000);
 
 /** The packet a font carries, read from its advance widths like the addon does. */
 function packetOf(file: string): Uint8Array {
