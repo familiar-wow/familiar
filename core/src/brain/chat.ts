@@ -4,6 +4,7 @@
 //         permission  the request's number, a newline, "allow" or "deny"
 //   down  answer      the brain's answer, or why there is none
 //         status      the tool the agent calls now
+//         note        something the player should know about the question, such as a refusal
 //         permission  the request's number, a newline, what the agent wants to do
 // The brain gets the question with the header, as ADR 0001 has it: everything else it will fetch
 // through tools (P2).
@@ -42,6 +43,8 @@ export function parseQuestion(body: string): Question {
 export interface Turn {
 	/** The agent calls a tool. */
 	onTool(title: string): void;
+	/** Something the player should know now, such as a request Familiar had to deny. */
+	onNote(text: string): void;
 	/** The agent asks for permission; true allows it once. */
 	onPermission(title: string): Promise<boolean>;
 }
@@ -55,7 +58,7 @@ export type Up =
 	| { kind: "permission"; id: number; allow: boolean };
 
 export type Down =
-	| { kind: "answer" | "status"; text: string }
+	| { kind: "answer" | "status" | "note"; text: string }
 	| { kind: "permission"; id: number; text: string };
 
 /** A message from the addon, or undefined if it is none. */

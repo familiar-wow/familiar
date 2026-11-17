@@ -47,6 +47,13 @@ function Lane.Ready()
 	return indices ~= nil
 end
 
+-- After a message went unconfirmed: something else may have switched a helper on, as an addon
+-- that manages addon sets does, and that garbles every frame. The next frame switches every
+-- helper off first.
+function Lane.Reset()
+	stale = true
+end
+
 local function listOpen()
 	local list = _G.AddonList
 	return list ~= nil and list:IsShown()

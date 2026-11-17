@@ -184,10 +184,14 @@ export class AcpBrain implements Brain {
 				methods.client.session.requestPermission,
 				async ({ params }) => {
 					const title = params.toolCall.title ?? "a tool";
-					const allow =
-						permissions === "ask"
-							? await this.askPlayer(title)
-							: permissions === "allow";
+					let allow: boolean | undefined = false;
+					if (permissions !== "deny") {
+						if (params.options.some((o) => o.kind === "allow_once"))
+							allow = permissions === "allow" || (await this.askPlayer(title));
+						// Some agents offer only "always". Asking the player would promise a choice
+						// Familiar cannot make (ADR 0006), so it denies and says why.
+						else this.turn?.onNote(noOnce(title));
+					}
 					const choice = choose(params.options, allow);
 					log.event("brain-permission", {
 						tool: title,
@@ -276,8 +280,15 @@ function choose(
 	return (allow && once("allow_once")) || once("reject_once");
 }
 
-/** How long a tool's title may be on the console. */
+/** How long a tool's title may be on the console and in a note. */
 const TITLE_CHARS = 120;
+const short = (title: string) =>
+	title.length > TITLE_CHARS ? `${title.slice(0, TITLE_CHARS - 1)}…` : title;
+
+/** What the player reads when a request could only be allowed for good. */
+function noOnce(title: string): string {
+	return `Denied: ${short(title)}. The agent offers no "allow once", and Familiar never answers "always". To allow it, change the agent's own settings.`;
+}
 
 /**
  * Reads a turn to its end. Text before a tool call is the agent thinking aloud, so the answer
@@ -291,8 +302,6 @@ async function lastMessage(
 ): Promise<string> {
 	const texts = [""];
 	const titles = new Map<string, string>();
-	const short = (title: string) =>
-		title.length > TITLE_CHARS ? `${title.slice(0, TITLE_CHARS - 1)}…` : title;
 	for (;;) {
 		const next = await session.nextUpdate();
 		if (next.kind === "stop")

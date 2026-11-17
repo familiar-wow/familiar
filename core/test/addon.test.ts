@@ -60,6 +60,8 @@ const chat: string[] = [];
 const restored: string[] = [];
 /** The font of the window's history, each time the addon sets it. */
 const fonts: string[] = [];
+/** What the window's font strings showed, each time a test asked. */
+const texts: string[] = [];
 const errors: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
 let ticker: ReturnType<typeof setTimeout> | undefined;
@@ -100,12 +102,23 @@ async function roundTrip(
 	return Math.max(sent, await waitFor(expected, from));
 }
 
-/** Starts the app's end, which answers every question with the echo. */
-async function startApp(): Promise<void> {
+/** What the window's font strings show now, such as its status line. */
+async function shown(): Promise<string> {
+	const before = texts.length;
+	command("texts");
+	while (texts.length === before) await Bun.sleep(10);
+	return texts.at(-1) ?? "";
+}
+
+/**
+ * Starts the app's end, which answers every question with the echo. "never" gets no answer, and
+ * "note" a note on the way.
+ */
+async function startApp(welcome = "the test app"): Promise<void> {
 	const transport = new Transport({
 		paths,
 		log,
-		welcome: "the test app",
+		welcome,
 		processes: async () => pids,
 		processPollMs: 50,
 	});
@@ -113,6 +126,8 @@ async function startApp(): Promise<void> {
 		{
 			ask: (question, turn) => {
 				questions.push(question);
+				if (question.text === "never") return new Promise(() => {});
+				if (question.text === "note") turn.onNote("Denied: echo a test.");
 				return echoBrain.ask(question, turn);
 			},
 		},
@@ -158,6 +173,7 @@ beforeAll(async () => {
 				if (line.startsWith("window ")) chat.push(line.slice(7));
 				if (line.startsWith("backfill ")) restored.push(line.slice(9));
 				if (line.startsWith("font ")) fonts.push(line.slice(5));
+				if (line.startsWith("texts ")) texts.push(line.slice(6));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
 			}
 		}
@@ -368,6 +384,10 @@ test("messages go up and replies come down, across /reload, a character switch a
 	expect(events.filter((e) => e.name === "lane-broken")).toEqual([]);
 }, 120_000);
 
+// Every test below leaves the game connected. Run alone (-t), a test starts while the addon still
+// says hello, so each waits for the first connection.
+const CONNECTED = /Connected to the test app\.$/;
+
 test("the window's settings apply at once, survive /reload and reset", async () => {
 	/** Waits until the history got `font` after the first `from` times. */
 	const shows = async (font: string, from = 0) => {
@@ -378,6 +398,7 @@ test("the window's settings apply at once, survive /reload and reset", async () 
 			await Bun.sleep(20);
 		}
 	};
+	await waitFor(CONNECTED, 0);
 	// The window starts with the client's chat font.
 	expect(fonts[0]).toBe("Fonts\\ARIALN.TTF 14 plain");
 
@@ -389,6 +410,7 @@ test("the window's settings apply at once, survive /reload and reset", async () 
 	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE");
 
 	const reloaded = fonts.length;
+	const at = chat.length;
 	command("reload");
 	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE", reloaded);
 	expect(fonts[reloaded]).toBe("Fonts\\FRIZQT__.TTF 18 OUTLINE");
@@ -396,5 +418,84 @@ test("the window's settings apply at once, survive /reload and reset", async () 
 	command("slash /familiar config");
 	command("click Reset");
 	await shows("Fonts\\ARIALN.TTF 14 plain", reloaded + 1);
+	// The addon says hello again after /reload; the next test needs the connection.
+	await waitFor(CONNECTED, at);
+	expect(errors).toEqual([]);
+});
+
+test("a helper that something else switched on costs one attempt, not the connection", async () => {
+	await waitFor(CONNECTED, 0);
+	const from = chat.length;
+	// Bit 7 of a data byte: plain text never sets it, so the lane never switched it off again.
+	command("poke Familiar_L207");
+	command("slash /familiar say after a poke");
+	await waitFor(/heard: after a poke$/, from);
+	const sent = await waitFor(/^Sent in /, from);
+	// The first attempt is garbled; the second starts 3 s later.
+	expect(chat[sent - 1]).toMatch(/^Sent in [3-5]\.\d+ s\.$/);
+	expect(chat.slice(from).filter((l) => l.startsWith("Not sent"))).toEqual([]);
+	expect(errors).toEqual([]);
+}, 30_000);
+
+test("without game sound Familiar says so, and connects again once it is back", async () => {
+	await waitFor(CONNECTED, 0);
+	const from = chat.length;
+	command("sound off");
+	command("slash /familiar say into the silence");
+	let at = await waitFor(
+		/^Not sent: the game sound is off, so Familiar cannot hear the app\.$/,
+		from,
+		30_000,
+	);
+	at = await waitFor(/^Familiar needs the game sound: /, at);
+	expect(
+		chat.slice(from).filter((l) => l.includes("stopped answering")),
+	).toEqual([]);
+
+	command("sound on");
+	// The app had the question all along: its answer is the first doorbell Familiar hears.
+	await waitFor(/heard: into the silence$/, at, 30_000);
+	at = await waitFor(CONNECTED, at, 30_000);
+	await roundTrip("with sound again", /heard: with sound again$/, at);
+	expect(errors).toEqual([]);
+}, 90_000);
+
+test("a confirmed question without an answer ends when the app's patience is over", async () => {
+	await waitFor(CONNECTED, 0);
+	// The welcome names the patience, so the addon has to say hello again.
+	const patient = "the test app\npatience: 2";
+	app?.stop();
+	await startApp(patient);
+	let at = chat.length;
+	command("reload");
+	at = await waitFor(CONNECTED, at);
+	command("slash /familiar say never");
+	at = await waitFor(/^Sent in /, at);
+	expect(await shown()).toContain("Thinking …");
+
+	// The app restarts while the brain works: nobody will answer this question.
+	app?.stop();
+	await startApp(patient);
+	at = await waitFor(
+		/^No answer from the app after \d+ s\. The question is lost; ask it again\.$/,
+		at,
+	);
+	expect(await shown()).not.toContain("Thinking");
+	at = await roundTrip("after a lost one", /heard: after a lost one$/, at);
+
+	app?.stop();
+	await startApp();
+	at = chat.length;
+	command("reload");
+	await waitFor(CONNECTED, at);
+	expect(errors).toEqual([]);
+}, 60_000);
+
+test("the window shows what the app notes while the brain works", async () => {
+	await waitFor(CONNECTED, 0);
+	const from = chat.length;
+	command("slash /familiar say note");
+	await waitFor(/^Denied: echo a test\.$/, from);
+	await waitFor(/:\|r heard: note$/, from);
 	expect(errors).toEqual([]);
 });

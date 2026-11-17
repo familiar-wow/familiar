@@ -10,7 +10,8 @@
 //            CRC-32 of everything before it.
 // The app confirms a message by raising the ack doorbell it names. The addon sends it again
 // when no confirmation comes. A hello names the last ack doorbell the addon used, and the app
-// answers it with a welcome instead.
+// answers it with a welcome instead. A welcome's body is text: the app's name on the first line,
+// then "key: value" lines such as "patience: 150" (core/src/main.ts).
 //
 // Down, app to addon: a message goes into the font bank, one packet of 512 bytes per font,
 // then the app raises the next message doorbell.

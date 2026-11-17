@@ -1,6 +1,7 @@
 // A stand-in ACP agent for acp.test.ts. It logs to stderr as it works, as Hermes does, and
 // refuses sessions in folders whose path contains "missing". The question picks what it does:
 //   permission  asks to run a command and says which option it got
+//   always      the same, but offers no "allow once"
 //   where       names the session's folder
 //   fail        answers with a JSON-RPC error and runs on
 //   slow        answers only once Familiar cancels
@@ -78,14 +79,22 @@ agent({ name: "fake-agent" })
 			});
 			return { stopReason: "cancelled" };
 		}
-		if (question === "permission") {
+		if (question === "permission" || question === "always") {
 			const { outcome } = await client.request(
 				methods.client.session.requestPermission,
 				{
 					sessionId,
 					toolCall: { toolCallId: "1", title: "rm -rf ~" },
 					options: [
-						{ optionId: "allow-once", name: "Allow", kind: "allow_once" },
+						...(question === "always"
+							? []
+							: [
+									{
+										optionId: "allow-once",
+										name: "Allow",
+										kind: "allow_once" as const,
+									},
+								]),
 						{
 							optionId: "allow-always",
 							name: "Always allow",

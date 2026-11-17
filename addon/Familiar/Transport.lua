@@ -17,6 +17,7 @@ local abs, floor, min, random = math.abs, math.floor, math.min, math.random
 local U16, U32, ReadU16, ReadU32 = Codec.U16, Codec.U32, Codec.ReadU16, Codec.ReadU32
 
 -- problem: why this session cannot send, if it cannot
+-- welcome: what the app's welcome said; its first line names the app (core/src/main.ts)
 local Transport = { connected = false }
 ns.Transport = Transport
 
@@ -26,6 +27,7 @@ local ACK_WAIT, ATTEMPTS = 3, 3 -- seconds per attempt, attempts per message
 local HELLO_WAIT, HELLO_WAIT_MAX = 5, 30 -- seconds to wait for a welcome, doubling up to the max
 -- Where the transport looks whether the client reads files of an addon that never loads.
 local PROBE = "Interface\\AddOns\\Familiar_L000\\probe."
+local NO_SOUND = "Familiar needs the game sound: turn on Enable Sound in Settings > Audio. Volume 0 is enough."
 
 local state -- FamiliarDB.transport: process, key, id, ack, bell, font
 local queue, handlers = {}, {}
@@ -48,11 +50,26 @@ local function encode(hello, ack, body)
 	return bytes .. U32(Codec.Crc32(bytes))
 end
 
-local function disconnect(text)
-	Transport.connected = false
+local function fail(text)
+	Transport.problem = text
 	ns.Print(text)
+end
+
+-- Says that the game sound is off and waits until it is back (task context). Without it no
+-- doorbell rings, which looks just like an app that does not answer.
+local function awaitSound()
+	Transport.sound = "off"
+	fail(NO_SOUND)
+	repeat
+		Tasks.Sleep(10)
+	until Bells.SelfTest() == "ok"
+	Transport.sound, Transport.problem = "ok", nil
+end
+
+local function disconnect(why)
+	Transport.connected = false
 	for _, job in ipairs(queue) do
-		job.done(false, "lost the connection to the app")
+		job.done(false, why)
 	end
 	queue = {}
 end
@@ -74,9 +91,18 @@ local function send(job)
 				return job.done(true)
 			end
 		until Tasks.Now() >= deadline
+		Lane.Reset()
+	end
+	if Bells.SelfTest() == "off" then
+		-- The app may well have the message: the lane needs no sound.
+		local why = "the game sound is off, so Familiar cannot hear the app"
+		job.done(false, why)
+		disconnect(why)
+		return awaitSound()
 	end
 	job.done(false, "no answer from the app")
-	disconnect("The Familiar app stopped answering. Familiar keeps trying.")
+	ns.Print("The Familiar app stopped answering. Familiar keeps trying.")
+	disconnect("lost the connection to the app")
 end
 
 -- Says hello until a welcome comes back. A hello names the last ack doorbell used, so the app
@@ -90,11 +116,17 @@ local function connect()
 		repeat
 			Tasks.Sleep(0.1)
 		until Transport.connected or Tasks.Now() >= deadline
-		if not Transport.connected and not said then
-			ns.Print("The Familiar app does not answer. Start it; Familiar keeps trying.")
-			said = true
-		end
 		wait = min(wait * 2, HELLO_WAIT_MAX)
+		if not Transport.connected then
+			Lane.Reset()
+			if Bells.SelfTest() == "off" then
+				awaitSound()
+				wait, said = HELLO_WAIT, false
+			elseif not said then
+				ns.Print("The Familiar app does not answer. Start it; Familiar keeps trying.")
+				said = true
+			end
+		end
 	end
 end
 
@@ -182,9 +214,10 @@ local function read()
 	end
 	local body = table.concat(parts)
 	if p.welcome then
+		Transport.welcome = body
 		if not Transport.connected then
 			Transport.connected = true
-			ns.Print(format("Connected to %s.", body))
+			ns.Print(format("Connected to %s.", body:match("^[^\n]*")))
 		end
 		return
 	end
@@ -231,11 +264,6 @@ local function hello()
 	return format("Familiar %s, build %s; files of an addon that never loads: %s", version, tostring(build), Transport.probe)
 end
 
-local function fail(text)
-	Transport.problem = text
-	ns.Print(text)
-end
-
 local function session()
 	local missing = Lane.Resolve()
 	if missing > 0 then
@@ -249,12 +277,7 @@ local function session()
 		return fail("This client cannot ring Familiar's doorbells: an empty sound plays like a long one.")
 	end
 	if sound == "off" then
-		fail("Familiar needs the game sound: turn on Enable Sound in Settings > Audio. Volume 0 is enough.")
-		repeat
-			Tasks.Sleep(10)
-			sound = Bells.SelfTest()
-		until sound == "ok"
-		Transport.sound, Transport.problem = sound, nil
+		awaitSound()
 	end
 
 	local started = time() - floor(GetSessionTime())

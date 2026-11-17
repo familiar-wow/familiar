@@ -11,7 +11,10 @@ import { LaneReader } from "./lane.ts";
 export interface TransportOptions {
 	paths: WowPaths;
 	log: Log;
-	/** What the welcome tells the addon, such as the app's name and version. */
+	/**
+	 * What the welcome tells the addon. The first line names the app, as "Connected to …" shows
+	 * it; "key: value" lines may follow, such as "patience: 150".
+	 */
 	welcome: string;
 	/** Running game processes; replaced in tests. */
 	processes?: () => Promise<number[]>;

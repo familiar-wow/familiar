@@ -28,10 +28,12 @@
 --   enter <text>        type <text> into the addon's input line and press Enter
 --   click <caption>     click the button with this caption
 --   slide <caption> <n> drag the slider with this caption to <n> and let go
+--   poke <addon>        something other than Familiar enables an addon, as an addon manager does
+--   texts               report what the font strings show
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
 -- a message frame, "backfill <text>" for every line restored into one, "font <file> <height>
--- <flags>" whenever a message frame gets its font, "error <text>" for a Lua error, "tick" once a
--- frame is done.
+-- <flags>" whenever a message frame gets its font, "texts <a | b>" for the texts command,
+-- "error <text>" for a Lua error, "tick" once a frame is done.
 
 local client, account, realm, character, addonList = ...
 assert(addonList, "usage: lua client.lua <client> <account> <realm> <character> <addon list>")
@@ -782,6 +784,16 @@ for line in io.lines() do
 				end
 			end
 		end
+	elseif command == "poke" then
+		env.C_AddOns.EnableAddOn(rest)
+	elseif command == "texts" then
+		local shown = {}
+		for _, fontString in ipairs(strings) do
+			if (fontString.text or "") ~= "" then
+				shown[#shown + 1] = fontString.text:gsub("%c", "?")
+			end
+		end
+		out("texts", table.concat(shown, " | "))
 	elseif command == "stall" then
 		local n, ms = rest:match("^(%d+)%s+(%d+)$")
 		stallIn, stallMs = tonumber(n), tonumber(ms)

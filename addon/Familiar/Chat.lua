@@ -23,7 +23,10 @@ local db
 local kept -- the logged-in character's lines, once known
 local frame, history, input, status, ask, askText, title
 local opacity, focus -- set how opaque the window is, and whether the input line shows as focused
-local pending, since, tool = 0, 0, nil
+-- pending: questions without an answer so far; sending: those of them the app has not confirmed
+-- or refused yet; heard: when the app last confirmed a question or sent anything
+local pending, sending, heard = 0, 0, 0
+local since, tool = 0, nil
 local requests = {} -- permission requests the player has not answered, oldest first
 
 local plain = Links.Plain
@@ -92,6 +95,18 @@ local function refresh()
 	end
 end
 
+-- The app answers every question it confirmed, if only to say why there is no answer, within the
+-- seconds its welcome names as its patience (core/src/main.ts). After that nothing will come, as
+-- when the app was started again meanwhile.
+local function expire()
+	local patience = tonumber((Transport.welcome or ""):match("\npatience: (%d+)"))
+	local waited = Tasks.Now() - heard
+	if patience and pending > 0 and sending == 0 and waited > pending * patience then
+		pending, tool, requests = 0, nil, {}
+		add(format("No answer from the app after %d s. The question is lost; ask it again.", floor(waited)), GREY)
+	end
+end
+
 -- Answers the oldest permission request, once.
 function Chat.Answer(allow)
 	local request = table.remove(requests, 1)
@@ -118,10 +133,12 @@ function Chat.Ask(text)
 	if pending == 0 then
 		since, tool = Tasks.Now(), nil
 	end
-	pending = pending + 1
+	pending, sending = pending + 1, sending + 1
 	local started = Tasks.Now()
 	Transport.Send("question\n" .. header() .. Links.Describe(text), function(ok, why)
+		sending = sending - 1
 		if ok then
+			heard = Tasks.Now()
 			add(format("Sent in %.2f s.", Tasks.Now() - started), GREY)
 		else
 			pending = pending - 1
@@ -134,9 +151,12 @@ end
 
 Transport.OnMessage(function(body)
 	local kind, rest = body:match("^(%a+)\n(.*)$")
+	heard = Tasks.Now()
 	if kind == "status" then
 		tool = rest
 		add("  > " .. plain(rest), TOOL)
+	elseif kind == "note" then
+		add(plain(rest), TOOL)
 	elseif kind == "permission" then
 		local id, title = rest:match("^(%d+)\n(.*)$")
 		requests[#requests + 1] = { id = tonumber(id), title = title }
@@ -352,6 +372,7 @@ function Chat.Init(saved)
 	create()
 	Tasks.Spawn("chat", function()
 		while true do
+			expire()
 			refresh()
 			Tasks.Sleep(0.25)
 		end
