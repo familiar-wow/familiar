@@ -14,5 +14,6 @@ Bells.lua
 Bank.lua
 Transport.lua
 Links.lua
+Style.lua
 Chat.lua
 Familiar.lua

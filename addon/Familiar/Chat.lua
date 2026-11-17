@@ -1,9 +1,10 @@
 -- The chat window (FAM-23): history, an input line, a status line that counts while the brain
 -- works, and Allow/Deny when the agent asks for permission. Messages carry their kind on the
 -- first line; formats: core/src/brain/chat.ts. Nothing here reads the game's chat (AGENTS.md,
--- rule 2), and text from the brain becomes a link only through Links.Render (rule 3).
+-- rule 2), and text from the brain becomes a link only through Links.Render (rule 3). Its look
+-- and the player's settings for it: Style.lua.
 local _, ns = ...
-local Tasks, Transport, Links = ns.Tasks, ns.Transport, ns.Links
+local Tasks, Transport, Links, Style = ns.Tasks, ns.Transport, ns.Links, ns.Style
 
 local format, floor = string.format, math.floor
 
@@ -15,12 +16,13 @@ local MAX_BYTES = 1000 -- per question, with links: the lane carries about 0.9 K
 local YOU, FAMILIAR = "|cffffd100You:|r ", "|cff8fd1ffFamiliar:|r "
 local GREY, TOOL = { 0.6, 0.6, 0.6 }, { 0.5, 0.7, 0.8 }
 
--- FamiliarDB.window: point, relativePoint, x, y, width, height and shown for every character;
--- histories["name-realm"]: the lines of each character, whose agent session is its own too
--- (core/src/brain/acp.ts).
+-- FamiliarDB.window: point, relativePoint, x, y, width, height, shown and style for every
+-- character; histories["name-realm"]: the lines of each character, whose agent session is its
+-- own too (core/src/brain/acp.ts).
 local db
 local kept -- the logged-in character's lines, once known
-local frame, history, input, status, ask, askText
+local frame, history, input, status, ask, askText, title
+local opacity, focus -- set how opaque the window is, and whether the input line shows as focused
 -- pending: questions without an answer so far; sending: those of them the app has not confirmed
 -- or refused yet; heard: when the app last confirmed a question or sent anything
 local pending, sending, heard = 0, 0, 0
@@ -186,6 +188,11 @@ function Chat.Toggle()
 	frame:SetShown(not frame:IsShown())
 end
 
+function Chat.Settings()
+	frame:Show()
+	Style.Toggle(frame)
+end
+
 -- The window -----------------------------------------------------------------------------
 
 local function save()
@@ -195,17 +202,27 @@ local function save()
 end
 
 local function button(text, allow)
-	local b = CreateFrame("Button", nil, ask, "UIPanelButtonTemplate")
-	b:SetSize(80, 22)
-	b:SetText(text)
-	b:SetScript("OnClick", function()
+	return Style.Button(ask, text, 80, function()
 		Chat.Answer(allow)
 	end)
-	return b
+end
+
+-- Shows the window as the settings say.
+local function apply()
+	local file, size, flags = Style.Font()
+	history:SetFont(file, size, flags)
+	input:SetFont(file, size, flags)
+	input:SetHeight(size + 10)
+	-- Dragging over the text selects it, and releasing the button copies it.
+	history:SetTextCopyable(Style.Get("copy"))
+	frame:SetScale(Style.Get("scale") / 100)
+	opacity(Style.Get("opacity") / 100)
+	title:SetTextColor(Style.Accent())
+	focus(input:HasFocus())
 end
 
 local function create()
-	frame = CreateFrame("Frame", "FamiliarChatFrame", UIParent, "BasicFrameTemplateWithInset")
+	frame = CreateFrame("Frame", "FamiliarChatFrame", UIParent)
 	frame:SetFrameStrata("MEDIUM")
 	frame:SetToplevel(true)
 	frame:SetClampedToScreen(true)
@@ -224,31 +241,70 @@ local function create()
 	frame:SetScript("OnHide", function()
 		db.shown = false
 		input:ClearFocus()
+		Style.Hide()
 	end)
 	frame:SetSize(db.width or 420, db.height or 300)
 	frame:SetPoint(db.point or "CENTER", UIParent, db.relativePoint or "CENTER", db.x or 0, db.y or 0)
-	if frame.TitleText then
-		frame.TitleText:SetText("Familiar")
-	end
 	-- Escape closes the window, like other panels.
 	table.insert(UISpecialFrames, "FamiliarChatFrame")
+	opacity = Style.Window(frame)
+
+	-- The title bar; the window moves by it.
+	title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	title:SetPoint("TOPLEFT", 10, -9)
+	title:SetText("Familiar")
+	local close = Style.Button(frame, "x", 20, function()
+		frame:Hide()
+	end)
+	close:SetPoint("TOPRIGHT", -4, -4)
+	local settings = Style.Button(frame, "Settings", 64, Chat.Settings)
+	settings:SetPoint("RIGHT", close, "LEFT", -4, 0)
+
+	input = CreateFrame("EditBox", nil, frame)
+	input:SetPoint("BOTTOMLEFT", 10, 10)
+	input:SetPoint("BOTTOMRIGHT", -22, 10)
+	input:SetFontObject(ChatFontNormal)
+	input:SetTextInsets(6, 6, 0, 0)
+	focus = Style.Field(input)
+	input:SetScript("OnEditFocusGained", function()
+		focus(true)
+	end)
+	input:SetScript("OnEditFocusLost", function()
+		focus(false)
+	end)
+	input:SetAutoFocus(false)
+	input:SetMaxBytes(MAX_BYTES)
+	input:SetScript("OnEnterPressed", function(self)
+		local text = self:GetText()
+		self:SetText("")
+		self:ClearFocus()
+		Chat.Ask(text)
+	end)
+	input:SetScript("OnEscapePressed", input.ClearFocus)
+	-- A shift-click inserts its link here while the input line has the focus, as into the chat.
+	if ChatFrameUtil and ChatFrameUtil.InsertLink then
+		hooksecurefunc(ChatFrameUtil, "InsertLink", function(link)
+			if type(link) == "string" and input:HasFocus() then
+				input:Insert(link)
+			end
+		end)
+	end
+
+	ask = CreateFrame("Frame", nil, frame)
+	ask:SetPoint("BOTTOMLEFT", input, "TOPLEFT", 0, 6)
+	ask:SetPoint("BOTTOMRIGHT", input, "TOPRIGHT", 12, 6)
+	ask:SetHeight(20)
 
 	history = CreateFrame("ScrollingMessageFrame", nil, frame)
-	history:SetPoint("TOPLEFT", 12, -30)
-	history:SetPoint("BOTTOMRIGHT", -12, 62)
+	history:SetPoint("TOPLEFT", 10, -30)
+	history:SetPoint("BOTTOMRIGHT", ask, "TOPRIGHT", 0, 6)
 	history:SetFontObject(ChatFontNormal)
 	history:SetJustifyH("LEFT")
 	history:SetFading(false)
 	history:SetMaxLines(HISTORY * 2)
-	-- Links show their tooltip on hover and open like in the chat on click; dragging the history
-	-- moves the window.
+	-- Links show their tooltip on hover and open like in the chat on click.
 	history:SetHyperlinksEnabled(true)
 	history:EnableMouse(true)
-	history:RegisterForDrag("LeftButton")
-	history:SetScript("OnDragStart", function()
-		frame:StartMoving()
-	end)
-	history:SetScript("OnDragStop", frame:GetScript("OnDragStop"))
 	history:SetScript("OnHyperlinkClick", function(self, link, text, button)
 		SetItemRef(link, text, button, self)
 	end)
@@ -270,15 +326,11 @@ local function create()
 		end
 	end)
 	status = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	status:SetPoint("BOTTOMLEFT", 14, 40)
-	status:SetPoint("BOTTOMRIGHT", -14, 40)
+	status:SetPoint("LEFT", ask, "LEFT", 2, 0)
+	status:SetPoint("RIGHT", ask, "RIGHT", -2, 0)
 	status:SetJustifyH("LEFT")
 	status:SetWordWrap(false)
 
-	ask = CreateFrame("Frame", nil, frame)
-	ask:SetPoint("BOTTOMLEFT", 12, 34)
-	ask:SetPoint("BOTTOMRIGHT", -12, 34)
-	ask:SetHeight(24)
 	local deny = button("Deny", false)
 	deny:SetPoint("RIGHT")
 	local allow = button("Allow once", true)
@@ -290,33 +342,13 @@ local function create()
 	askText:SetWordWrap(false)
 	ask:Hide()
 
-	input = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
-	input:SetPoint("BOTTOMLEFT", 18, 10)
-	input:SetPoint("BOTTOMRIGHT", -26, 10)
-	input:SetHeight(20)
-	input:SetAutoFocus(false)
-	input:SetMaxBytes(MAX_BYTES)
-	input:SetScript("OnEnterPressed", function(self)
-		local text = self:GetText()
-		self:SetText("")
-		self:ClearFocus()
-		Chat.Ask(text)
-	end)
-	input:SetScript("OnEscapePressed", input.ClearFocus)
-	-- A shift-click inserts its link here while the input line has the focus, as into the chat.
-	if ChatFrameUtil and ChatFrameUtil.InsertLink then
-		hooksecurefunc(ChatFrameUtil, "InsertLink", function(link)
-			if type(link) == "string" and input:HasFocus() then
-				input:Insert(link)
-			end
-		end)
-	end
-
 	local resize = CreateFrame("Button", nil, frame, "PanelResizeButtonTemplate")
 	resize:SetPoint("BOTTOMRIGHT", -2, 2)
 	resize:Init(frame, 300, 180, 1200, 900)
 	resize:HookScript("OnMouseUp", save)
 
+	Style.OnChange(apply)
+	apply()
 	frame:SetShown(db.shown ~= false)
 end
 
@@ -336,6 +368,7 @@ function Chat.Init(saved)
 	db = saved
 	db.history = nil -- one history for all characters, before 0.3.1
 	db.histories = db.histories or {}
+	Style.Init(db)
 	create()
 	Tasks.Spawn("chat", function()
 		while true do

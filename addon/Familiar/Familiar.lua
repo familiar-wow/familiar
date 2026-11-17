@@ -27,8 +27,9 @@ local function collapse()
 	end
 end
 
-local HELP = "/familiar opens and closes the window; /familiar say <question> asks from the chat line; "
-	.. "/familiar allow or deny answers the agent's request; /familiar status shows the transport."
+local HELP = "/familiar opens and closes the window; /familiar config opens its settings; "
+	.. "/familiar say <question> asks from the chat line; /familiar allow or deny answers the agent's "
+	.. "request; /familiar status shows the transport."
 
 SLASH_FAMILIAR1 = "/familiar"
 SlashCmdList.FAMILIAR = function(input)
@@ -40,6 +41,8 @@ SlashCmdList.FAMILIAR = function(input)
 		Chat.Ask(rest)
 	elseif command == "allow" or command == "deny" then
 		Chat.Answer(command == "allow")
+	elseif command == "config" then
+		Chat.Settings()
 	elseif command == "status" then
 		ns.Print(Transport.Status())
 	else

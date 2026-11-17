@@ -58,6 +58,8 @@ const questions: Question[] = [];
 const chat: string[] = [];
 /** Lines the window restored from the saved history. */
 const restored: string[] = [];
+/** The font of the window's history, each time the addon sets it. */
+const fonts: string[] = [];
 /** What the window's font strings showed, each time a test asked. */
 const texts: string[] = [];
 const errors: string[] = [];
@@ -170,6 +172,7 @@ beforeAll(async () => {
 				if (line.startsWith("chat ")) chat.push(line.slice(5));
 				if (line.startsWith("window ")) chat.push(line.slice(7));
 				if (line.startsWith("backfill ")) restored.push(line.slice(9));
+				if (line.startsWith("font ")) fonts.push(line.slice(5));
 				if (line.startsWith("texts ")) texts.push(line.slice(6));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
 			}
@@ -381,7 +384,44 @@ test("messages go up and replies come down, across /reload, a character switch a
 	expect(events.filter((e) => e.name === "lane-broken")).toEqual([]);
 }, 120_000);
 
+// Every test below leaves the game connected. Run alone (-t), a test starts while the addon still
+// says hello, so each waits for the first connection.
 const CONNECTED = /Connected to the test app\.$/;
+
+test("the window's settings apply at once, survive /reload and reset", async () => {
+	/** Waits until the history got `font` after the first `from` times. */
+	const shows = async (font: string, from = 0) => {
+		const deadline = Date.now() + 5_000;
+		while (!fonts.slice(from).includes(font)) {
+			if (Date.now() > deadline)
+				throw new Error(`no font ${font}; fonts: ${fonts.slice(from)}`);
+			await Bun.sleep(20);
+		}
+	};
+	await waitFor(CONNECTED, 0);
+	// The window starts with the client's chat font.
+	expect(fonts[0]).toBe("Fonts\\ARIALN.TTF 14 plain");
+
+	command("slash /familiar config");
+	command("slide Size 18");
+	await shows("Fonts\\ARIALN.TTF 18 plain");
+	command("click Outline");
+	command("click Font");
+	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE");
+
+	const reloaded = fonts.length;
+	const at = chat.length;
+	command("reload");
+	await shows("Fonts\\FRIZQT__.TTF 18 OUTLINE", reloaded);
+	expect(fonts[reloaded]).toBe("Fonts\\FRIZQT__.TTF 18 OUTLINE");
+
+	command("slash /familiar config");
+	command("click Reset");
+	await shows("Fonts\\ARIALN.TTF 14 plain", reloaded + 1);
+	// The addon says hello again after /reload; the next test needs the connection.
+	await waitFor(CONNECTED, at);
+	expect(errors).toEqual([]);
+});
 
 test("a helper that something else switched on costs one attempt, not the connection", async () => {
 	await waitFor(CONNECTED, 0);

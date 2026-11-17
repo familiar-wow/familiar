@@ -13,12 +13,15 @@ So far it holds the chat window and the transport to the app ([ADR 0005](../docs
 | `Familiar/Bank.lua`      | down: reads a packet from the glyph widths of a font                    |
 | `Familiar/Transport.lua` | hello and welcome, messages up with confirmation, messages down         |
 | `Familiar/Links.lua`     | links from the player to the brain and from the brain back to the game  |
+| `Familiar/Style.lua`     | the window's look, the player's settings for it and the settings panel  |
 | `Familiar/Chat.lua`      | the window: history, input line, status, Allow and Deny                 |
 | `Familiar/Familiar.lua`  | saved state, events, the frame loop and `/familiar`                     |
 
 The app installs the addon together with the helpers, fonts and doorbell files; see [core](../core/README.md).
 
-`/familiar` opens and closes the window; it can be moved and resized, and keeps its place and the last 200 lines of each character, who also has a session of their own with the agent. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. It stops waiting once the app's patience is over, which the welcome names, and says that the question is lost. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. If the agent offers no way to allow a request once, the app denies it and the window says why. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
+`/familiar` opens and closes the window; it can be moved by its title bar and resized, and keeps its place and the last 200 lines of each character, who also has a session of their own with the agent. Enter sends what is typed in its input line, and `/familiar say <question>` asks from the game's chat line. While the brain works, the status line counts the seconds and names the tool the agent calls. It stops waiting once the app's patience is over, which the welcome names, and says that the question is lost. When the agent asks for permission, the window opens and shows _Allow once_ and _Deny_; `/familiar allow` and `/familiar deny` answer too. If the agent offers no way to allow a request once, the app denies it and the window says why. Familiar's own messages go to the window, and to the chat frame while the window is closed. `/familiar status` shows the state of the transport.
+
+**Look.** _Settings_ in the title bar, or `/familiar config`, opens a panel next to the window: font, size, outline, how opaque the background is, scale and accent color. The settings apply at once and hold for all characters; _Reset_ brings the defaults back. With _Select text to copy_ on, dragging over the history selects text, and releasing the mouse button copies it to the clipboard.
 
 Each question starts with a header about the character (`Chat.lua`, `header`). The window reads nothing from the game's chat.
 
