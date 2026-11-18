@@ -1,6 +1,6 @@
 # ADR 0007: The `wow` server — MCP over HTTP from the app
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-18)
 - **Date:** 2026-11-17
 - **Deciders:** @Smidelis, @hermes-smidelis
 
