@@ -2,7 +2,7 @@
 
 The companion core: transport to the addon, game-state cache, the MCP servers `wow` and `memory`, the built-in agent and the ACP client. It is written in TypeScript and compiled with Bun into a single binary that the desktop app starts. See [ADR 0001](../docs/adr/0001-architecture-addon-companion-and-brains.md) and [ADR 0002](../docs/adr/0002-desktop-app-tauri-shell-with-typescript-core.md).
 
-So far it holds the transport ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)), the bridge to agents that speak ACP, and `familiar`, a command-line app for development builds until the desktop app exists (FAM-6).
+So far it holds the transport ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)), the bridge to agents that speak ACP, the `wow` server with its first tool ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)), and `familiar`, a command-line app for development builds until the desktop app exists (FAM-6).
 
 | Path                         | Job                                                                       |
 | ---------------------------- | ------------------------------------------------------------------------- |
@@ -13,6 +13,9 @@ So far it holds the transport ([ADR 0005](../docs/adr/0005-transport-addons-txt-
 | `src/transport/transport.ts` | the app's end: confirms, welcomes and sends                               |
 | `src/brain/chat.ts`          | the question from the addon, the prompt for the brain, the answer's limit |
 | `src/brain/acp.ts`           | the bridge to an ACP agent: one session per character                     |
+| `src/game.ts`                | what the app knows about the game, for the tools                          |
+| `src/mcp/server.ts`          | the MCP server `wow`: HTTP on `127.0.0.1`, guarded by a token             |
+| `src/mcp/tools.ts`           | the tools the `wow` server offers                                         |
 | `src/settings.ts`            | the settings file                                                         |
 | `src/wow/client.ts`          | finds the client on Windows and under Wine or Proton, and its process     |
 | `src/wow/install.ts`         | installs the addon, its helpers, fonts and doorbells                      |
@@ -43,6 +46,9 @@ On the first start, `familiar` writes its settings with the defaults: `%APPDATA%
 		"command": ["hermes", "acp"],
 		"permissions": "ask",
 		"timeout": 120
+	},
+	"mcp": {
+		"port": 27495
 	}
 }
 ```
@@ -65,11 +71,35 @@ On the first start, `familiar` writes its settings with the defaults: `%APPDATA%
 
 Hermes takes `--profile <name>` before `acp` for another profile. Codex and Claude Code speak ACP through adapters from the ACP project, which `npx` starts until Familiar ships them itself. Claude Code works only with an Anthropic API key in `ANTHROPIC_API_KEY`, not with a Claude subscription (ADR 0001).
 
-For an agent on another host, set `cwd` to a folder on that host; Familiar itself starts `ssh` in its settings folder. SSH runs the command without your login profile, so give the agent's full path. Sign in with a key: Familiar cannot answer a password prompt, and `-o BatchMode=yes` after `ssh` turns a missing key into an error message instead of a wait.
+For an agent on another host, set `cwd` to a folder on that host; Familiar itself starts `ssh` in its settings folder. SSH runs the command without your login profile, so give the agent's full path. Sign in with a key: Familiar cannot answer a password prompt, and `-o BatchMode=yes` after `ssh` turns a missing key into an error message instead of a wait. Such an agent needs two more options to reach the game tools, see below.
 
 `familiar` starts the agent at the first question and keeps it running. While the agent works, the console shows each tool it calls, such as `> web_search: …`, and each one that fails. The game window shows the tool too, at most one every four seconds, because each line costs a font of the bank. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Answers longer than four fonts of the bank (1968 bytes) are cut. If no answer reaches the game within the timeout and 30 seconds more, as when `familiar` was started again meanwhile, the window says that the question is lost and stops waiting.
 
 Each character gets its own session in the agent, and it lasts as long as `familiar` runs: after `/reload` or a restart of WoW, the conversation goes on where it stopped. Another character starts its own session, and switching back continues the first one. Starting `familiar` again starts a new session, and so does the agent's next start after it quit or ignored a timeout. The agent keeps its sessions as it keeps any other, so Hermes, for example, lists them with the sessions from its other clients. The game window keeps the last 200 lines of each character, like its session, even after a new start, so it may then show lines the agent no longer knows.
+
+## Game tools
+
+`familiar` serves what it knows about the game to the agent as tools, through an MCP server named `wow` ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)). It hands the server's address and a token to the agent with each new session, so there is nothing to install or set up in the agent. An agent that refuses a session with the server gets one without it, and the game window says so.
+
+| Tool        | Returns                                                                                                     |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `character` | name, realm, level, race, class, faction, zone, subzone and game language, as of the player's last question |
+
+This first tool returns what each question carries anyway; it shows that the agent reaches the game. Equipment, bags, talents and quests follow (FAM-3). The tools only read: none of them acts in the game or on your computer.
+
+The server listens on `127.0.0.1` only, on port 27495; `mcp.port` in the settings changes it. The token is new at every start. The server refuses requests without the token, requests from a browser and requests under another host name. If the port is in use, `familiar` says so and runs on without the tools.
+
+An agent on another host reaches the server only if that port on its host leads back to yours. Add two options to the `ssh` command:
+
+```json
+"command": ["ssh", "-o", "ExitOnForwardFailure=yes", "-R", "127.0.0.1:27495:127.0.0.1:27495", "<host>", "~/.local/bin/hermes", "acp"]
+```
+
+`-R` forwards port 27495 on the agent's host to `familiar`. `ExitOnForwardFailure=yes` makes `ssh` stop if that port is taken there; without it the agent would start anyway and send the token to whatever listens on the port. Every user on the agent's host can connect to the forwarded port, and the token keeps them out. Without `-R` the agent answers from the question alone, and after the first answer of a session the console says that the agent has not connected to the game tools.
+
+The log has an event for each client that connects (`mcp-client`), each tool call (`mcp-call`) and the first refused request of each kind (`mcp-refused`).
+
+Hermes and Codex took the server and called the tool, both on Linux and on the same machine as `familiar`. Nothing of this has run on Windows yet.
 
 ## How the transport works
 

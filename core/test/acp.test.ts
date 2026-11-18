@@ -4,7 +4,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AcpBrain } from "../src/brain/acp.ts";
+import { Game } from "../src/game.ts";
 import type { Log } from "../src/log.ts";
+import { type McpServer, serveMcp } from "../src/mcp/server.ts";
+import { wowTools } from "../src/mcp/tools.ts";
 import type { Settings } from "../src/settings.ts";
 
 const FAKE = [process.execPath, join(import.meta.dir, "fake-agent.ts")];
@@ -15,18 +18,35 @@ const log: Log = {
 	say: (text) => void said.push(text),
 };
 const brains: AcpBrain[] = [];
+const servers: McpServer[] = [];
 
 function brain(
 	settings: Partial<Settings["brain"]> = {},
 	folder = tmpdir(),
+	wow?: McpServer,
 ): AcpBrain {
 	const created = new AcpBrain(
 		{ command: FAKE, permissions: "deny", timeout: 10, ...settings },
-		{ folder, log, version: "0.0.0-test" },
+		{ folder, log, version: "0.0.0-test", wow },
 	);
 	brains.push(created);
 	return created;
 }
+
+/** The `wow` server on a free port, with what the game showed last. */
+function wowServer(game = new Game()): McpServer {
+	const server = serveMcp({
+		port: 0,
+		tools: wowTools(game),
+		version: "0.0.0-test",
+		log,
+	});
+	servers.push(server);
+	return server;
+}
+const sessions = () =>
+	events.filter((e) => e.name === "brain-session").map((e) => e.data);
+const NOT_CONNECTED = /^The agent has not connected to the game tools/;
 
 const tools: string[] = [];
 const notes: string[] = [];
@@ -52,6 +72,7 @@ const starts = () => events.filter((e) => e.name === "brain-start").length;
 
 afterEach(() => {
 	for (const created of brains.splice(0)) created.stop();
+	for (const server of servers.splice(0)) server.stop();
 	events.length = 0;
 	said.length = 0;
 	tools.length = 0;
@@ -90,6 +111,73 @@ test("names the folder an agent refuses and keeps the agent", async () => {
 	expect(await ask(fake, "hello")).toBe(refused);
 	expect(await ask(fake, "hello")).toBe(refused);
 	expect(starts()).toBe(1);
+});
+
+test("hands the game tools to each session, and the agent calls one", async () => {
+	const game = new Game();
+	game.see({ name: "Hero", realm: "Realm", level: "30", zone: "Elwynn" });
+	const fake = brain({}, tmpdir(), wowServer(game));
+	const answer = JSON.parse(await ask(fake, "wow"));
+	expect(answer).toMatchObject({
+		name: "Hero",
+		realm: "Realm",
+		level: "30",
+		zone: "Elwynn",
+	});
+	expect(Date.parse(answer.asOf)).toBeGreaterThan(Date.now() - 60_000);
+	expect(sessions()).toEqual([{ session: "session 1", wow: true }]);
+	expect(
+		events.filter((e) => e.name === "mcp-client").map((e) => e.data?.client),
+	).toEqual([{ name: "fake-agent", version: "1.0.0" }]);
+	expect(said.filter((line) => NOT_CONNECTED.test(line))).toEqual([]);
+});
+
+test("says once per session that the agent never connected to the game tools", async () => {
+	const server = wowServer();
+	const fake = brain({}, tmpdir(), server);
+	await ask(fake, "hello");
+	await ask(fake, "hello");
+	expect(said.filter((line) => NOT_CONNECTED.test(line))).toEqual([
+		`The agent has not connected to the game tools at ${server.url}. If it runs on another machine, add -R 127.0.0.1:${server.port}:127.0.0.1:${server.port} to the ssh command.`,
+	]);
+	await ask(fake, "hello", "Alt");
+	expect(said.filter((line) => NOT_CONNECTED.test(line))).toHaveLength(2);
+});
+
+test("gives an agent that refuses the game tools a session without them, and says so once", async () => {
+	const fake = brain(
+		{ cwd: join(tmpdir(), "no-tools") },
+		tmpdir(),
+		wowServer(),
+	);
+	expect(await ask(fake, "wow")).toBe("no wow server");
+	const note =
+		"The agent did not take Familiar's game tools (Invalid params (no MCP over HTTP)). It answers without them.";
+	expect(notes).toEqual([note]);
+	expect(await ask(fake, "hello")).toBe("session 1: hello");
+	expect(notes).toEqual([note]);
+	expect(sessions()).toEqual([
+		{
+			session: "session 1",
+			wow: false,
+			refused: "Invalid params (no MCP over HTTP)",
+		},
+	]);
+	// It was told why it has no tools; the hint about ssh would be wrong.
+	expect(said.filter((line) => NOT_CONNECTED.test(line))).toEqual([]);
+	expect(starts()).toBe(1);
+});
+
+test("still names a refused folder when the game tools are on offer", async () => {
+	const fake = brain(
+		{ cwd: "C:\\Users\\player\\missing" },
+		tmpdir(),
+		wowServer(),
+	);
+	expect(await ask(fake, "hello")).toBe(
+		"The agent could not open a session in C:\\Users\\player\\missing: Internal error (invalid_params). If it runs on another host, set brain.cwd to a folder there.",
+	);
+	expect(notes).toEqual([]);
 });
 
 test("reports the agent's error, not its last log line, and keeps the agent", async () => {

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Conversation, STATUS_MS } from "./conversation.ts";
+import { Game } from "./game.ts";
 import type { Log } from "./log.ts";
 
 const log: Log = { event: () => {}, say: () => {} };
@@ -22,6 +23,7 @@ test(
 			},
 			(body) => void sent.push(new TextDecoder().decode(body)),
 			log,
+			new Game(),
 		);
 		conversation.receive(encode("question\nname: Hero\n\nwhat now?"));
 		await Bun.sleep(10);
@@ -48,6 +50,7 @@ test("sends a note at once", async () => {
 		},
 		(body) => void sent.push(new TextDecoder().decode(body)),
 		log,
+		new Game(),
 	);
 	conversation.receive(encode("question\n\nclean up"));
 	await Bun.sleep(10);
@@ -68,6 +71,7 @@ test("hands a permission request to the player and the answer back to the brain"
 		},
 		(body) => void sent.push(new TextDecoder().decode(body)),
 		log,
+		new Game(),
 	);
 	conversation.receive(encode("question\n\nclean up"));
 	await Bun.sleep(10);
@@ -75,4 +79,27 @@ test("hands a permission request to the player and the answer back to the brain"
 	conversation.receive(encode("permission\n1\ndeny"));
 	await Bun.sleep(10);
 	expect(sent.at(-1)).toBe("answer\ndenied");
+});
+
+test("notes the character of each question for the game tools", async () => {
+	const game = new Game();
+	const conversation = new Conversation(
+		{ ask: async () => "done" },
+		() => {},
+		log,
+		game,
+	);
+	expect(game.character).toBeUndefined();
+	conversation.receive(
+		encode("question\nname: Hero\nrealm: Realm\nlevel: 30\n\nwhat now?"),
+	);
+	await Bun.sleep(10);
+	expect(game.character?.character).toEqual({
+		name: "Hero",
+		realm: "Realm",
+		level: "30",
+	});
+	conversation.receive(encode("question\nname: Alt\n\nand now?"));
+	await Bun.sleep(10);
+	expect(game.character?.character).toEqual({ name: "Alt" });
 });

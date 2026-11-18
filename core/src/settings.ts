@@ -24,6 +24,15 @@ const Settings = z.strictObject({
 			cwd: z.string().min(1).optional(),
 		})
 		.prefault({}),
+	mcp: z
+		.strictObject({
+			/**
+			 * The port of the `wow` server on 127.0.0.1 (ADR 0007). It is fixed so that the command
+			 * for an agent on another machine can name it in `ssh -R`.
+			 */
+			port: z.number().int().min(1024).max(65535).default(27495),
+		})
+		.prefault({}),
 });
 export type Settings = z.infer<typeof Settings>;
 

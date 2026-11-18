@@ -1,5 +1,7 @@
 // A stand-in ACP agent for acp.test.ts. It logs to stderr as it works, as Hermes does, and
-// refuses sessions in folders whose path contains "missing". The question picks what it does:
+// refuses sessions in folders whose path contains "missing", and in folders whose path contains
+// "no-tools" if the session comes with MCP servers. The question picks what it does:
+//   wow         calls the tool "character" of the MCP server it got and answers with the result
 //   permission  asks to run a command and says which option it got
 //   always      the same, but offers no "allow once"
 //   where       names the session's folder
@@ -17,6 +19,8 @@ import {
 } from "@agentclientprotocol/sdk";
 
 const folders = new Map<string, string>();
+/** The MCP server over HTTP that each session got: its URL and headers. */
+const servers = new Map<string, { url: string; headers: [string, string][] }>();
 const cancelled = new Map<string, () => void>();
 const log = (line: string) =>
 	process.stderr.write(`2026-11-15 22:47:25 [INFO] fake-agent: ${line}\n`);
@@ -40,8 +44,16 @@ agent({ name: "fake-agent" })
 		log(`new session in ${params.cwd}`);
 		if (params.cwd.includes("missing"))
 			throw RequestError.internalError({ details: "invalid_params" });
+		if (params.cwd.includes("no-tools") && params.mcpServers.length > 0)
+			throw RequestError.invalidParams({ details: "no MCP over HTTP" });
 		const sessionId = `session ${folders.size + 1}`;
 		folders.set(sessionId, params.cwd);
+		for (const server of params.mcpServers)
+			if ("type" in server && server.type === "http")
+				servers.set(sessionId, {
+					url: server.url,
+					headers: server.headers.map((h) => [h.name, h.value]),
+				});
 		return { sessionId };
 	})
 	.onNotification(methods.agent.session.cancel, ({ params }) => {
@@ -69,6 +81,39 @@ agent({ name: "fake-agent" })
 		}
 		if (question === "fail")
 			throw RequestError.internalError({ details: "model unavailable" });
+		if (question === "wow") {
+			const server = servers.get(sessionId);
+			if (!server) {
+				await say("no wow server");
+				return { stopReason: "end_turn" };
+			}
+			const rpc = async (id: number, method: string, params: object) => {
+				const response = await fetch(server.url, {
+					method: "POST",
+					headers: [
+						["Content-Type", "application/json"],
+						["Accept", "application/json, text/event-stream"],
+						...server.headers,
+					],
+					body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+				});
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				return (await response.json()) as {
+					result: { content: { text: string }[] };
+				};
+			};
+			await rpc(1, "initialize", {
+				protocolVersion: "2025-06-18",
+				capabilities: {},
+				clientInfo: { name: "fake-agent", version: "1.0.0" },
+			});
+			const called = await rpc(2, "tools/call", {
+				name: "character",
+				arguments: {},
+			});
+			await say(called.result.content[0]?.text ?? "");
+			return { stopReason: "end_turn" };
+		}
 		if (question === "where") {
 			await say(folders.get(sessionId) ?? "");
 			return { stopReason: "end_turn" };

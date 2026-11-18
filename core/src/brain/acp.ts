@@ -5,7 +5,8 @@
 //
 // The player sets the agent up in the agent itself. Familiar only bridges: it offers no file
 // system or terminal of its own and answers each permission request once, as its settings say:
-// deny, allow, or ask the player in game.
+// deny, allow, or ask the player in game. With each session it hands the agent the `wow` server,
+// which serves the game's state as tools (ADR 0007).
 import {
 	type ActiveSession,
 	type ClientConnection,
@@ -17,6 +18,7 @@ import {
 	type StopReason,
 } from "@agentclientprotocol/sdk";
 import type { Log } from "../log.ts";
+import type { McpServer } from "../mcp/server.ts";
 import type { Settings } from "../settings.ts";
 import { type Brain, prompt, type Question, type Turn } from "./chat.ts";
 
@@ -41,6 +43,8 @@ export interface AcpBrainOptions {
 	log: Log;
 	/** Familiar's version, for the agent. */
 	version: string;
+	/** The `wow` server, which every session gets; none if it could not start. */
+	wow?: Pick<McpServer, "url" | "port" | "token" | "served">;
 }
 
 export class AcpBrain implements Brain {
@@ -91,9 +95,11 @@ export class AcpBrain implements Brain {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let killer: ReturnType<typeof setTimeout> | undefined;
 		const folder = this.settings.cwd ?? this.options.folder;
+		const served = this.options.wow?.served();
 		let session: ActiveSession;
+		let fresh: boolean;
 		try {
-			session = await this.session(agent, question, folder);
+			({ session, fresh } = await this.session(agent, question, folder));
 		} catch (error) {
 			// The agent runs on; it only refused this folder, which happens when it runs on another
 			// host and the settings name no folder there.
@@ -135,6 +141,7 @@ export class AcpBrain implements Brain {
 				chars: text.length,
 			});
 			reply(answerFor(stopReason, text));
+			if (fresh) this.checkWow(session, served);
 		} catch (error) {
 			// An error the agent answered with leaves it running with its sessions. If it quit or
 			// broke the protocol, the next question starts a new one. The reason comes first, so the
@@ -250,20 +257,73 @@ export class AcpBrain implements Brain {
 		]);
 	}
 
-	/** One session per character; the realm keeps two characters of the same name apart. */
+	/**
+	 * One session per character; the realm keeps two characters of the same name apart. `fresh`
+	 * says that the session is new and got the `wow` server.
+	 */
 	private async session(
 		agent: Agent,
 		{ character }: Question,
 		folder: string,
-	): Promise<ActiveSession> {
+	): Promise<{ session: ActiveSession; fresh: boolean }> {
 		const key = `${character.name ?? ""}-${character.realm ?? ""}`;
-		let session = agent.sessions.get(key);
-		if (!session) {
-			session = await agent.connection.agent.buildSession(folder).start();
-			agent.sessions.set(key, session);
-			this.options.log.event("brain-session", { session: session.sessionId });
+		const known = agent.sessions.get(key);
+		if (known) return { session: known, fresh: false };
+		const { log, wow } = this.options;
+		const start = (withWow: boolean) =>
+			agent.connection.agent
+				.buildSession({
+					cwd: folder,
+					mcpServers:
+						withWow && wow
+							? [
+									{
+										type: "http",
+										name: "wow",
+										url: wow.url,
+										headers: [
+											{ name: "Authorization", value: `Bearer ${wow.token}` },
+										],
+									},
+								]
+							: [],
+				})
+				.start();
+		let session: ActiveSession;
+		let refused: string | undefined;
+		try {
+			session = await start(true);
+		} catch (error) {
+			if (!wow) throw error;
+			// Familiar hands the server to every agent, whatever it advertises (ADR 0007). One that
+			// cannot take it gets a session without; if that fails too, the server was not why.
+			session = await start(false);
+			refused = message(error);
+			this.turn?.onNote(
+				`The agent did not take Familiar's game tools (${refused}). It answers without them.`,
+			);
 		}
-		return session;
+		agent.sessions.set(key, session);
+		log.event("brain-session", {
+			session: session.sessionId,
+			...(wow ? { wow: refused === undefined } : {}),
+			...(refused === undefined ? {} : { refused }),
+		});
+		return { session, fresh: wow !== undefined && refused === undefined };
+	}
+
+	/**
+	 * After a new session's first answer: has the agent connected to the `wow` server? If not,
+	 * nothing else says so. The usual reason is an agent on another machine that the server's
+	 * port does not lead back from.
+	 */
+	private checkWow(session: ActiveSession, before: number | undefined): void {
+		const { log, wow } = this.options;
+		if (!wow || wow.served() !== before) return;
+		log.event("mcp-unused", { session: session.sessionId });
+		log.say(
+			`The agent has not connected to the game tools at ${wow.url}. If it runs on another machine, add -R 127.0.0.1:${wow.port}:127.0.0.1:${wow.port} to the ssh command.`,
+		);
 	}
 }
 

@@ -8,7 +8,10 @@ import pkg from "../package.json" with { type: "json" };
 import { AcpBrain } from "./brain/acp.ts";
 import { Conversation } from "./conversation.ts";
 import { echoBrain } from "./echo.ts";
+import { Game } from "./game.ts";
 import { fileLog } from "./log.ts";
+import { type McpServer, serveMcp } from "./mcp/server.ts";
+import { wowTools } from "./mcp/tools.ts";
 import { loadSettings, type Settings, settingsFolder } from "./settings.ts";
 import { Transport } from "./transport/transport.ts";
 import {
@@ -109,6 +112,24 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,
 			);
 	}
+	// The game's state as tools for the agent (ADR 0007). The echo has no use for them.
+	const game = new Game();
+	let wow: McpServer | undefined;
+	if (!options.echo) {
+		const { port } = settings.mcp;
+		try {
+			wow = serveMcp({ port, tools: wowTools(game), version: VERSION, log });
+			console.log(`Tools:  ${wow.url}, handed to the agent with each session`);
+		} catch (error) {
+			const taken = (error as { code?: string }).code === "EADDRINUSE";
+			log.event("mcp-error", { port, error: String(error) });
+			console.log(
+				taken
+					? `\n!! Port ${port} is in use, so the agent gets no game tools. If another familiar is\n!! running, close it: two of them both answer the game. Otherwise set mcp.port in\n!! ${settingsFile}.\n`
+					: `\n!! The game tools could not start on port ${port}, so the agent gets none: ${error instanceof Error ? error.message : error}\n`,
+			);
+		}
+	}
 	if (fresh) console.log("Addon installed.");
 	else if (result.added + result.updated > 0) console.log("Addon updated.");
 	if (running && result.added > 0)
@@ -123,6 +144,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		folder: dirname(settingsFile),
 		log,
 		version: VERSION,
+		wow,
 	});
 	const transport = new Transport({
 		paths,
@@ -136,6 +158,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		options.echo ? echoBrain : brain,
 		(body) => transport.send(body),
 		log,
+		game,
 	);
 	transport.onMessage((body, { hello }) => {
 		if (hello)
@@ -147,6 +170,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 	const stop = () => {
 		transport.stop();
 		brain.stop();
+		wow?.stop();
 		process.exit(0);
 	};
 	process.on("SIGINT", stop);
