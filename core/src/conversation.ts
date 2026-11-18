@@ -8,6 +8,7 @@ import {
 	parseUp,
 	type Question,
 } from "./brain/chat.ts";
+import type { Game } from "./game.ts";
 import type { Log } from "./log.ts";
 import { DOWN_PAYLOAD } from "./transport/codec.ts";
 
@@ -28,6 +29,8 @@ export class Conversation {
 		private readonly brain: Brain,
 		private readonly send: (body: Uint8Array) => void,
 		private readonly log: Log,
+		/** Learns the character from each question's header, for the `wow` server's tools. */
+		private readonly game: Game,
 	) {}
 
 	/** Handles a message from the addon. */
@@ -45,6 +48,7 @@ export class Conversation {
 
 	private async answer(question: Question): Promise<void> {
 		this.log.say(`Question: ${question.text}`);
+		this.game.see(question.character);
 		const asked = performance.now();
 		const status = throttle(
 			(title) => this.down({ kind: "status", text: clip(title, MAX_STATUS) }),

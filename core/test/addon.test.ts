@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Question } from "../src/brain/chat.ts";
 import { Conversation } from "../src/conversation.ts";
 import { echoBrain } from "../src/echo.ts";
+import { Game } from "../src/game.ts";
 import type { Log } from "../src/log.ts";
 import { Transport } from "../src/transport/transport.ts";
 import { FILES, TOC } from "../src/wow/addon.ts";
@@ -133,6 +134,7 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		},
 		(body) => transport.send(body),
 		log,
+		new Game(),
 	);
 	transport.onMessage((body, { hello }) => {
 		if (!hello) conversation.receive(body);

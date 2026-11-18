@@ -6,8 +6,8 @@
 //         status      the tool the agent calls now
 //         note        something the player should know about the question, such as a refusal
 //         permission  the request's number, a newline, what the agent wants to do
-// The brain gets the question with the header, as ADR 0001 has it: everything else it will fetch
-// through tools (P2).
+// The brain gets the question with the header, as ADR 0001 has it: everything else it fetches
+// through the tools of the `wow` server (mcp/tools.ts).
 
 const FIELDS = [
 	"name",
