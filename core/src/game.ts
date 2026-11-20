@@ -4,7 +4,18 @@
 // transport (ADR 0001).
 import type { Character } from "./brain/chat.ts";
 
-export type Slice = "eq" | "bags" | "quests" | "talents";
+export type Slice =
+	| "eq"
+	| "bags"
+	| "quests"
+	| "talents"
+	| "stats"
+	| "prof"
+	| "rep"
+	| "spells"
+	| "bank"
+	| "merchant"
+	| "trainer";
 
 export interface EquipmentItem {
 	slot: string;
@@ -78,11 +89,127 @@ export interface TalentsState {
 	truncated?: boolean;
 }
 
+export interface StatsState {
+	healthMax?: number;
+	powerType?: string;
+	powerMax?: number;
+	str?: number;
+	agi?: number;
+	sta?: number;
+	int?: number;
+	spi?: number;
+	armor?: number;
+	meleeAP?: number;
+	rangedAP?: number;
+	meleeCrit?: number;
+	rangedCrit?: number;
+	spellCrit?: number;
+	spellDamage?: number;
+	spellHealing?: number;
+	dodge?: number;
+	parry?: number;
+	block?: number;
+	defense?: number;
+	truncated?: boolean;
+}
+
+export interface SkillEntry {
+	id: number;
+	name: string;
+	category?: string;
+	rank: number;
+	maxRank: number;
+	modifier?: number;
+}
+
+export interface ProfessionsState {
+	skills: SkillEntry[];
+	truncated?: boolean;
+}
+
+export interface FactionEntry {
+	id: number;
+	name: string;
+	category?: string;
+	reaction: number;
+	standingLabel: string;
+	current: number;
+	max: number;
+	watched: boolean;
+}
+
+export interface ReputationState {
+	factions: FactionEntry[];
+	truncated?: boolean;
+}
+
+export interface SpellEntry {
+	id: number;
+	name: string;
+	category?: string;
+	passive: boolean;
+	subName?: string;
+}
+
+export interface SpellsState {
+	spells: SpellEntry[];
+	truncated?: boolean;
+}
+
+export interface BankState {
+	available: boolean;
+	seenAt?: string;
+	freeSlots?: number;
+	totalSlots?: number;
+	items: BagItem[];
+	truncated?: boolean;
+}
+
+export interface MerchantItem {
+	id?: number;
+	name: string;
+	price: { copper: number; formatted: string };
+	stackCount: number;
+	numAvailable: number;
+	usable: boolean;
+}
+
+export interface MerchantState {
+	available: boolean;
+	seenAt?: string;
+	npc?: string;
+	items: MerchantItem[];
+	truncated?: boolean;
+}
+
+export interface TrainerService {
+	name: string;
+	status: string;
+	requiredLevel: number;
+	cost: { copper: number; formatted: string };
+	subText?: string;
+}
+
+export interface TrainerState {
+	available: boolean;
+	seenAt?: string;
+	npc?: string;
+	services: TrainerService[];
+	truncated?: boolean;
+}
+
 export interface SliceMap {
 	eq: EquipmentState;
 	bags: BagsState;
 	quests: QuestsState;
 	talents: TalentsState;
+	stats: StatsState;
+	prof: ProfessionsState;
+	rep: ReputationState;
+	spells: SpellsState;
+	bank: BankState;
+	merchant: MerchantState;
+	trainer: TrainerState;
 }
 
 export type SliceResult<K extends Slice> = SliceMap[K] & {
@@ -257,16 +384,50 @@ function linesOf(payload: string): string[] {
 }
 
 const optInt = (s: string | undefined): number | undefined =>
-	s && /^\d+$/.test(s) ? Number(s) : undefined;
+	s && /^-?\d+$/.test(s) ? Number(s) : undefined;
+
+const optNum = (s: string | undefined): number | undefined =>
+	s && /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : undefined;
+
+const REACTION_LABELS: Record<number, string> = {
+	1: "Hated",
+	2: "Hostile",
+	3: "Unfriendly",
+	4: "Neutral",
+	5: "Friendly",
+	6: "Honored",
+	7: "Revered",
+	8: "Exalted",
+};
 
 export function parseSlice<K extends Slice>(
 	slice: K,
 	payload: string,
 ): SliceMap[K] {
-	if (slice === "eq") return parseEquipment(payload) as SliceMap[K];
-	if (slice === "bags") return parseBags(payload) as SliceMap[K];
-	if (slice === "quests") return parseQuests(payload) as SliceMap[K];
-	return parseTalents(payload) as SliceMap[K];
+	switch (slice) {
+		case "eq":
+			return parseEquipment(payload) as SliceMap[K];
+		case "bags":
+			return parseBags(payload) as SliceMap[K];
+		case "quests":
+			return parseQuests(payload) as SliceMap[K];
+		case "talents":
+			return parseTalents(payload) as SliceMap[K];
+		case "stats":
+			return parseStats(payload) as SliceMap[K];
+		case "prof":
+			return parseProfessions(payload) as SliceMap[K];
+		case "rep":
+			return parseReputation(payload) as SliceMap[K];
+		case "spells":
+			return parseSpells(payload) as SliceMap[K];
+		case "bank":
+			return parseBank(payload) as SliceMap[K];
+		case "merchant":
+			return parseMerchant(payload) as SliceMap[K];
+		case "trainer":
+			return parseTrainer(payload) as SliceMap[K];
+	}
 }
 
 export function parseEquipment(payload: string): EquipmentState {
@@ -413,4 +574,240 @@ export function parseTalents(payload: string): TalentsState {
 	const result: TalentsState = { unspent, spent, trees, talents };
 	if (truncated) result.truncated = true;
 	return result;
+}
+
+const NUMERIC_STAT_KEYS = new Set([
+	"healthMax",
+	"powerMax",
+	"str",
+	"agi",
+	"sta",
+	"int",
+	"spi",
+	"armor",
+	"meleeAP",
+	"rangedAP",
+	"meleeCrit",
+	"rangedCrit",
+	"spellCrit",
+	"spellDamage",
+	"spellHealing",
+	"dodge",
+	"parry",
+	"block",
+	"defense",
+]);
+
+export function parseStats(payload: string): StatsState {
+	const out: Record<string, number | string | boolean> = {};
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			out.truncated = true;
+			continue;
+		}
+		const [key, value] = line.split("\t");
+		if (!key || value === undefined) continue;
+		if (key === "powerType") out.powerType = value;
+		else if (NUMERIC_STAT_KEYS.has(key)) {
+			const n = optNum(value);
+			if (n !== undefined) out[key] = n;
+		}
+	}
+	return out as StatsState;
+}
+
+export function parseProfessions(payload: string): ProfessionsState {
+	const skills: SkillEntry[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] !== "s") continue;
+		const id = optInt(parts[1]) ?? 0;
+		const mod = optInt(parts[5]) ?? 0;
+		const entry: SkillEntry = {
+			id,
+			name: parts[6] ?? "",
+			...(parts[2] ? { category: parts[2] } : {}),
+			rank: Number(parts[3] ?? 0) || 0,
+			maxRank: Number(parts[4] ?? 0) || 0,
+			...(mod !== 0 ? { modifier: mod } : {}),
+		};
+		if (entry.name) skills.push(entry);
+	}
+	return truncated ? { skills, truncated: true } : { skills };
+}
+
+export function parseReputation(payload: string): ReputationState {
+	const factions: FactionEntry[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] !== "r") continue;
+		const id = optInt(parts[1]) ?? 0;
+		const reaction = optInt(parts[3]) ?? 0;
+		const standing = optInt(parts[4]) ?? 0;
+		const min = optInt(parts[5]) ?? 0;
+		const max = optInt(parts[6]) ?? 0;
+		const name = parts[8] ?? "";
+		if (!name) continue;
+		factions.push({
+			id,
+			name,
+			...(parts[2] ? { category: parts[2] } : {}),
+			reaction,
+			standingLabel: REACTION_LABELS[reaction] ?? `Reaction ${reaction}`,
+			current: standing - min,
+			max: Math.max(0, max - min),
+			watched: parts[7] === "1",
+		});
+	}
+	return truncated ? { factions, truncated: true } : { factions };
+}
+
+export function parseSpells(payload: string): SpellsState {
+	const spells: SpellEntry[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] !== "sp") continue;
+		const id = optInt(parts[1]);
+		const name = parts[5] ?? "";
+		if (id === undefined || !name) continue;
+		spells.push({
+			id,
+			name,
+			...(parts[2] ? { category: parts[2] } : {}),
+			passive: parts[3] === "1",
+			...(parts[4] ? { subName: parts[4] } : {}),
+		});
+	}
+	return truncated ? { spells, truncated: true } : { spells };
+}
+
+export function parseBank(payload: string): BankState {
+	if (!payload || payload === "empty") return { available: false, items: [] };
+	let seenAt: string | undefined;
+	let freeSlots = 0;
+	let totalSlots = 0;
+	const items: BagItem[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] === "meta") {
+			if (parts[1]) seenAt = parts[1];
+			freeSlots = Number(parts[2] ?? 0) || 0;
+			totalSlots = Number(parts[3] ?? 0) || 0;
+		} else if (parts[0] === "item") {
+			const id = optInt(parts[1]);
+			if (id === undefined) continue;
+			const q = optInt(parts[3]);
+			items.push({
+				id,
+				count: Number(parts[2] ?? 1) || 1,
+				...(q !== undefined ? { quality: q } : {}),
+				name: parts[4] ?? "",
+			});
+		}
+	}
+	return {
+		available: true,
+		...(seenAt ? { seenAt } : {}),
+		freeSlots,
+		totalSlots,
+		items,
+		...(truncated ? { truncated: true } : {}),
+	};
+}
+
+export function parseMerchant(payload: string): MerchantState {
+	if (!payload || payload === "empty") return { available: false, items: [] };
+	let seenAt: string | undefined;
+	let npc: string | undefined;
+	const items: MerchantItem[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] === "meta") {
+			if (parts[1]) seenAt = parts[1];
+			if (parts[2]) npc = parts[2];
+		} else if (parts[0] === "m") {
+			const id = optInt(parts[1]);
+			const copper = optInt(parts[2]) ?? 0;
+			const name = parts[6] ?? "";
+			if (!name) continue;
+			items.push({
+				...(id !== undefined ? { id } : {}),
+				name,
+				price: { copper, formatted: formatMoney(copper) },
+				stackCount: optInt(parts[3]) ?? 1,
+				numAvailable: optInt(parts[4]) ?? -1,
+				usable: parts[5] !== "0",
+			});
+		}
+	}
+	return {
+		available: true,
+		...(seenAt ? { seenAt } : {}),
+		...(npc ? { npc } : {}),
+		items,
+		...(truncated ? { truncated: true } : {}),
+	};
+}
+
+export function parseTrainer(payload: string): TrainerState {
+	if (!payload || payload === "empty")
+		return { available: false, services: [] };
+	let seenAt: string | undefined;
+	let npc: string | undefined;
+	const services: TrainerService[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] === "meta") {
+			if (parts[1]) seenAt = parts[1];
+			if (parts[2]) npc = parts[2];
+		} else if (parts[0] === "tr") {
+			const name = parts[5] ?? "";
+			if (!name) continue;
+			const copper = optInt(parts[3]) ?? 0;
+			services.push({
+				name,
+				status: parts[1] ?? "",
+				requiredLevel: optInt(parts[2]) ?? 0,
+				cost: { copper, formatted: formatMoney(copper) },
+				...(parts[4] ? { subText: parts[4] } : {}),
+			});
+		}
+	}
+	return {
+		available: true,
+		...(seenAt ? { seenAt } : {}),
+		...(npc ? { npc } : {}),
+		services,
+		...(truncated ? { truncated: true } : {}),
+	};
 }

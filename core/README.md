@@ -2,7 +2,7 @@
 
 The companion core: transport to the addon, game-state cache, the MCP servers `wow` and `memory`, the built-in agent and the ACP client. It is written in TypeScript and compiled with Bun into a single binary that the desktop app starts. See [ADR 0001](../docs/adr/0001-architecture-addon-companion-and-brains.md) and [ADR 0002](../docs/adr/0002-desktop-app-tauri-shell-with-typescript-core.md).
 
-So far it holds the transport ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)), the bridge to agents that speak ACP, the `wow` server with its first tool ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)), and `familiar`, a command-line app for development builds until the desktop app exists (FAM-6).
+So far it holds the transport ([ADR 0005](../docs/adr/0005-transport-addons-txt-lane-and-font-bank.md)), the bridge to agents that speak ACP, the `wow` server with its read-only tools ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)), and `familiar`, a command-line app for development builds until the desktop app exists (FAM-6).
 
 | Path                         | Job                                                                       |
 | ---------------------------- | ------------------------------------------------------------------------- |
@@ -81,15 +81,19 @@ Each character gets its own session in the agent, and it lasts as long as `famil
 
 `familiar` serves what it knows about the game to the agent as tools, through an MCP server named `wow` ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)). It hands the server's address and a token to the agent with each new session, so there is nothing to install or set up in the agent. An agent that refuses a session with the server gets one without it, and the game window says so.
 
-| Tool        | Returns                                                                                                                   |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `character` | name, realm, level, race, class, faction, zone, subzone, map ID, coordinates, money and language, as of the last question |
-| `equipment` | equipped slots with item ID, name, item level, quality, enchant ID, gems and durability (optional `slot` filter)          |
-| `bags`      | bag items grouped by item ID with count and quality, free/total bag slots and money (optional `search` filter)            |
-| `quests`    | active quest log with ID, title, level, category, completion, watched flag and objectives (optional `questId` filter)     |
-| `talents`   | points spent per tree, unspent points and allocated talents with rank, max rank and spell ID                              |
+| Tool                            | Returns                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `character`                     | name, realm, level, race, class, faction, zone, subzone, map ID, coordinates, money and language, as of the last question |
+| `equipment`                     | equipped slots with item ID, name, item level, quality, enchant ID, gems and durability (optional `slot` filter)          |
+| `bags`                          | bag items grouped by item ID with count and quality, free/total bag slots and money (optional `search` filter)            |
+| `quests`                        | active quest log with ID, title, level, category, completion, watched flag and objectives (optional `questId` filter)     |
+| `talents`                       | points spent per tree, unspent points and allocated talents with rank, max rank and spell ID                              |
+| `stats`                         | character-sheet attributes, armor, resource, crit and avoidance                                                           |
+| `professions` / `reputation`    | visible skill and faction rows; filter by name or category with `search`                                                  |
+| `spells`                        | learned spellbook entries; filter by `search` or set `includePassive: false`                                              |
+| `bank` / `merchant` / `trainer` | the most recent visit in this UI session, not live access to closed windows; `available: false` before a visit            |
 
-The tools only read: none of them acts in the game or on your computer. `equipment`, `bags`, `quests` and `talents` are pulled from the addon on demand and cached per character by revision: if nothing changed since the last question, the app answers from its cache without touching the transport (ADR 0001). Stats, professions, reputation, spellbook and last-seen bank/merchant/trainer follow (FAM-3).
+The tools only read: none of them acts in the game or on your computer. Collector results are pulled from the addon on demand and cached per character by revision: if nothing changed since the last question, the app answers from its cache without touching the transport (ADR 0001). Opening a bank, merchant or trainer window captures a local snapshot; it is only sent on request. Results can be marked `truncated` when the 8 KB lane limit is reached. Collapsed skill or faction groups may not appear; Familiar does not expand them.
 
 The server listens on `127.0.0.1` only, on port 27495; `mcp.port` in the settings changes it. The token is new at every start. The server refuses requests without the token, requests from a browser and requests under another host name. If the port is in use, `familiar` says so and runs on without the tools.
 
@@ -103,7 +107,7 @@ An agent on another host reaches the server only if that port on its host leads 
 
 The log has an event for each client that connects (`mcp-client`), each tool call (`mcp-call`) and the first refused request of each kind (`mcp-refused`).
 
-Hermes and Codex took the server and called `character` on Linux on the same machine as `familiar`, and Hermes called it from Windows through `ssh -R` in the game. The four new collectors (`equipment`, `bags`, `quests`, `talents`) have run against the stub client, not yet in the game.
+Hermes and Codex took the server and called `character` on Linux on the same machine as `familiar`, and Hermes called it from Windows through `ssh -R` in the game. The second set of collectors has been exercised with the Lua stub client, not yet inside WoW Forever.
 
 ## How the transport works
 
