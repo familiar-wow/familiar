@@ -86,6 +86,10 @@ test("lists its tools with what a model needs to call them", async () => {
 	const { result } = await rpc("tools/list");
 	expect(result.tools.map((t: { name: string }) => t.name)).toEqual([
 		"character",
+		"equipment",
+		"bags",
+		"quests",
+		"talents",
 		"echo",
 	]);
 	for (const tool of result.tools) {
@@ -96,6 +100,60 @@ test("lists its tools with what a model needs to call them", async () => {
 		]);
 		expect(tool.inputSchema.type).toBe("object");
 	}
+});
+
+test("async game tools pull and filter their slice", async () => {
+	game.setFetcher((id, slice) => {
+		queueMicrotask(() => {
+			if (slice === "eq")
+				game.receiveState(
+					id,
+					slice,
+					1,
+					"head	10	40	3				Cowl\nmainHand	20	44	4				Blade",
+				);
+			else if (slice === "bags")
+				game.receiveState(
+					id,
+					slice,
+					1,
+					"meta	8	16	2500\nitem	1	5	1	Healing Potion\nitem	2	1	1	Hearthstone",
+				);
+			else if (slice === "quests")
+				game.receiveState(
+					id,
+					slice,
+					1,
+					"q	100	10	0	1	Zone	First\nq	200	20	1	0	Zone	Second",
+				);
+			else game.receiveState(id, slice, 1, "meta	0	1\ntree	Fire	1");
+		});
+		return true;
+	});
+	const eq = await rpc("tools/call", {
+		name: "equipment",
+		arguments: { slot: "mainHand" },
+	});
+	expect(eq.result.isError).toBe(false);
+	expect(JSON.parse(eq.result.content[0].text).items).toEqual([
+		{ slot: "mainHand", id: 20, name: "Blade", itemLevel: 44, quality: 4 },
+	]);
+	const bags = await rpc("tools/call", {
+		name: "bags",
+		arguments: { search: "potion" },
+	});
+	expect(JSON.parse(bags.result.content[0].text).items).toEqual([
+		{ id: 1, count: 5, quality: 1, name: "Healing Potion" },
+	]);
+	const quests = await rpc("tools/call", {
+		name: "quests",
+		arguments: { questId: 200 },
+	});
+	expect(JSON.parse(quests.result.content[0].text).quests).toHaveLength(1);
+	const talents = await rpc("tools/call", { name: "talents", arguments: {} });
+	expect(JSON.parse(talents.result.content[0].text).trees).toEqual([
+		{ name: "Fire", spent: 1 },
+	]);
 });
 
 test("the character tool returns what the game showed last, or says that nothing came yet", async () => {

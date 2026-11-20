@@ -81,11 +81,15 @@ Each character gets its own session in the agent, and it lasts as long as `famil
 
 `familiar` serves what it knows about the game to the agent as tools, through an MCP server named `wow` ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)). It hands the server's address and a token to the agent with each new session, so there is nothing to install or set up in the agent. An agent that refuses a session with the server gets one without it, and the game window says so.
 
-| Tool        | Returns                                                                                                     |
-| ----------- | ----------------------------------------------------------------------------------------------------------- |
-| `character` | name, realm, level, race, class, faction, zone, subzone and game language, as of the player's last question |
+| Tool        | Returns                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `character` | name, realm, level, race, class, faction, zone, subzone, map ID, coordinates, money and language, as of the last question |
+| `equipment` | equipped slots with item ID, name, item level, quality, enchant ID, gems and durability (optional `slot` filter)          |
+| `bags`      | bag items grouped by item ID with count and quality, free/total bag slots and money (optional `search` filter)            |
+| `quests`    | active quest log with ID, title, level, category, completion, watched flag and objectives (optional `questId` filter)     |
+| `talents`   | points spent per tree, unspent points and allocated talents with rank, max rank and spell ID                              |
 
-This first tool returns what each question carries anyway; it shows that the agent reaches the game. Equipment, bags, talents and quests follow (FAM-3). The tools only read: none of them acts in the game or on your computer.
+The tools only read: none of them acts in the game or on your computer. `equipment`, `bags`, `quests` and `talents` are pulled from the addon on demand and cached per character by revision: if nothing changed since the last question, the app answers from its cache without touching the transport (ADR 0001). Stats, professions, reputation, spellbook and last-seen bank/merchant/trainer follow (FAM-3).
 
 The server listens on `127.0.0.1` only, on port 27495; `mcp.port` in the settings changes it. The token is new at every start. The server refuses requests without the token, requests from a browser and requests under another host name. If the port is in use, `familiar` says so and runs on without the tools.
 
@@ -99,7 +103,7 @@ An agent on another host reaches the server only if that port on its host leads 
 
 The log has an event for each client that connects (`mcp-client`), each tool call (`mcp-call`) and the first refused request of each kind (`mcp-refused`).
 
-Hermes and Codex took the server and called the tool, both on Linux and on the same machine as `familiar`. Nothing of this has run on Windows yet.
+Hermes and Codex took the server and called `character` on Linux on the same machine as `familiar`, and Hermes called it from Windows through `ssh -R` in the game. The four new collectors (`equipment`, `bags`, `quests`, `talents`) have run against the stub client, not yet in the game.
 
 ## How the transport works
 

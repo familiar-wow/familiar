@@ -4,7 +4,8 @@
 -- rule 2), and text from the brain becomes a link only through Links.Render (rule 3). Its look
 -- and the player's settings for it: Style.lua.
 local _, ns = ...
-local Tasks, Transport, Links, Style = ns.Tasks, ns.Transport, ns.Links, ns.Style
+local Tasks, Transport, Links, Style, Collect =
+	ns.Tasks, ns.Transport, ns.Links, ns.Style, ns.Collect
 
 local format, floor = string.format, math.floor
 
@@ -63,8 +64,12 @@ local function header()
 	end
 	local faction, localizedFaction = UnitFactionGroup("player")
 	local zone, subzone = GetRealZoneText(), GetSubZoneText()
+	local realm = GetRealmName()
+	if (not realm or realm == "") and GetNormalizedRealmName then
+		realm = GetNormalizedRealmName()
+	end
 	row("name", UnitName("player"))
-	row("realm", GetRealmName())
+	row("realm", realm)
 	row("level", UnitLevel("player"))
 	row("race", (UnitRace("player")))
 	row("class", (UnitClass("player")))
@@ -72,6 +77,13 @@ local function header()
 	row("zone", zone)
 	row("subzone", subzone ~= zone and subzone or nil)
 	row("locale", GetLocale())
+	local map, x, y = Collect.Location()
+	row("map", map)
+	if x and y then
+		row("coords", format("%.1f,%.1f", x, y))
+	end
+	row("money", Collect.Money())
+	row("revs", Collect.Revs())
 	return table.concat(rows, "\n") .. "\n\n"
 end
 
@@ -152,7 +164,10 @@ end
 Transport.OnMessage(function(body)
 	local kind, rest = body:match("^(%a+)\n(.*)$")
 	heard = Tasks.Now()
-	if kind == "status" then
+	if kind == "fetch" then
+		-- Handled by Collect.lua; still counts as a sign of life from the app.
+		return
+	elseif kind == "status" then
 		tool = rest
 		add("  > " .. plain(rest), TOOL)
 	elseif kind == "note" then

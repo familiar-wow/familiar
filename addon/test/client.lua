@@ -29,6 +29,7 @@
 --   click <caption>     click the button with this caption
 --   slide <caption> <n> drag the slider with this caption to <n> and let go
 --   poke <addon>        something other than Familiar enables an addon, as an addon manager does
+--   equip <slot> <id>   put an item into a slot for the active character and fire equipment changed
 --   texts               report what the font strings show
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
 -- a message frame, "backfill <text>" for every line restored into one, "font <file> <height>
@@ -556,16 +557,36 @@ local function api()
 			process.enabled[name], rows[name] = on, true
 		end
 	end
-	-- Game data: items, a spell and a quest, with their tooltips.
-	local function itemLink(id, quality, name)
-		return ("|cnIQ%d:|Hitem:%d::::::::60:::::|h[%s]|h|r"):format(quality, id, name)
+	-- Game data: items, a spell, a quest, bags and talents, with tooltips.
+	local function itemLink(id, quality, name, enchant)
+		return ("|cnIQ%d:|Hitem:%d:%s:::::::60:::::|h[%s]|h|r"):format(quality, id, enchant or "", name)
 	end
 	local items = {
-		[19019] = { link = itemLink(19019, 5, "Thunderfury, Blessed Blade of the Windseeker"), equip = "INVTYPE_WEAPON" },
-		[13262] = { link = itemLink(13262, 5, "Ashbringer"), equip = "INVTYPE_2HWEAPON" },
-		[2589] = { link = itemLink(2589, 1, "Linen Cloth"), equip = "", loads = true },
+		[19019] = {
+			link = itemLink(19019, 5, "Thunderfury, Blessed Blade of the Windseeker", "1900"),
+			equip = "INVTYPE_WEAPON",
+			ilvl = 80,
+			quality = 5,
+		},
+		[13262] = {
+			link = itemLink(13262, 5, "Ashbringer"),
+			equip = "INVTYPE_2HWEAPON",
+			ilvl = 88,
+			quality = 5,
+		},
+		[2589] = { link = itemLink(2589, 1, "Linen Cloth"), equip = "", ilvl = 5, quality = 1, loads = true },
+		[6948] = { link = itemLink(6948, 1, "Hearthstone"), equip = "", ilvl = 1, quality = 1 },
 	}
-	local quests = { [783] = { link = "|cffffff00|Hquest:783:1|h[A Threat Within]|h|r", loads = true } }
+	local worn = character == "Alt" and { [16] = 19019 } or { [16] = 13262 }
+	local quests = {
+		[783] = {
+			link = "|cffffff00|Hquest:783:1|h[A Threat Within]|h|r",
+			title = "A Threat Within",
+			level = 1,
+			category = "Elwynn Forest",
+			loads = true,
+		},
+	}
 	local tooltips = {
 		["item:19019"] = { "Thunderfury, Blessed Blade of the Windseeker", "Binds when picked up", { "One-Hand", "Sword" } },
 		["item:13262"] = { "Ashbringer", "Binds when picked up" },
@@ -587,15 +608,20 @@ local function api()
 			local id = itemID(info)
 			return id, "Weapon", "Sword", items[id] and items[id].equip or ""
 		end,
+		GetDetailedItemLevelInfo = function(info)
+			local item = items[itemID(info)]
+			return item and item.ilvl or nil
+		end,
 		RequestLoadItemDataByID = function(id)
 			if items[id] then
 				items[id].loads = nil
 			end
 		end,
 	}
+	local spellNames = { [133] = "Fireball", [12294] = "Mortal Strike", [12320] = "Cruelty" }
 	e.C_Spell = {
 		DoesSpellExist = function(id)
-			return id == 133
+			return spellNames[id] ~= nil
 		end,
 		IsSpellDataCached = function()
 			return true
@@ -603,6 +629,9 @@ local function api()
 		RequestLoadSpellData = function() end,
 		GetSpellLink = function(id)
 			return id == 133 and "|cff71d5ff|Hspell:133:0|h[Fireball]|h|r" or nil
+		end,
+		GetSpellName = function(id)
+			return spellNames[id]
 		end,
 	}
 	e.GetQuestLink = function(id)
@@ -614,6 +643,111 @@ local function api()
 			if quests[id] then
 				quests[id].loads = nil
 			end
+		end,
+		GetNumQuestLogEntries = function()
+			return 2
+		end,
+		GetInfo = function(index)
+			if index == 1 then
+				return { isHeader = true, title = "Elwynn Forest" }
+			elseif index == 2 then
+				return { questID = 783, title = "A Threat Within", level = 1, isHeader = false, isHidden = false }
+			end
+		end,
+		IsComplete = function()
+			return false
+		end,
+		GetQuestWatchType = function(id)
+			return id == 783 and 0 or nil
+		end,
+		GetQuestObjectives = function(id)
+			if id == 783 then
+				return { { text = "Speak with Marshal McBride: 0/1", finished = false } }
+			end
+			return {}
+		end,
+	}
+	e.C_Map = {
+		GetBestMapForUnit = function()
+			return 1454
+		end,
+		GetPlayerMapPosition = function()
+			return {
+				GetXY = function()
+					return 0.512, 0.624
+				end,
+			}
+		end,
+	}
+	e.GetMoney = function()
+		return 123456
+	end
+	e.C_Container = {
+		GetContainerNumSlots = function(bag)
+			return bag == 0 and 16 or 0
+		end,
+		GetContainerNumFreeSlots = function(bag)
+			return bag == 0 and 13 or 0
+		end,
+		GetContainerItemInfo = function(bag, slot)
+			if bag ~= 0 then
+				return nil
+			end
+			if slot == 1 then
+				return { itemID = 6948, stackCount = 1, quality = 1, itemName = "Hearthstone" }
+			elseif slot == 2 then
+				return { itemID = 2589, stackCount = 12, quality = 1, itemName = "Linen Cloth" }
+			elseif slot == 3 then
+				return { itemID = 2589, stackCount = 8, quality = 1, itemName = "Linen Cloth" }
+			end
+		end,
+	}
+	e.C_ClassTalents = {
+		GetActiveConfigID = function()
+			return 1
+		end,
+	}
+	e.C_Traits = {
+		GetConfigInfo = function(cid)
+			return cid == 1 and { ID = 1, treeIDs = { 100 } } or nil
+		end,
+		GetTreeCurrencyInfo = function()
+			return { { quantity = 2, spent = 6 } }
+		end,
+		GetGroupDisplayInfoByTreeID = function()
+			return {
+				{ groupID = 10, displayName = "Arms", orderIndex = 1 },
+				{ groupID = 20, displayName = "Fury", orderIndex = 2 },
+			}
+		end,
+		GetGroupCurrencyInfo = function()
+			return {
+				{ traitNodeGroupID = 10, currencyInfos = { { spent = 1 } } },
+				{ traitNodeGroupID = 20, currencyInfos = { { spent = 5 } } },
+			}
+		end,
+		GetTreeNodes = function()
+			return { 1001, 1002, 1003 }
+		end,
+		GetNodeInfo = function(_, nodeId)
+			if nodeId == 1001 then
+				return { ranksPurchased = 1, maxRanks = 1, groupIDs = { 10 }, activeEntry = { entryID = 2001 } }
+			elseif nodeId == 1002 then
+				return { ranksPurchased = 5, maxRanks = 5, groupIDs = { 20 }, activeEntry = { entryID = 2002 } }
+			elseif nodeId == 1003 then
+				return { ranksPurchased = 0, maxRanks = 3, groupIDs = { 10 }, entryIDs = { 2003 } }
+			end
+		end,
+		GetEntryInfo = function(_, entryId)
+			return { definitionID = entryId + 1000 }
+		end,
+		GetDefinitionInfo = function(defId)
+			if defId == 3001 then
+				return { spellID = 12294 }
+			elseif defId == 3002 then
+				return { spellID = 12320 }
+			end
+			return {}
 		end,
 	}
 	e.C_TooltipInfo = {
@@ -634,7 +768,20 @@ local function api()
 		end,
 	}
 	e.GetInventoryItemLink = function(_, slot)
-		return slot == 16 and items[13262].link or nil
+		local id = worn[slot]
+		return id and items[id] and items[id].link or nil
+	end
+	e.GetInventoryItemQuality = function(_, slot)
+		local id = worn[slot]
+		return id and items[id] and items[id].quality or nil
+	end
+	e.GetInventoryItemDurability = function(slot)
+		if worn[slot] then
+			return 95, 100
+		end
+	end
+	e._equip = function(slot, id)
+		worn[slot] = id
 	end
 	e.hooksecurefunc = function(target, name, hook)
 		local original = target[name]
@@ -786,6 +933,10 @@ for line in io.lines() do
 		end
 	elseif command == "poke" then
 		env.C_AddOns.EnableAddOn(rest)
+	elseif command == "equip" then
+		local slot, id = rest:match("^(%d+)%s+(%d+)$")
+		env._equip(tonumber(slot), tonumber(id))
+		fire("PLAYER_EQUIPMENT_CHANGED", tonumber(slot), true)
 	elseif command == "texts" then
 		local shown = {}
 		for _, fontString in ipairs(strings) do

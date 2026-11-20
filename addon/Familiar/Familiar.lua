@@ -60,6 +60,7 @@ frame:SetScript("OnEvent", function(_, event, name)
 		FamiliarDB.transport = FamiliarDB.transport or {}
 		FamiliarDB.window = FamiliarDB.window or {}
 		ns.db = FamiliarDB
+		ns.Collect.Init()
 		Chat.Init(FamiliarDB.window)
 	elseif event == "ADDON_LOADED" and name == "Blizzard_AddOnList" then
 		collapse()
