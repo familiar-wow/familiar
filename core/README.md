@@ -81,17 +81,17 @@ Each character gets its own session in the agent, and it lasts as long as `famil
 
 `familiar` serves what it knows about the game to the agent as tools, through an MCP server named `wow` ([ADR 0007](../docs/adr/0007-mcp-server-wow-over-http.md)). It hands the server's address and a token to the agent with each new session, so there is nothing to install or set up in the agent. An agent that refuses a session with the server gets one without it, and the game window says so.
 
-| Tool        | Returns                                                                                                                   |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `character` | name, realm, level, race, class, faction, zone, subzone, map ID, coordinates, money and language, as of the last question |
-| `equipment` | equipped slots with item ID, name, item level, quality, enchant ID, gems and durability (optional `slot` filter)          |
-| `bags`      | bag items grouped by item ID with count and quality, free/total bag slots and money (optional `search` filter)            |
-| `quests`    | active quest log with ID, title, level, category, completion, watched flag and objectives (optional `questId` filter)     |
-| `talents`   | points spent per tree, unspent points and allocated talents with rank, max rank and spell ID                              |
-| `stats` | character-sheet attributes, armor, resource, crit and avoidance |
-| `professions` / `reputation` | visible skill and faction rows; filter by name or category with `search` |
-| `spells` | learned spellbook entries; filter by `search` or set `includePassive: false` |
-| `bank` / `merchant` / `trainer` | the most recent visit in this UI session, not live access to closed windows; `available: false` before a visit |
+| Tool                            | Returns                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `character`                     | name, realm, level, race, class, faction, zone, subzone, map ID, coordinates, money and language, as of the last question |
+| `equipment`                     | equipped slots with item ID, name, item level, quality, enchant ID, gems and durability (optional `slot` filter)          |
+| `bags`                          | bag items grouped by item ID with count and quality, free/total bag slots and money (optional `search` filter)            |
+| `quests`                        | active quest log with ID, title, level, category, completion, watched flag and objectives (optional `questId` filter)     |
+| `talents`                       | points spent per tree, unspent points and allocated talents with rank, max rank and spell ID                              |
+| `stats`                         | character-sheet attributes, armor, resource, crit and avoidance                                                           |
+| `professions` / `reputation`    | visible skill and faction rows; filter by name or category with `search`                                                  |
+| `spells`                        | learned spellbook entries; filter by `search` or set `includePassive: false`                                              |
+| `bank` / `merchant` / `trainer` | the most recent visit in this UI session, not live access to closed windows; `available: false` before a visit            |
 
 The tools only read: none of them acts in the game or on your computer. Collector results are pulled from the addon on demand and cached per character by revision: if nothing changed since the last question, the app answers from its cache without touching the transport (ADR 0001). Opening a bank, merchant or trainer window captures a local snapshot; it is only sent on request. Results can be marked `truncated` when the 8 KB lane limit is reached. Collapsed skill or faction groups may not appear; Familiar does not expand them.
 

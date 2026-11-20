@@ -14,7 +14,7 @@ So far it holds the chat window and the transport to the app ([ADR 0005](../docs
 | `Familiar/Transport.lua` | hello and welcome, messages up with confirmation, messages down         |
 | `Familiar/Links.lua`     | links from the player to the brain and from the brain back to the game  |
 | `Familiar/Style.lua`     | the window's look, the player's settings for it and the settings panel  |
-| `Familiar/Collect.lua`   | read-only character collectors and last-visited window snapshots      |
+| `Familiar/Collect.lua`   | read-only character collectors and last-visited window snapshots        |
 | `Familiar/Chat.lua`      | the window: history, input line, status, Allow and Deny                 |
 | `Familiar/Familiar.lua`  | saved state, events, the frame loop and `/familiar`                     |
 
