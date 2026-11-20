@@ -487,8 +487,8 @@ local function api()
 		return SCREEN_W, SCREEN_H
 	end
 	-- Who asks, for the header of a question.
-	e.UnitName = function()
-		return character
+	e.UnitName = function(unit)
+		return unit == "npc" and "Test Vendor" or character
 	end
 	e.GetRealmName = function()
 		return realm
@@ -684,10 +684,10 @@ local function api()
 	end
 	e.C_Container = {
 		GetContainerNumSlots = function(bag)
-			return bag == 0 and 16 or 0
+			return bag == 0 and 16 or bag == 22 and 4 or 0
 		end,
 		GetContainerNumFreeSlots = function(bag)
-			return bag == 0 and 13 or 0
+			return bag == 0 and 13 or bag == 22 and 4 or 0
 		end,
 		GetContainerItemInfo = function(bag, slot)
 			if bag ~= 0 then
@@ -702,6 +702,25 @@ local function api()
 			end
 		end,
 	}
+	e.UnitHealthMax = function() return 1600 end
+	e.UnitArmor = function() return 400, 421 end
+	e.GetSpellCritChance = function(...) assert(select("#", ...) == 0); return 4.5 end
+	e.Enum = { BankType = { Character = 0 }, SpellBookSpellBank = { Player = 0 }, SpellBookItemType = { Spell = 1, FutureSpell = 2 } }
+	e.C_Bank = {FetchPurchasedBankTabData = function(kind) assert(kind == 0); return {{ ID = 22 }} end}
+	e.C_SkillInfo = {GetNumSkillLines = function() return 2 end, GetSkillLineInfo = function(i)
+		return i == 1 and {name="Professions", isHeader=true} or {name="Mining", skillID=186, rank=42, maxRank=75}
+	end}
+	e.C_Reputation = {GetNumFactions = function() return 1 end, GetFactionDataByIndex = function()
+		return {name="Thunder Bluff", factionID=81, reaction=5, currentStanding=4750, currentReactionThreshold=3000, nextReactionThreshold=9000}
+	end}
+	e.C_SpellBook = {GetNumSpellBookSkillLines = function() return 1 end,
+		GetSpellBookSkillLineInfo = function() return {name="Fire", itemIndexOffset=0, numSpellBookItems=2} end,
+		GetSpellBookItemInfo = function(i) return i == 1 and {name="Fireball", spellID=133, itemType=1} or {name="Future", spellID=999, itemType=2} end}
+	e.GetMerchantNumItems = function() return 1 end
+	e.C_MerchantFrame = {GetItemInfo = function() return {name="Water", price=25} end}
+	e.GetNumTrainerServices = function() return 1 end
+	e.GetTrainerServiceInfo = function() return "Charge", "available", nil, 4 end
+	e.GetTrainerServiceCost = function() return 100 end
 	e.C_ClassTalents = {
 		GetActiveConfigID = function()
 			return 1
@@ -933,6 +952,8 @@ for line in io.lines() do
 		end
 	elseif command == "poke" then
 		env.C_AddOns.EnableAddOn(rest)
+	elseif command == "visit" then
+		for _, event in ipairs({"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "MERCHANT_SHOW", "MERCHANT_CLOSED", "TRAINER_SHOW", "TRAINER_CLOSED"}) do fire(event) end
 	elseif command == "equip" then
 		local slot, id = rest:match("^(%d+)%s+(%d+)$")
 		env._equip(tonumber(slot), tonumber(id))
