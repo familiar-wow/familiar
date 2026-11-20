@@ -55,6 +55,7 @@ const log: Log = {
 };
 let pids = [1];
 let app: Transport | undefined;
+let gameState = new Game();
 const questions: Question[] = [];
 const chat: string[] = [];
 /** Lines the window restored from the saved history. */
@@ -123,6 +124,7 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		processes: async () => pids,
 		processPollMs: 50,
 	});
+	gameState = new Game();
 	const conversation = new Conversation(
 		{
 			ask: (question, turn) => {
@@ -134,7 +136,7 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		},
 		(body) => transport.send(body),
 		log,
-		new Game(),
+		gameState,
 	);
 	transport.onMessage((body, { hello }) => {
 		if (!hello) conversation.receive(body);
@@ -210,7 +212,11 @@ test("messages go up and replies come down, across /reload, a character switch a
 		zone: "Orgrimmar",
 		subzone: "Valley of Strength",
 		locale: "enUS",
+		map: "1454",
+		coords: "51.2,62.4",
+		money: "123456",
 	});
+	expect(questions[0]?.revs).toEqual({ eq: 1, bags: 1, quests: 1, talents: 1 });
 	// The window: a question typed into its input line, the tool the agent calls, and a
 	// permission request the player answers in game.
 	command("enter tools");
@@ -501,3 +507,96 @@ test("the window shows what the app notes while the brain works", async () => {
 	await waitFor(/:\|r heard: note$/, from);
 	expect(errors).toEqual([]);
 });
+
+test("pulls equipment, bags, quests and talents on demand, caches by revision and isolates characters", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	at = await roundTrip("before pull", /heard: before pull$/, at);
+	const eq1 = await gameState.get("eq");
+	expect(eq1.cached).toBe(false);
+	expect(eq1.revision).toBe(1);
+	expect(eq1.items).toEqual([
+		{
+			slot: "mainHand",
+			id: 13262,
+			name: "Ashbringer",
+			itemLevel: 88,
+			quality: 5,
+			durability: { current: 95, max: 100 },
+		},
+	]);
+
+	// Unchanged revision: served straight from cache without touching the transport.
+	const eqCached = await gameState.get("eq");
+	expect(eqCached.cached).toBe(true);
+	expect(eqCached.items[0]?.name).toBe("Ashbringer");
+
+	// All other slices pull cleanly over the real transport too.
+	const bags = await gameState.get("bags");
+	expect(bags.freeSlots).toBe(13);
+	expect(bags.totalSlots).toBe(16);
+	expect(bags.money).toEqual({ copper: 123456, formatted: "12g 34s 56c" });
+	expect(bags.items).toEqual([
+		{ id: 2589, count: 20, quality: 1, name: "Linen Cloth" },
+		{ id: 6948, count: 1, quality: 1, name: "Hearthstone" },
+	]);
+
+	const quests = await gameState.get("quests");
+	expect(quests.quests).toEqual([
+		{
+			id: 783,
+			level: 1,
+			complete: false,
+			watched: true,
+			category: "Elwynn Forest",
+			title: "A Threat Within",
+			objectives: [
+				{ finished: false, text: "Speak with Marshal McBride: 0/1" },
+			],
+		},
+	]);
+
+	const talents = await gameState.get("talents");
+	expect(talents.unspent).toBe(2);
+	expect(talents.spent).toBe(6);
+	expect(talents.trees).toEqual([
+		{ name: "Arms", spent: 1 },
+		{ name: "Fury", spent: 5 },
+	]);
+	expect(talents.talents).toEqual([
+		{
+			tree: "Arms",
+			name: "Mortal Strike",
+			rank: 1,
+			maxRank: 1,
+			spellId: 12294,
+		},
+		{ tree: "Fury", name: "Cruelty", rank: 5, maxRank: 5, spellId: 12320 },
+	]);
+
+	// Equipping another weapon bumps the equipment revision; the next question carries it.
+	command("equip 16 19019");
+	at = await roundTrip("after equip", /heard: after equip$/, at);
+	expect(questions.at(-1)?.revs?.eq).toBe(2);
+	const eq2 = await gameState.get("eq");
+	expect(eq2.cached).toBe(false);
+	expect(eq2.revision).toBe(2);
+	expect(eq2.items[0]).toMatchObject({
+		slot: "mainHand",
+		id: 19019,
+		name: "Thunderfury, Blessed Blade of the Windseeker",
+		enchantId: 1900,
+	});
+
+	// Switching to Alt isolates Hero's cache.
+	command("login Alt");
+	at = await waitFor(CONNECTED, at);
+	at = await roundTrip("as alt", /heard: as alt$/, at);
+	const altEq = await gameState.get("eq");
+	expect(altEq.cached).toBe(false);
+	expect(altEq.items[0]?.id).toBe(19019);
+
+	// Leave Hero logged in for any later test.
+	command("login Hero");
+	await waitFor(CONNECTED, at);
+	expect(errors).toEqual([]);
+}, 45_000);

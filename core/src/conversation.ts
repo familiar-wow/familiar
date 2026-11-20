@@ -29,9 +29,13 @@ export class Conversation {
 		private readonly brain: Brain,
 		private readonly send: (body: Uint8Array) => void,
 		private readonly log: Log,
-		/** Learns the character from each question's header, for the `wow` server's tools. */
+		/** Learns the character from each question's header, and caches pulled slices for `wow`. */
 		private readonly game: Game,
-	) {}
+	) {
+		this.game.setFetcher((id, slice) =>
+			this.down({ kind: "fetch", id, slice }),
+		);
+	}
 
 	/** Handles a message from the addon. */
 	receive(body: Uint8Array): void {
@@ -39,6 +43,8 @@ export class Conversation {
 		const m = parseUp(text);
 		if (!m) this.log.say(`Unknown message from the addon: ${text}`);
 		else if (m.kind === "question") void this.answer(m.question);
+		else if (m.kind === "state")
+			this.game.receiveState(m.id, m.slice, m.rev, m.payload);
 		else {
 			this.log.say(`  ${m.allow ? "allowed" : "denied"} in game`);
 			this.waiting.get(m.id)?.(m.allow);
@@ -48,7 +54,7 @@ export class Conversation {
 
 	private async answer(question: Question): Promise<void> {
 		this.log.say(`Question: ${question.text}`);
-		this.game.see(question.character);
+		this.game.see(question.character, question.revs);
 		const asked = performance.now();
 		const status = throttle(
 			(title) => this.down({ kind: "status", text: clip(title, MAX_STATUS) }),

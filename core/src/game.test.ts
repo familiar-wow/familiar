@@ -1,0 +1,225 @@
+// The revisioned game-state cache and TSV parsers (FAM-46).
+import { expect, test } from "bun:test";
+import {
+	formatMoney,
+	Game,
+	parseBags,
+	parseEquipment,
+	parseQuests,
+	parseTalents,
+	type Slice,
+} from "./game.ts";
+
+test("pulls once per revision, serves unchanged slices from cache, and isolates characters", async () => {
+	const game = new Game({ fetchTimeoutMs: 500 });
+	const fetches: { id: number; slice: Slice }[] = [];
+	let weapon = "Ashbringer";
+	let rev = 1;
+	game.setFetcher((id, slice) => {
+		fetches.push({ id, slice });
+		queueMicrotask(() => {
+			game.receiveState(
+				id,
+				slice,
+				rev,
+				`mainHand\t13262\t88\t5\t1900\t\t90/100\t${weapon}`,
+			);
+		});
+		return true;
+	});
+
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 1 });
+	const first = await game.get("eq");
+	expect(first.cached).toBe(false);
+	expect(first.revision).toBe(1);
+	expect(first.items[0]?.name).toBe("Ashbringer");
+	expect(fetches).toHaveLength(1);
+
+	// Same revision: straight from cache, no fetch.
+	const second = await game.get("eq");
+	expect(second.cached).toBe(true);
+	expect(second.items[0]?.name).toBe("Ashbringer");
+	expect(fetches).toHaveLength(1);
+
+	// Revision bumped in the next question: pulls fresh.
+	weapon = "Thunderfury";
+	rev = 2;
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
+	const third = await game.get("eq");
+	expect(third.cached).toBe(false);
+	expect(third.revision).toBe(2);
+	expect(third.items[0]?.name).toBe("Thunderfury");
+	expect(fetches).toHaveLength(2);
+
+	// Character switch: Alt does not inherit Hero's cached equipment even at the same revision.
+	weapon = "Worn Shortsword";
+	game.see({ name: "Alt", realm: "Realm" }, { eq: 2 });
+	const alt = await game.get("eq");
+	expect(alt.cached).toBe(false);
+	expect(alt.items[0]?.name).toBe("Worn Shortsword");
+	expect(fetches).toHaveLength(3);
+
+	// Back to Hero at revision 2: still cached!
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
+	const back = await game.get("eq");
+	expect(back.cached).toBe(true);
+	expect(back.items[0]?.name).toBe("Thunderfury");
+	expect(fetches).toHaveLength(3);
+});
+
+test("deduplicates concurrent pulls for the same slice", async () => {
+	const game = new Game({ fetchTimeoutMs: 500 });
+	let sent = 0;
+	let reply = () => {};
+	game.setFetcher((id, slice) => {
+		sent++;
+		reply = () => game.receiveState(id, slice, 3, "meta\t10\t16\t500");
+		return true;
+	});
+	game.see({ name: "Hero", realm: "Realm" }, { bags: 3 });
+	const p1 = game.get("bags");
+	const p2 = game.get("bags");
+	expect(sent).toBe(1);
+	reply();
+	const [r1, r2] = await Promise.all([p1, p2]);
+	expect(r1.freeSlots).toBe(10);
+	expect(r2.freeSlots).toBe(10);
+});
+
+test("reports timeouts, addon errors and missing connection", async () => {
+	const offline = new Game({ fetchTimeoutMs: 50 });
+	await expect(offline.get("eq")).rejects.toThrow(/No connection/);
+
+	const silent = new Game({ fetchTimeoutMs: 40 });
+	silent.setFetcher(() => true);
+	await expect(silent.get("quests")).rejects.toThrow(/did not send quests/);
+
+	const broken = new Game({ fetchTimeoutMs: 500 });
+	broken.setFetcher((id, slice) => {
+		queueMicrotask(() =>
+			broken.receiveState(id, slice, 1, "error\tnot ready yet"),
+		);
+		return true;
+	});
+	await expect(broken.get("talents")).rejects.toThrow("not ready yet");
+
+	const failedSend = new Game({ fetchTimeoutMs: 500 });
+	failedSend.setFetcher(() => false);
+	await expect(failedSend.get("bags")).rejects.toThrow(/Could not ask/);
+});
+
+test("parses TSV payloads for equipment, bags, quests and talents", () => {
+	expect(
+		parseEquipment(
+			[
+				"head\t1234\t45\t3\t929\t101,102\t60/60\tHelm of Testing",
+				"mainHand\t13262\t88\t5\t\t\t\tAshbringer",
+				"truncated",
+			].join("\n"),
+		),
+	).toEqual({
+		items: [
+			{
+				slot: "head",
+				id: 1234,
+				name: "Helm of Testing",
+				itemLevel: 45,
+				quality: 3,
+				enchantId: 929,
+				gems: [101, 102],
+				durability: { current: 60, max: 60 },
+			},
+			{
+				slot: "mainHand",
+				id: 13262,
+				name: "Ashbringer",
+				itemLevel: 88,
+				quality: 5,
+			},
+		],
+		truncated: true,
+	});
+
+	expect(
+		parseBags(
+			[
+				"meta\t13\t16\t123456",
+				"item\t2589\t20\t1\tLinen Cloth",
+				"item\t6948\t1\t1\tHearthstone",
+			].join("\n"),
+		),
+	).toEqual({
+		freeSlots: 13,
+		totalSlots: 16,
+		money: { copper: 123456, formatted: "12g 34s 56c" },
+		items: [
+			{ id: 2589, count: 20, quality: 1, name: "Linen Cloth" },
+			{ id: 6948, count: 1, quality: 1, name: "Hearthstone" },
+		],
+	});
+
+	expect(
+		parseQuests(
+			[
+				"q\t557\t33\t0\t1\tHillsbrad\tArmschienen der Bindung",
+				"o\t0\tArmschienen der Erdbindung: 2/4",
+				"q\t783\t1\t1\t0\t\tA Threat Within",
+			].join("\n"),
+		),
+	).toEqual({
+		quests: [
+			{
+				id: 557,
+				level: 33,
+				complete: false,
+				watched: true,
+				category: "Hillsbrad",
+				title: "Armschienen der Bindung",
+				objectives: [
+					{ finished: false, text: "Armschienen der Erdbindung: 2/4" },
+				],
+			},
+			{
+				id: 783,
+				level: 1,
+				complete: true,
+				watched: false,
+				title: "A Threat Within",
+				objectives: [],
+			},
+		],
+	});
+
+	expect(
+		parseTalents(
+			[
+				"meta\t2\t6",
+				"tree\tArms\t1",
+				"tree\tFury\t5",
+				"t\tArms\t1\t1\t12294\tMortal Strike",
+				"t\tFury\t5\t5\t12320\tCruelty",
+			].join("\n"),
+		),
+	).toEqual({
+		unspent: 2,
+		spent: 6,
+		trees: [
+			{ name: "Arms", spent: 1 },
+			{ name: "Fury", spent: 5 },
+		],
+		talents: [
+			{
+				tree: "Arms",
+				name: "Mortal Strike",
+				rank: 1,
+				maxRank: 1,
+				spellId: 12294,
+			},
+			{ tree: "Fury", name: "Cruelty", rank: 5, maxRank: 5, spellId: 12320 },
+		],
+	});
+
+	expect(formatMoney(0)).toBe("0c");
+	expect(formatMoney(504)).toBe("5s 4c");
+	expect(formatMoney(10000)).toBe("1g 0s 0c");
+});

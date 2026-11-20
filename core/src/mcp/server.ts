@@ -22,7 +22,7 @@ export interface Tool {
 	description: string;
 	inputSchema: Record<string, unknown>;
 	/** The result, sent as JSON. An error's message goes to the model, which may try again. */
-	call(args: Record<string, unknown>): unknown;
+	call(args: Record<string, unknown>): unknown | Promise<unknown>;
 }
 
 export interface McpServer {
@@ -57,7 +57,10 @@ export function serveMcp(options: McpOptions): McpServer {
 	// One log line per kind of refusal: whatever knocks may knock often.
 	const refused = new Set<string>();
 
-	const answer = (message: unknown, agent: string): object | undefined => {
+	const answer = async (
+		message: unknown,
+		agent: string,
+	): Promise<object | undefined> => {
 		if (typeof message !== "object" || message === null)
 			return failure(null, -32600, "Invalid request");
 		const { id, method, params } = message as Rpc;
@@ -98,7 +101,7 @@ export function serveMcp(options: McpOptions): McpServer {
 				return failure(id, -32602, `Unknown tool: ${String(params?.name)}`);
 			const args = params?.arguments;
 			try {
-				const value = tool.call(
+				const value = await tool.call(
 					typeof args === "object" && args !== null
 						? (args as Record<string, unknown>)
 						: {},
@@ -159,9 +162,12 @@ export function serveMcp(options: McpOptions): McpServer {
 			}
 			served++;
 			const agent = request.headers.get("user-agent") ?? "";
-			const answers = (Array.isArray(body) ? body : [body])
-				.map((message) => answer(message, agent))
-				.filter((a) => a !== undefined);
+			const resolved = await Promise.all(
+				(Array.isArray(body) ? body : [body]).map((message) =>
+					answer(message, agent),
+				),
+			);
+			const answers = resolved.filter((a) => a !== undefined);
 			if (answers.length === 0) return new Response(null, { status: 202 });
 			return Response.json(Array.isArray(body) ? answers : answers[0]);
 		},

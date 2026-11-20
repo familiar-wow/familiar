@@ -4,6 +4,7 @@ import bank from "../../../addon/Familiar/Bank.lua" with { type: "text" };
 import bells from "../../../addon/Familiar/Bells.lua" with { type: "text" };
 import chat from "../../../addon/Familiar/Chat.lua" with { type: "text" };
 import codec from "../../../addon/Familiar/Codec.lua" with { type: "text" };
+import collect from "../../../addon/Familiar/Collect.lua" with { type: "text" };
 import familiar from "../../../addon/Familiar/Familiar.lua" with {
 	type: "text",
 };
@@ -27,6 +28,7 @@ export const FILES: Record<string, string> = {
 	"Transport.lua": transport,
 	"Links.lua": links,
 	"Style.lua": style,
+	"Collect.lua": collect,
 	"Chat.lua": chat,
 	"Familiar.lua": familiar,
 };
