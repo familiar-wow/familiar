@@ -5,8 +5,10 @@ import {
 	Game,
 	parseBags,
 	parseEquipment,
+	parseMerchant,
 	parseQuests,
 	parseTalents,
+	parseTrainer,
 	type Slice,
 } from "./game.ts";
 
@@ -222,4 +224,97 @@ test("parses TSV payloads for equipment, bags, quests and talents", () => {
 	expect(formatMoney(0)).toBe("0c");
 	expect(formatMoney(504)).toBe("5s 4c");
 	expect(formatMoney(10000)).toBe("1g 0s 0c");
+});
+
+test("forgets cached slices and pending pulls when the game reloads its interface", async () => {
+	const game = new Game({ fetchTimeoutMs: 500 });
+	let weapon = "Ashbringer";
+	let answer = true;
+	let fetches = 0;
+	game.setFetcher((id, slice) => {
+		fetches++;
+		if (answer)
+			queueMicrotask(() =>
+				game.receiveState(
+					id,
+					slice,
+					1,
+					`mainHand\t13262\t88\t5\t\t\t\t${weapon}`,
+				),
+			);
+		return true;
+	});
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 1 });
+	expect((await game.get("eq")).items[0]?.name).toBe("Ashbringer");
+
+	// After a reload the addon's counters restart: revision 1 now means other data.
+	game.forget();
+	weapon = "Thunderfury";
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 1 });
+	const after = await game.get("eq");
+	expect(after.cached).toBe(false);
+	expect(after.items[0]?.name).toBe("Thunderfury");
+	expect(fetches).toBe(2);
+
+	// A pull the old interface will never answer fails at once instead of timing out.
+	answer = false;
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
+	const pending = game.get("eq");
+	game.forget();
+	// A read right after the reset pulls anew instead of joining the dropped pull.
+	answer = true;
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
+	const fresh = game.get("eq");
+	await expect(pending).rejects.toThrow("reloaded");
+	expect((await fresh).cached).toBe(false);
+	expect(fetches).toBe(4);
+});
+
+test("parses merchant extended costs and pet trainer points", () => {
+	const merchant = parseMerchant(
+		[
+			"meta\t2026-11-23 20:00\tTest Vendor",
+			"m\t33042\t0\t1\t-1\t1\tOgre Tea",
+			"mc\t2\titem\t29434\tBadge of Justice",
+			"mc\t1500\tcurrency\t1901\tHonor Points",
+			"m\t159\t25\t5\t-1\t1\tWater",
+		].join("\n"),
+	);
+	expect(merchant.items).toEqual([
+		{
+			id: 33042,
+			name: "Ogre Tea",
+			price: { copper: 0, formatted: "0c" },
+			extendedCost: [
+				{ amount: 2, itemId: 29434, name: "Badge of Justice" },
+				{ amount: 1500, currencyId: 1901, name: "Honor Points" },
+			],
+			stackCount: 1,
+			numAvailable: -1,
+			usable: true,
+		},
+		{
+			id: 159,
+			name: "Water",
+			price: { copper: 25, formatted: "25c" },
+			stackCount: 5,
+			numAvailable: -1,
+			usable: true,
+		},
+	]);
+
+	const pet = parseTrainer(
+		"meta\t2026-11-23 20:00\tPet Trainer\t3\ntr\tavailable\t30\t120\tRank 3\tBite",
+	);
+	expect(pet.trainerType).toBe("pet");
+	expect(pet.services[0]?.cost).toEqual({ trainingPoints: 120 });
+
+	const general = parseTrainer(
+		"meta\t2026-11-23 20:00\tTrainer\t0\ntr\tavailable\t4\t100\t\tCharge",
+	);
+	expect(general.trainerType).toBe("general");
+	expect(general.services[0]?.cost).toEqual({
+		copper: 100,
+		formatted: "1s 0c",
+	});
 });

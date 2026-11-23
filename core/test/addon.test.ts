@@ -17,6 +17,7 @@ import { Conversation } from "../src/conversation.ts";
 import { echoBrain } from "../src/echo.ts";
 import { Game } from "../src/game.ts";
 import type { Log } from "../src/log.ts";
+import { wowTools } from "../src/mcp/tools.ts";
 import { Transport } from "../src/transport/transport.ts";
 import { FILES, TOC } from "../src/wow/addon.ts";
 import { wowPaths } from "../src/wow/client.ts";
@@ -138,9 +139,8 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		log,
 		gameState,
 	);
-	transport.onMessage((body, { hello }) => {
-		if (!hello) conversation.receive(body);
-	});
+	// The same wiring as main.ts.
+	transport.onMessage((body, info) => conversation.receive(body, info));
 	await transport.start();
 	app = transport;
 }
@@ -216,7 +216,19 @@ test("messages go up and replies come down, across /reload, a character switch a
 		coords: "51.2,62.4",
 		money: "123456",
 	});
-	expect(questions[0]?.revs).toEqual({ eq: 1, bags: 1, quests: 1, talents: 1 });
+	expect(questions[0]?.revs).toEqual({
+		eq: 1,
+		bags: 1,
+		quests: 1,
+		talents: 1,
+		stats: 1,
+		prof: 1,
+		rep: 1,
+		spells: 1,
+		bank: 0,
+		merchant: 0,
+		trainer: 0,
+	});
 	// The window: a question typed into its input line, the tool the agent calls, and a
 	// permission request the player answers in game.
 	command("enter tools");
@@ -600,3 +612,129 @@ test("pulls equipment, bags, quests and talents on demand, caches by revision an
 	await waitFor(CONNECTED, at);
 	expect(errors).toEqual([]);
 }, 45_000);
+
+test("reads the second collectors through the addon and keeps session-only visits", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	at = await roundTrip("before visits", /heard: before visits$/, at);
+	const call = async (name: string, args: Record<string, unknown> = {}) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return await tool.call(args);
+	};
+	expect(await call("stats")).toMatchObject({
+		healthMax: 1600,
+		armor: 421,
+		spellCrit: 4.5,
+	});
+	expect(await call("professions", { search: "min" })).toMatchObject({
+		skills: [{ name: "Mining", rank: 42, maxRank: 75 }],
+	});
+	expect(await call("reputation", { search: "bluff" })).toMatchObject({
+		factions: [{ name: "Thunder Bluff", current: 1750, max: 6000 }],
+	});
+	expect(await call("spells", { includePassive: false })).toMatchObject({
+		spells: [{ id: 133, name: "Fireball" }],
+	});
+	for (const key of ["bank", "merchant", "trainer"])
+		expect(await call(key)).toMatchObject({ available: false });
+	command("visit");
+	at = await roundTrip("after visits", /heard: after visits$/, at);
+	expect(await call("bank")).toMatchObject({
+		available: true,
+		freeSlots: 4,
+		totalSlots: 4,
+		items: [],
+	});
+	expect(await call("merchant", { search: "water" })).toMatchObject({
+		available: true,
+		npc: "Test Vendor",
+		items: [{ name: "Water", price: { copper: 25 } }],
+	});
+	expect(await call("trainer", { onlyAvailable: true })).toMatchObject({
+		available: true,
+		services: [{ name: "Charge", cost: { copper: 100 } }],
+	});
+	expect(await call("bank")).toMatchObject({ cached: true });
+	expect(errors).toEqual([]);
+}, 60_000);
+
+test("collector revisions follow late events and restart with the interface", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	const call = async (name: string, args: Record<string, unknown> = {}) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return await tool.call(args);
+	};
+
+	// A defense change alone bumps stats, so the cached sheet is not served again.
+	at = await roundTrip("stats before", /heard: stats before$/, at);
+	expect(await call("stats")).toMatchObject({ defense: 100 });
+	command("set defense 101");
+	command("fire UNIT_DEFENSE player");
+	at = await roundTrip("stats after", /heard: stats after$/, at);
+	expect(await call("stats")).toMatchObject({ defense: 101, cached: false });
+
+	// Trainer names that load after the window opened still reach the snapshot.
+	command("set trainerNames 0");
+	command("fire TRAINER_SHOW");
+	at = await roundTrip("trainer open", /heard: trainer open$/, at);
+	expect(await call("trainer")).toMatchObject({
+		available: true,
+		services: [],
+	});
+	command("set trainerNames 1");
+	command("fire TRAINER_SERVICE_INFO_NAME_UPDATE");
+	command("fire TRAINER_CLOSED");
+	at = await roundTrip("names loaded", /heard: names loaded$/, at);
+	expect(await call("trainer")).toMatchObject({
+		cached: false,
+		trainerType: "general",
+		services: [{ name: "Charge", cost: { copper: 100 } }],
+	});
+
+	// A pet trainer's costs are training points.
+	command("set trainerType 3");
+	command("fire TRAINER_SHOW");
+	command("fire TRAINER_CLOSED");
+	at = await roundTrip("pet trainer", /heard: pet trainer$/, at);
+	expect(await call("trainer")).toMatchObject({
+		trainerType: "pet",
+		services: [{ name: "Charge", cost: { trainingPoints: 100 } }],
+	});
+
+	// Revisions restart with every interface load: merchant A and B both get revision 1.
+	command("reload");
+	at = await waitFor(CONNECTED, at);
+	command("fire MERCHANT_SHOW");
+	at = await roundTrip("merchant a", /heard: merchant a$/, at);
+	expect(await call("merchant")).toMatchObject({
+		revision: 1,
+		items: [{ name: "Water" }],
+	});
+	command("reload");
+	at = await waitFor(CONNECTED, at);
+	command("set merchantItem Ogre Tea");
+	command("set token 1");
+	command("fire MERCHANT_SHOW");
+	at = await roundTrip("merchant b", /heard: merchant b$/, at);
+	expect(await call("merchant")).toMatchObject({
+		revision: 1,
+		cached: false,
+		items: [
+			{
+				name: "Ogre Tea",
+				price: { copper: 0 },
+				extendedCost: [{ amount: 2, itemId: 29434, name: "Badge of Justice" }],
+			},
+		],
+	});
+
+	for (const [key, value] of Object.entries({
+		defense: "100",
+		merchantItem: "Water",
+		token: "0",
+		trainerType: "0",
+	}))
+		command(`set ${key} ${value}`);
+	expect(errors).toEqual([]);
+}, 60_000);

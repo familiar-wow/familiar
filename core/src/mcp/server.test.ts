@@ -90,6 +90,13 @@ test("lists its tools with what a model needs to call them", async () => {
 		"bags",
 		"quests",
 		"talents",
+		"stats",
+		"professions",
+		"reputation",
+		"spells",
+		"bank",
+		"merchant",
+		"trainer",
 		"echo",
 	]);
 	for (const tool of result.tools) {

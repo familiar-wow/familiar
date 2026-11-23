@@ -14,8 +14,49 @@ ns.Collect = Collect
 local MAX_STATE = 8192
 
 -- Revision counters per slice. Every question's header sends them so the app can serve unchanged
--- slices straight from its cache without a round trip.
-local revs = { eq = 1, bags = 1, quests = 1, talents = 1 }
+-- slices straight from its cache without a round trip. Last-seen slices (bank, merchant, trainer)
+-- start at 0 until the player opens the window.
+local revs = {
+	eq = 1,
+	bags = 1,
+	quests = 1,
+	talents = 1,
+	stats = 1,
+	prof = 1,
+	rep = 1,
+	spells = 1,
+	bank = 0,
+	merchant = 0,
+	trainer = 0,
+}
+
+local REV_ORDER = {
+	"eq",
+	"bags",
+	"quests",
+	"talents",
+	"stats",
+	"prof",
+	"rep",
+	"spells",
+	"bank",
+	"merchant",
+	"trainer",
+}
+
+-- Cached last-seen payloads captured while the player has the bank, a merchant or a trainer open.
+local seen = {}
+local bankOpen, trainerOpen = false, false
+
+local function nowStamp()
+	if type(date) == "function" then
+		local ok, stamp = pcall(date, "%Y-%m-%d %H:%M")
+		if ok and stamp then
+			return stamp
+		end
+	end
+	return ""
+end
 
 local SLOTS = {
 	{ 1, "head" },
@@ -69,7 +110,12 @@ end
 
 -- Compact revision string for the question header.
 function Collect.Revs()
-	return format("eq=%d bags=%d quests=%d talents=%d", revs.eq, revs.bags, revs.quests, revs.talents)
+	local parts = {}
+	for i = 1, #REV_ORDER do
+		local k = REV_ORDER[i]
+		parts[i] = format("%s=%d", k, revs[k] or 0)
+	end
+	return concat(parts, " ")
 end
 
 -- Current UI map ID and percentage coordinates (0-100), or nil in instances/loading screens.
@@ -411,11 +457,433 @@ local function collectTalents()
 	return pack(lines)
 end
 
+local function round1(n)
+	return format("%.1f", n)
+end
+
+local function collectStats()
+	local lines = {}
+	local function add(key, value)
+		if value ~= nil and value ~= "" then
+			lines[#lines + 1] = format("%s\t%s", key, tostring(value))
+		end
+	end
+	if UnitHealthMax then
+		local ok, v = pcall(UnitHealthMax, "player")
+		if ok and v then
+			add("healthMax", v)
+		end
+	end
+	if UnitPowerType then
+		local ok, _, token = pcall(UnitPowerType, "player")
+		if ok and token then
+			add("powerType", token)
+		end
+	end
+	if UnitPowerMax then
+		local ok, v = pcall(UnitPowerMax, "player")
+		if ok and v then
+			add("powerMax", v)
+		end
+	end
+	if UnitStat then
+		local keys = { "str", "agi", "sta", "int", "spi" }
+		for i = 1, 5 do
+			local ok, _, effective = pcall(UnitStat, "player", i)
+			if ok and effective then
+				add(keys[i], effective)
+			end
+		end
+	end
+	if UnitArmor then
+		local ok, _, effective = pcall(UnitArmor, "player")
+		if ok and effective then
+			add("armor", effective)
+		end
+	end
+	if UnitAttackPower then
+		local ok, base, pos, neg = pcall(UnitAttackPower, "player")
+		if ok and base then
+			add("meleeAP", base + (pos or 0) + (neg or 0))
+		end
+	end
+	if UnitRangedAttackPower then
+		local ok, base, pos, neg = pcall(UnitRangedAttackPower, "player")
+		if ok and base then
+			add("rangedAP", base + (pos or 0) + (neg or 0))
+		end
+	end
+	if GetCritChance then
+		local ok, v = pcall(GetCritChance)
+		if ok and v then
+			add("meleeCrit", round1(v))
+		end
+	end
+	if GetRangedCritChance then
+		local ok, v = pcall(GetRangedCritChance)
+		if ok and v then
+			add("rangedCrit", round1(v))
+		end
+	end
+	if GetSpellCritChance then
+		local ok, v = pcall(GetSpellCritChance)
+		if ok and v then add("spellCrit", round1(v)) end
+	end
+	if GetSpellBonusDamage then
+		local best = 0
+		for school = 2, 7 do
+			local ok, v = pcall(GetSpellBonusDamage, school)
+			if ok and v and v > best then
+				best = v
+			end
+		end
+		add("spellDamage", best)
+	end
+	if GetSpellBonusHealing then
+		local ok, v = pcall(GetSpellBonusHealing)
+		if ok and v then
+			add("spellHealing", v)
+		end
+	end
+	if GetDodgeChance then
+		local ok, v = pcall(GetDodgeChance)
+		if ok and v then
+			add("dodge", round1(v))
+		end
+	end
+	if GetParryChance then
+		local ok, v = pcall(GetParryChance)
+		if ok and v then
+			add("parry", round1(v))
+		end
+	end
+	if GetBlockChance then
+		local ok, v = pcall(GetBlockChance)
+		if ok and v then
+			add("block", round1(v))
+		end
+	end
+	if UnitDefenseSkill then
+		local ok, base, mod = pcall(UnitDefenseSkill, "player")
+		if ok and base then
+			add("defense", base + (mod or 0))
+		end
+	end
+	return pack(lines)
+end
+
+local function collectProfessions()
+	local lines = {}
+	if not (C_SkillInfo and C_SkillInfo.GetNumSkillLines and C_SkillInfo.GetSkillLineInfo) then
+		return ""
+	end
+	local ok, count = pcall(C_SkillInfo.GetNumSkillLines)
+	if not ok or not count then
+		return ""
+	end
+	local category = ""
+	for i = 1, count do
+		local iok, info = pcall(C_SkillInfo.GetSkillLineInfo, i)
+		if iok and info then
+			if info.isHeader then
+				category = clean(info.name or "")
+			elseif info.name and info.name ~= "" then
+				lines[#lines + 1] = concat({
+					"s",
+					tostring(info.skillID or 0),
+					category,
+					tostring(info.rank or 0),
+					tostring(info.maxRank or 0),
+					tostring(info.modifier or 0),
+					clean(info.name),
+				}, "\t")
+			end
+		end
+	end
+	return pack(lines)
+end
+
+local function collectReputation()
+	local lines = {}
+	if not (C_Reputation and C_Reputation.GetNumFactions and C_Reputation.GetFactionDataByIndex) then
+		return ""
+	end
+	local ok, count = pcall(C_Reputation.GetNumFactions)
+	if not ok or not count then
+		return ""
+	end
+	local category = ""
+	for i = 1, count do
+		local iok, info = pcall(C_Reputation.GetFactionDataByIndex, i)
+		if iok and info then
+			if info.isHeader and not info.isHeaderWithRep then
+				category = clean(info.name or "")
+			elseif info.name and info.name ~= "" then
+				lines[#lines + 1] = concat({
+					"r",
+					tostring(info.factionID or 0),
+					category,
+					tostring(info.reaction or 0),
+					tostring(info.currentStanding or 0),
+					tostring(info.currentReactionThreshold or 0),
+					tostring(info.nextReactionThreshold or 0),
+					info.isWatched and "1" or "0",
+					clean(info.name),
+				}, "\t")
+			end
+		end
+	end
+	return pack(lines)
+end
+
+local function collectSpells()
+	local lines = {}
+	if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines and C_SpellBook.GetSpellBookSkillLineInfo and C_SpellBook.GetSpellBookItemInfo) then
+		return ""
+	end
+	local bank = (Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player) or 0
+	local ok, tabs = pcall(C_SpellBook.GetNumSpellBookSkillLines)
+	if not ok or not tabs then
+		return ""
+	end
+	local seenSpell = {}
+	for t = 1, tabs do
+		local tok, tab = pcall(C_SpellBook.GetSpellBookSkillLineInfo, t)
+		if tok and tab and not tab.shouldHide and not tab.isGuild then
+			local category = clean(tab.name or "")
+			local start = (tab.itemIndexOffset or 0) + 1
+			local stop = start + (tab.numSpellBookItems or 0) - 1
+			for slot = start, stop do
+				local low = false
+				if C_SpellBook.IsSpellBookItemLowRank then
+					local lok, isLow = pcall(C_SpellBook.IsSpellBookItemLowRank, slot, bank)
+					low = lok and isLow == true
+				end
+				if not low then
+					local iok, info = pcall(C_SpellBook.GetSpellBookItemInfo, slot, bank)
+					if iok and info and info.itemType == Enum.SpellBookItemType.Spell and not info.isOffSpec and info.name and info.name ~= "" and info.spellID and info.spellID > 0 then
+						if not seenSpell[info.spellID] then
+							seenSpell[info.spellID] = true
+							lines[#lines + 1] = concat({
+								"sp",
+								tostring(info.spellID),
+								category,
+								info.isPassive and "1" or "0",
+								clean(info.subName or ""),
+								clean(info.name),
+							}, "\t")
+						end
+					end
+				end
+			end
+		end
+	end
+	return pack(lines)
+end
+
+-- Last-seen snapshots (captured when the player visits bank, merchant or trainer) ----------
+
+local function bankBagIds()
+	if not (C_Bank and C_Bank.FetchPurchasedBankTabData and Enum and Enum.BankType) then return nil end
+	local ok, tabs = pcall(C_Bank.FetchPurchasedBankTabData, Enum.BankType.Character)
+	if not ok or type(tabs) ~= "table" then return nil end
+	local ids = {}
+	for _, tab in ipairs(tabs) do ids[#ids + 1] = tab.ID end
+	return ids
+end
+
+local function snapshotBank()
+	local total, free = 0, 0
+	local byId, ids = {}, {}
+	local bankIds = bankBagIds()
+	if not (bankIds and C_Container and C_Container.GetContainerNumSlots) then return end
+	do
+		for _, bag in ipairs(bankIds) do
+			local ok, slots = pcall(C_Container.GetContainerNumSlots, bag)
+			if ok and slots and slots > 0 then
+				total = total + slots
+				if C_Container.GetContainerNumFreeSlots then
+					local fok, f = pcall(C_Container.GetContainerNumFreeSlots, bag)
+					if fok and f then
+						free = free + f
+					end
+				end
+				for slot = 1, slots do
+					local iok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+					if iok and info and info.itemID then
+						local id = info.itemID
+						local count = info.stackCount or 1
+						local rec = byId[id]
+						if rec then
+							rec.count = rec.count + count
+						else
+							local itemName = info.itemName
+							if (not itemName or itemName == "") and info.hyperlink then
+								itemName = info.hyperlink:match("%[(.-)%]")
+							end
+							byId[id] = {
+								id = id,
+								count = count,
+								quality = info.quality,
+								name = clean(itemName or ""),
+							}
+							ids[#ids + 1] = id
+						end
+					end
+				end
+			end
+		end
+	end
+	sort(ids)
+	local lines = { format("meta\t%s\t%d\t%d", nowStamp(), free, total) }
+	for _, id in ipairs(ids) do
+		local rec = byId[id]
+		lines[#lines + 1] = concat({
+			"item",
+			tostring(rec.id),
+			tostring(rec.count),
+			rec.quality and tostring(rec.quality) or "",
+			rec.name,
+		}, "\t")
+	end
+	seen.bank = pack(lines)
+	revs.bank = (revs.bank or 0) + 1
+end
+
+local function snapshotMerchant()
+	if not GetMerchantNumItems then
+		return
+	end
+	local ok, count = pcall(GetMerchantNumItems)
+	if not ok or not count then
+		return
+	end
+	local npc = ""
+	if UnitName then
+		local nok, n = pcall(UnitName, "npc")
+		if nok and n then
+			npc = clean(n)
+		end
+	end
+	local lines = { format("meta\t%s\t%s", nowStamp(), npc) }
+	for i = 1, count do
+		local info
+		if C_MerchantFrame and C_MerchantFrame.GetItemInfo then
+			local iok, res = pcall(C_MerchantFrame.GetItemInfo, i)
+			if iok then
+				info = res
+			end
+		end
+		if info and info.name and info.name ~= "" then
+			local itemId = ""
+			if GetMerchantItemLink then
+				local lok, link = pcall(GetMerchantItemLink, i)
+				if lok and link then
+					itemId = link:match("item:(%d+)") or ""
+				end
+			end
+			lines[#lines + 1] = concat({
+				"m",
+				itemId,
+				tostring(info.price or 0),
+				tostring(info.stackCount or 1),
+				tostring(info.numAvailable or -1),
+				info.isUsable == false and "0" or "1",
+				clean(info.name),
+			}, "\t")
+			-- Items and currencies the offer costs besides money, one "mc" line each after its item.
+			if info.hasExtendedCost and GetMerchantItemCostInfo and GetMerchantItemCostItem then
+				local cok, costs = pcall(GetMerchantItemCostInfo, i)
+				for j = 1, (cok and costs) or 0 do
+					local iok, _, value, costLink, currencyName = pcall(GetMerchantItemCostItem, i, j)
+					if iok and value then
+						local kind, costId = "", ""
+						if costLink then
+							costId = costLink:match("item:(%d+)") or ""
+							if costId ~= "" then
+								kind = "item"
+							else
+								costId = costLink:match("currency:(%d+)") or ""
+								kind = costId ~= "" and "currency" or ""
+							end
+						end
+						local costName = currencyName or (costLink and costLink:match("%[(.-)%]")) or ""
+						lines[#lines + 1] = concat({ "mc", tostring(value), kind, costId, clean(costName) }, "\t")
+					end
+				end
+			end
+		end
+	end
+	seen.merchant = pack(lines)
+	revs.merchant = (revs.merchant or 0) + 1
+end
+
+local function snapshotTrainer()
+	if not (GetNumTrainerServices and GetTrainerServiceInfo) then
+		return
+	end
+	local ok, count = pcall(GetNumTrainerServices)
+	if not ok or not count then
+		return
+	end
+	local npc = ""
+	if UnitName then
+		local nok, n = pcall(UnitName, "npc")
+		if nok and n then
+			npc = clean(n)
+		end
+	end
+	-- Enum.TrainerType: a pet trainer's service cost is training points, not money.
+	local trainerType = ""
+	if C_Trainer and C_Trainer.GetTrainerType then
+		local tok, t = pcall(C_Trainer.GetTrainerType)
+		if tok and t then
+			trainerType = tostring(t)
+		end
+	end
+	local lines = { format("meta\t%s\t%s\t%s", nowStamp(), npc, trainerType) }
+	for i = 1, count do
+		local iok, name, serviceType, _, reqLevel, subText = pcall(GetTrainerServiceInfo, i)
+		if iok and name and name ~= "" and serviceType ~= "header" then
+			local cost = 0
+			if GetTrainerServiceCost then
+				local cok, c = pcall(GetTrainerServiceCost, i)
+				if cok and c then
+					cost = c
+				end
+			end
+			lines[#lines + 1] = concat({
+				"tr",
+				clean(serviceType or ""),
+				tostring(reqLevel or 0),
+				tostring(cost),
+				clean(subText or ""),
+				clean(name),
+			}, "\t")
+		end
+	end
+	seen.trainer = pack(lines)
+	revs.trainer = (revs.trainer or 0) + 1
+end
+
+local function collectSeen(key)
+	return function()
+		return seen[key] or "empty"
+	end
+end
+
 local COLLECTORS = {
 	eq = collectEquipment,
 	bags = collectBags,
 	quests = collectQuests,
 	talents = collectTalents,
+	stats = collectStats,
+	prof = collectProfessions,
+	rep = collectReputation,
+	spells = collectSpells,
+	bank = collectSeen("bank"),
+	merchant = collectSeen("merchant"),
+	trainer = collectSeen("trainer"),
 }
 
 -- Responds to pull requests from the app: "fetch\n<id>\n<slice>".
@@ -438,29 +906,107 @@ Transport.OnMessage(function(body)
 	Transport.Send(format("state\n%s\n%s\n%d\n%s", id, slice, rev, payload))
 end)
 
--- Event wiring: only bumps integer revisions, never serializes or sends.
-local EVENTS = {
-	PLAYER_EQUIPMENT_CHANGED = "eq",
-	BAG_UPDATE_DELAYED = "bags",
-	PLAYER_MONEY = "bags",
-	QUEST_LOG_UPDATE = "quests",
-	QUEST_WATCH_LIST_CHANGED = "quests",
-	TRAIT_CONFIG_UPDATED = "talents",
-	ACTIVE_COMBAT_CONFIG_CHANGED = "talents",
-	PLAYER_SPECIALIZATION_CHANGED = "talents",
-	TRAIT_TREE_CHANGED = "talents",
+-- Event wiring: bumps integer revisions, and snapshots last-seen frames while they are open.
+-- Events for the values collectStats reads, as the character sheet refreshes on them.
+local UNIT_EVENTS = {
+	UNIT_STATS = "stats",
+	UNIT_MAXHEALTH = "stats",
+	UNIT_MAXPOWER = "stats",
+	UNIT_DISPLAYPOWER = "stats", -- power type, for example in a druid form
+	UNIT_AURA = "stats",
+	UNIT_RESISTANCES = "stats", -- armor
+	UNIT_ATTACK_POWER = "stats",
+	UNIT_RANGED_ATTACK_POWER = "stats",
+	UNIT_DEFENSE = "stats",
+	PLAYER_DAMAGE_DONE_MODS = "stats", -- spell damage and healing
+}
+
+local BUMP_EVENTS = {
+	PLAYER_EQUIPMENT_CHANGED = { "eq", "stats" },
+	BAG_UPDATE_DELAYED = { "bags" },
+	PLAYER_MONEY = { "bags" },
+	QUEST_LOG_UPDATE = { "quests" },
+	QUEST_WATCH_LIST_CHANGED = { "quests" },
+	TRAIT_CONFIG_UPDATED = { "talents" },
+	ACTIVE_COMBAT_CONFIG_CHANGED = { "talents" },
+	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },
+	TRAIT_TREE_CHANGED = { "talents" },
+	PLAYER_TALENT_UPDATE = { "talents", "stats" },
+	ACTIVE_TALENT_GROUP_CHANGED = { "talents", "stats" },
+	COMBAT_RATING_UPDATE = { "stats" },
+	SPELL_POWER_CHANGED = { "stats" },
+	PLAYER_LEVEL_UP = { "stats" },
+	-- Skill lines include the defense skill.
+	SKILL_LINES_CHANGED = { "prof", "stats" },
+	UPDATE_FACTION = { "rep" },
+	SPELLS_CHANGED = { "spells" },
+	LEARNED_SPELL_IN_TAB = { "spells" },
+}
+
+local EXTRA_EVENTS = {
+	"BANKFRAME_OPENED",
+	"BANKFRAME_CLOSED",
+	"PLAYERBANKSLOTS_CHANGED",
+	"BANK_TABS_CHANGED",
+	"MERCHANT_SHOW",
+	"MERCHANT_UPDATE",
+	"TRAINER_SHOW",
+	"TRAINER_UPDATE",
+	"TRAINER_SERVICE_INFO_NAME_UPDATE",
+	"TRAINER_CLOSED",
 }
 
 function Collect.Init()
 	local f = CreateFrame("Frame")
-	for event in pairs(EVENTS) do
-		-- pcall so an event name absent in a client revision never breaks login.
+	for event in pairs(UNIT_EVENTS) do
 		pcall(f.RegisterEvent, f, event)
 	end
-	f:SetScript("OnEvent", function(_, event)
-		local slice = EVENTS[event]
-		if slice then
-			revs[slice] = (revs[slice] or 0) + 1
+	for event in pairs(BUMP_EVENTS) do
+		pcall(f.RegisterEvent, f, event)
+	end
+	for _, event in ipairs(EXTRA_EVENTS) do
+		pcall(f.RegisterEvent, f, event)
+	end
+	f:SetScript("OnEvent", function(_, event, arg1)
+		local unitSlice = UNIT_EVENTS[event]
+		if unitSlice then
+			if arg1 == "player" then
+				revs[unitSlice] = (revs[unitSlice] or 0) + 1
+			end
+			return
+		end
+		local list = BUMP_EVENTS[event]
+		if list then
+			for i = 1, #list do
+				local s = list[i]
+				revs[s] = (revs[s] or 0) + 1
+			end
+			if event == "BAG_UPDATE_DELAYED" and bankOpen then
+				pcall(snapshotBank)
+			end
+			return
+		end
+		if event == "BANKFRAME_OPENED" then
+			bankOpen = true
+			pcall(snapshotBank)
+		elseif event == "BANKFRAME_CLOSED" then
+			bankOpen = false
+		elseif event == "PLAYERBANKSLOTS_CHANGED" or event == "BANK_TABS_CHANGED" then
+			if bankOpen then
+				pcall(snapshotBank)
+			end
+		elseif event == "MERCHANT_SHOW" or event == "MERCHANT_UPDATE" then
+			pcall(snapshotMerchant)
+		elseif event == "TRAINER_SHOW" then
+			trainerOpen = true
+			pcall(snapshotTrainer)
+		elseif event == "TRAINER_CLOSED" then
+			trainerOpen = false
+		elseif event == "TRAINER_UPDATE" or event == "TRAINER_SERVICE_INFO_NAME_UPDATE" then
+			-- Service names can arrive after the window opens; rows without one were left out.
+			if trainerOpen then
+				pcall(snapshotTrainer)
+			end
 		end
 	end)
 end
