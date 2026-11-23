@@ -36,13 +36,35 @@ bun run build             # single executables for Windows and Linux in core/dis
 
 ## Brain
 
-`familiar` is a bridge: it hands each question to an agent that speaks ACP and sends the answer back to the game ([ADR 0006](../docs/adr/0006-brains-a-bridge-to-the-players-agent.md)). Set the agent up in the agent itself, as you use it anyway: model, tools, skills, MCP servers and what it may do without asking. Familiar changes none of that.
+Two kinds of brain can answer, and `brain.use` picks one:
+
+- `"agent"` (the default): an agent you already use, such as Hermes, Codex or Claude Code, through ACP. Familiar is only the bridge to it.
+- `"model"`: Familiar's built-in agent with a model from a provider, by API key or on your own PC. See [The built-in agent](#the-built-in-agent).
+
+### Which one?
+
+|                                                  | Your own agent (`"agent"`)                                                      | Built-in agent (`"model"`)                                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| What you need                                    | an agent such as Hermes, Codex, Claude Code or Gemini CLI, set up and signed in | an API key from a provider, or a local model in Ollama or LM Studio                                                          |
+| Game tools: gear, bags, quests, talents, stats … | all of them, through the `wow` server                                           | all of them, called in the app                                                                                               |
+| Web research, skills, the agent's own memory     | whatever your agent has                                                         | none: it knows your character and what the model learned                                                                     |
+| Speed in our tests                               | through Hermes: 8–42 s with character data, 23–94 s with web research           | 2–8 s with small models                                                                                                      |
+| Cost                                             | your agent's plan or model                                                      | per question at your provider; with the small models we tested, about a tenth of a US cent or less (prices of November 2026) |
+| Model and prompt                                 | set in your agent                                                               | set in Familiar's settings, with Familiar's own rules                                                                        |
+| Good for                                         | research: where a quest NPC stands, what drops where, guides                    | quick questions about your character: gear, talents, quests, bags, what a trainer offers                                     |
+
+Every game tool Familiar adds reaches both. Where they differ is knowledge from outside the game, such as Forever drops, NPC locations or guides: an agent can search the web, the built-in agent cannot yet. A lookup of Forever game data for both (FAM-55) and the providers' own web search for the built-in agent are planned.
 
 On the first start, `familiar` writes its settings with the defaults: `%APPDATA%\Familiar\settings.json` on Windows, `~/.config/familiar/settings.json` on Linux. `--settings <file>` uses another file.
+
+### Your own agent
+
+`familiar` hands each question to an agent that speaks ACP and sends the answer back to the game ([ADR 0006](../docs/adr/0006-brains-a-bridge-to-the-players-agent.md)). Set the agent up in the agent itself, as you use it anyway: model, tools, skills, MCP servers and what it may do without asking. Familiar changes none of that.
 
 ```json
 {
 	"brain": {
+		"use": "agent",
 		"command": ["hermes", "acp"],
 		"permissions": "ask",
 		"timeout": 120
@@ -55,6 +77,7 @@ On the first start, `familiar` writes its settings with the defaults: `%APPDATA%
 
 | Setting       | Meaning                                                                         |
 | ------------- | ------------------------------------------------------------------------------- |
+| `use`         | `agent` for your own agent, `model` for the built-in agent                      |
 | `command`     | starts the agent, which must speak ACP on stdin and stdout                      |
 | `permissions` | the answer when the agent asks for permission: `ask` (default), `deny`, `allow` |
 | `timeout`     | seconds until Familiar cancels a question                                       |
@@ -73,9 +96,40 @@ Hermes takes `--profile <name>` before `acp` for another profile. Codex and Clau
 
 For an agent on another host, set `cwd` to a folder on that host; Familiar itself starts `ssh` in its settings folder. SSH runs the command without your login profile, so give the agent's full path. Sign in with a key: Familiar cannot answer a password prompt, and `-o BatchMode=yes` after `ssh` turns a missing key into an error message instead of a wait. Such an agent needs two more options to reach the game tools, see below.
 
-`familiar` starts the agent at the first question and keeps it running. While the agent works, the console shows each tool it calls, such as `> web_search: …`, and each one that fails. The game window shows the tool too, at most one every four seconds, because each line costs a font of the bank. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Answers longer than four fonts of the bank (1968 bytes) are cut. If no answer reaches the game within the timeout and 30 seconds more, as when `familiar` was started again meanwhile, the window says that the question is lost and stops waiting.
+`familiar` starts the agent at the first question and keeps it running. While the agent works, the console shows each tool it calls, such as `> web_search: …`, and each one that fails. The game window shows the tool too, at most one every four seconds, because each line costs a font of the bank. Each question carries the character's name, realm, level, race, class, faction, zone and game language. A question that starts with `/` goes to the agent as typed, for the commands it offers, such as `/tools` in Hermes. Familiar removes the Markdown marks models write anyway, such as `**bold**`, because the window shows plain text. Answers longer than four fonts of the bank (1968 bytes) are cut. If no answer reaches the game within the timeout and 30 seconds more, as when `familiar` was started again meanwhile, the window says that the question is lost and stops waiting.
 
 Each character gets its own session in the agent, and it lasts as long as `familiar` runs: after `/reload` or a restart of WoW, the conversation goes on where it stopped. Another character starts its own session, and switching back continues the first one. Starting `familiar` again starts a new session, and so does the agent's next start after it quit or ignored a timeout. The agent keeps its sessions as it keeps any other, so Hermes, for example, lists them with the sessions from its other clients. The game window keeps the last 200 lines of each character, like its session, even after a new start, so it may then show lines the agent no longer knows.
+
+### The built-in agent
+
+For players without an agent of their own ([ADR 0008](../docs/adr/0008-built-in-agent.md)). Familiar asks the model itself and lets it call the [game tools](#game-tools) in the app: up to 8 rounds of tool calls per question, then the answer. It has no web, file or shell tools, so for facts beyond your character it answers from what the model knows and says when that may differ in Forever.
+
+```json
+{
+	"brain": {
+		"use": "model",
+		"model": { "provider": "openrouter", "name": "openai/gpt-6-luna" },
+		"timeout": 120
+	}
+}
+```
+
+| `provider`          | Key from the environment variable | Notes                                         |
+| ------------------- | --------------------------------- | --------------------------------------------- |
+| `openai`            | `OPENAI_API_KEY`                  |                                               |
+| `anthropic`         | `ANTHROPIC_API_KEY`               | Claude only with an API key (ADR 0001)        |
+| `google`            | `GOOGLE_GENERATIVE_AI_API_KEY`    | Google AI Studio                              |
+| `openrouter`        | `OPENROUTER_API_KEY`              | many providers' models with one key           |
+| `deepseek`          | `DEEPSEEK_API_KEY`                |                                               |
+| `ollama`            | none                              | a local model, `http://127.0.0.1:11434/v1`    |
+| `lmstudio`          | none                              | a local model, `http://127.0.0.1:1234/v1`     |
+| `openai-compatible` | none, or `apiKey`                 | any OpenAI-compatible server; needs `baseUrl` |
+
+`name` is the model's name at the provider. `baseUrl` overrides the provider's address, for example for Ollama on another PC. `apiKey` in the settings works too, but the environment variable keeps the key out of the file; the desktop app will keep it in the system keychain. Familiar sends the key only to the provider and never logs it. Without a key, the game window says which variable to set.
+
+Pick a fast model that can call tools. A small model answers questions about your character in a few seconds; a large model with long reasoning takes much longer and costs more. What you pay is between you and the provider. Tested through OpenRouter on 2026-11-23, each answering in 2 to 8 s: `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `google/gemini-3.5-flash` and `deepseek/deepseek-v4.1-flash`.
+
+The built-in agent keeps the last 12 questions and answers of each character while `familiar` runs, each answer up to 2000 characters, so a follow-up question works; tool results are not kept, and the model fetches the game state again. Starting `familiar` again starts a fresh conversation. The log records the provider, model, duration, tool names and token counts of each answer, not its text. The `wow` server below does not start for the built-in agent: it calls the tools in the app itself.
 
 ## Game tools
 

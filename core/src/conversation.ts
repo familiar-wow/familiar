@@ -77,7 +77,7 @@ export class Conversation {
 			onPermission: (title) => this.permission(title),
 		});
 		status.stop();
-		const text = clip(reply, MAX_ANSWER);
+		const text = clip(plain(reply), MAX_ANSWER);
 		if (this.down({ kind: "answer", text })) {
 			const s = ((performance.now() - asked) / 1000).toFixed(1);
 			this.log.say(
@@ -112,6 +112,30 @@ export class Conversation {
 			return false;
 		}
 	}
+}
+
+/**
+ * The answer without the Markdown that models write even when told not to: the game window
+ * shows plain text, so **bold**, __bold__, `code` and "# " headings would show as their marks.
+ * Game links such as [item:19019] stay as they are.
+ */
+export function plain(text: string): string {
+	// Code keeps its content: it is set aside, the marks around it go, then it comes back
+	// without its backticks, so `__init__` stays a name.
+	const code: string[] = [];
+	// The placeholder is a private-use character; one already in the answer means nothing and
+	// would mix with the placeholders, so it goes first.
+	const marked = text
+		.replaceAll("\uE000", "")
+		.replace(/(`+)([^\n]*?[^`\n])\1(?!`)/g, (_, _ticks, inner: string) => {
+			code.push(inner);
+			return `\uE000${code.length - 1}\uE000`;
+		});
+	return marked
+		.replace(/^#{1,6} +/gm, "")
+		.replace(/\*\*(.+?)\*\*/g, "$1")
+		.replace(/__(.+?)__/g, "$1")
+		.replace(/\uE000(\d+)\uE000/g, (_, i: string) => code[Number(i)] ?? "");
 }
 
 /**

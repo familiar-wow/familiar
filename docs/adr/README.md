@@ -11,5 +11,6 @@ Each record explains one decision with its context, alternatives and consequence
 | [0005](0005-transport-addons-txt-lane-and-font-bank.md)      | Transport: AddOns.txt lane up, font bank and doorbell down | Accepted |
 | [0006](0006-brains-a-bridge-to-the-players-agent.md)         | Brains: a bridge to the player's agent                     | Accepted |
 | [0007](0007-mcp-server-wow-over-http.md)                     | The `wow` server: MCP over HTTP from the app               | Accepted |
+| [0008](0008-built-in-agent.md)                               | The built-in agent                                         | Accepted |
 
 A new record takes the next free number and the same sections: a status block, then Context, Decision, Alternatives and Consequences.

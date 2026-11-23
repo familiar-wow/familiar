@@ -14,6 +14,8 @@ You pick the AI behind it:
 - a local model in Ollama or LM Studio
 - an agent you already use, such as Hermes, OpenClaw, Gemini CLI, Codex or Pi
 
+A model with an API key answers questions about your character in a few seconds. An agent you already use takes longer but can also research the web. [How the two compare](core/README.md#which-one).
+
 The memory belongs to Familiar, not to the model, so switching models does not reset it.
 
 ## How it works
@@ -30,15 +32,15 @@ Familiar only advises. It never moves, casts or targets for you. The design is d
 
 ## Roadmap
 
-| Phase                     | Goal                                                                   | Status                          |
-| ------------------------- | ---------------------------------------------------------------------- | ------------------------------- |
-| 0 Foundation              | repository, tooling and the first architecture decisions               | done                            |
-| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | in progress: chat window built  |
-| 2 Game context and links  | the full character as context, links in both directions                | in progress: links & collectors |
-| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    |                                 |
-| 4 Memory                  | a memory that survives a change of brain                               |                                 |
-| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    |                                 |
-| 6 Public alpha            | release on CurseForge, website and user docs                           |                                 |
+| Phase                     | Goal                                                                   | Status                      |
+| ------------------------- | ---------------------------------------------------------------------- | --------------------------- |
+| 0 Foundation              | repository, tooling and the first architecture decisions               | done                        |
+| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | done                        |
+| 2 Game context and links  | the full character as context, links in both directions                | in progress: 12 game tools  |
+| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    | in progress: built-in agent |
+| 4 Memory                  | a memory that survives a change of brain                               |                             |
+| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    |                             |
+| 6 Public alpha            | release on CurseForge, website and user docs                           |                             |
 
 ## Repository
 

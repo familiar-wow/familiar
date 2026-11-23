@@ -26,7 +26,13 @@ function brain(
 	wow?: McpServer,
 ): AcpBrain {
 	const created = new AcpBrain(
-		{ command: FAKE, permissions: "deny", timeout: 10, ...settings },
+		{
+			use: "agent",
+			command: FAKE,
+			permissions: "deny",
+			timeout: 10,
+			...settings,
+		},
 		{ folder, log, version: "0.0.0-test", wow },
 	);
 	brains.push(created);

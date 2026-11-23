@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { AcpBrain } from "./brain/acp.ts";
+import type { Brain } from "./brain/chat.ts";
+import { ModelBrain, missing } from "./brain/model.ts";
 import { Conversation } from "./conversation.ts";
 import { echoBrain } from "./echo.ts";
 import { Game } from "./game.ts";
@@ -93,16 +95,29 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		interface: iface,
 		build,
 		install: result,
-		brain: options.echo ? "echo" : settings.brain.command,
+		brain: options.echo
+			? "echo"
+			: settings.brain.use === "model"
+				? {
+						provider: settings.brain.model?.provider,
+						model: settings.brain.model?.name,
+					}
+				: settings.brain.command,
 	});
 	console.log(`familiar ${VERSION}`);
 	console.log(
 		`Client: ${paths.client} (interface ${iface}${build ? `, ${build}` : ""})`,
 	);
 	console.log(`Log:    ${logFile}`);
-	const { command, permissions, cwd } = settings.brain;
+	const { command, permissions, cwd, use, model } = settings.brain;
 	if (options.echo) console.log("Brain:  an echo, to test the transport");
-	else {
+	else if (use === "model" && model) {
+		console.log(
+			`Brain:  Familiar's built-in agent with ${model.name} from ${model.provider}, set in ${settingsFile}`,
+		);
+		const problem = missing(model);
+		if (problem) console.log(`\n!! ${problem}\n`);
+	} else {
 		console.log(
 			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
 		);
@@ -112,10 +127,11 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,
 			);
 	}
-	// The game's state as tools for the agent (ADR 0007). The echo has no use for them.
+	// The game's state as tools for the agent (ADR 0007). The echo has no use for them, and the
+	// built-in agent calls them in this process (ADR 0008).
 	const game = new Game();
 	let wow: McpServer | undefined;
-	if (!options.echo) {
+	if (!options.echo && use === "agent") {
 		const { port } = settings.mcp;
 		try {
 			wow = serveMcp({ port, tools: wowTools(game), version: VERSION, log });
@@ -140,12 +156,15 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		console.log("WoW is running: type /reload in game.");
 
 	// Starts nothing until the first question.
-	const brain = new AcpBrain(settings.brain, {
-		folder: dirname(settingsFile),
-		log,
-		version: VERSION,
-		wow,
-	});
+	const brain: Brain & { stop?: () => void } =
+		use === "model"
+			? new ModelBrain(settings.brain, { log, tools: wowTools(game) })
+			: new AcpBrain(settings.brain, {
+					folder: dirname(settingsFile),
+					log,
+					version: VERSION,
+					wow,
+				});
 	const transport = new Transport({
 		paths,
 		log,
@@ -165,7 +184,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 	console.log("\nReady. In game, /familiar opens the window. Ctrl+C stops.\n");
 	const stop = () => {
 		transport.stop();
-		brain.stop();
+		brain.stop?.();
 		wow?.stop();
 		process.exit(0);
 	};
