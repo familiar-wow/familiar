@@ -160,13 +160,7 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		log,
 		game,
 	);
-	transport.onMessage((body, { hello }) => {
-		if (hello) {
-			conversation.hello();
-			return log.say(`The addon says hello: ${new TextDecoder().decode(body)}`);
-		}
-		conversation.receive(body);
-	});
+	transport.onMessage((body, info) => conversation.receive(body, info));
 	await transport.start();
 	console.log("\nReady. In game, /familiar opens the window. Ctrl+C stops.\n");
 	const stop = () => {

@@ -139,10 +139,8 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		log,
 		gameState,
 	);
-	transport.onMessage((body, { hello }) => {
-		if (hello) conversation.hello();
-		else conversation.receive(body);
-	});
+	// The same wiring as main.ts.
+	transport.onMessage((body, info) => conversation.receive(body, info));
 	await transport.start();
 	app = transport;
 }

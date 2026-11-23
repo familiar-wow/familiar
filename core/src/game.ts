@@ -310,6 +310,7 @@ export class Game {
 	forget(): void {
 		this.last = undefined;
 		this.cache.clear();
+		this.inflight.clear();
 		for (const [id, waiting] of this.pending) {
 			clearTimeout(waiting.timer);
 			waiting.reject(new Error("The game reloaded its interface; ask again."));
@@ -367,7 +368,9 @@ export class Game {
 				);
 			}
 		}).finally(() => {
-			this.inflight.delete(flightKey);
+			// After forget() a newer pull may own the key.
+			if (this.inflight.get(flightKey) === promise)
+				this.inflight.delete(flightKey);
 		});
 		this.inflight.set(flightKey, promise);
 		return promise as unknown as Promise<SliceResult<K>>;

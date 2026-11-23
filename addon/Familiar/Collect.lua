@@ -907,11 +907,12 @@ Transport.OnMessage(function(body)
 end)
 
 -- Event wiring: bumps integer revisions, and snapshots last-seen frames while they are open.
--- Every value collectStats reads has an event here, so a changed stat never keeps its revision.
+-- Events for the values collectStats reads, as the character sheet refreshes on them.
 local UNIT_EVENTS = {
 	UNIT_STATS = "stats",
 	UNIT_MAXHEALTH = "stats",
 	UNIT_MAXPOWER = "stats",
+	UNIT_DISPLAYPOWER = "stats", -- power type, for example in a druid form
 	UNIT_AURA = "stats",
 	UNIT_RESISTANCES = "stats", -- armor
 	UNIT_ATTACK_POWER = "stats",
@@ -930,6 +931,8 @@ local BUMP_EVENTS = {
 	ACTIVE_COMBAT_CONFIG_CHANGED = { "talents" },
 	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },
 	TRAIT_TREE_CHANGED = { "talents" },
+	PLAYER_TALENT_UPDATE = { "talents", "stats" },
+	ACTIVE_TALENT_GROUP_CHANGED = { "talents", "stats" },
 	COMBAT_RATING_UPDATE = { "stats" },
 	SPELL_POWER_CHANGED = { "stats" },
 	PLAYER_LEVEL_UP = { "stats" },

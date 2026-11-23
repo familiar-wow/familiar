@@ -261,7 +261,13 @@ test("forgets cached slices and pending pulls when the game reloads its interfac
 	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
 	const pending = game.get("eq");
 	game.forget();
+	// A read right after the reset pulls anew instead of joining the dropped pull.
+	answer = true;
+	game.see({ name: "Hero", realm: "Realm" }, { eq: 2 });
+	const fresh = game.get("eq");
 	await expect(pending).rejects.toThrow("reloaded");
+	expect((await fresh).cached).toBe(false);
+	expect(fetches).toBe(4);
 });
 
 test("parses merchant extended costs and pet trainer points", () => {

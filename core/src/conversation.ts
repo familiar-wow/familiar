@@ -37,14 +37,17 @@ export class Conversation {
 		);
 	}
 
-	/** The addon said hello: the game loaded its interface, so earlier game state is stale. */
-	hello(): void {
-		this.game.forget();
-	}
-
-	/** Handles a message from the addon. */
-	receive(body: Uint8Array): void {
+	/**
+	 * Handles a message from the addon. A hello means the game loaded its interface, which
+	 * restarts the addon's revision counters, so the game state learned before is stale.
+	 */
+	receive(body: Uint8Array, { hello = false }: { hello?: boolean } = {}): void {
 		const text = new TextDecoder().decode(body);
+		if (hello) {
+			this.game.forget();
+			this.log.say(`The addon says hello: ${text}`);
+			return;
+		}
 		const m = parseUp(text);
 		if (!m) this.log.say(`Unknown message from the addon: ${text}`);
 		else if (m.kind === "question") void this.answer(m.question);
