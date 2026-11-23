@@ -123,13 +123,14 @@ export function plain(text: string): string {
 	// Code keeps its content: it is set aside, the marks around it go, then it comes back
 	// without its backticks, so `__init__` stays a name.
 	const code: string[] = [];
-	const marked = text.replace(
-		/(`+)([^\n]*?[^`\n])\1(?!`)/g,
-		(_, _ticks, inner: string) => {
+	// The placeholder is a private-use character; one already in the answer means nothing and
+	// would mix with the placeholders, so it goes first.
+	const marked = text
+		.replaceAll("\uE000", "")
+		.replace(/(`+)([^\n]*?[^`\n])\1(?!`)/g, (_, _ticks, inner: string) => {
 			code.push(inner);
 			return `\uE000${code.length - 1}\uE000`;
-		},
-	);
+		});
 	return marked
 		.replace(/^#{1,6} +/gm, "")
 		.replace(/\*\*(.+?)\*\*/g, "$1")

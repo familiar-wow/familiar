@@ -4,8 +4,10 @@ import { expect, test } from "bun:test";
 import type { LanguageModelV4CallOptions } from "@ai-sdk/provider";
 import { APICallError, RetryError } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
+import { Game } from "../game.ts";
 import type { Log } from "../log.ts";
 import type { Tool } from "../mcp/server.ts";
+import { wowTools } from "../mcp/tools.ts";
 import type { Settings } from "../settings.ts";
 import type { Question, Turn } from "./chat.ts";
 import {
@@ -479,4 +481,45 @@ test("keeps at most 2000 characters of each answer", async () => {
 	const kept = prompts[1]?.join("\n") ?? "";
 	expect(kept).toContain("x".repeat(2000));
 	expect(kept).not.toContain("TAIL");
+});
+
+test("the real game tools check integers and booleans before they ask the game", async () => {
+	const cases: [string, Record<string, unknown>, string][] = [
+		["quests", { questId: "783" }, "Invalid arguments for quests"],
+		["quests", { questId: 78.3 }, "Invalid arguments for quests"],
+		["trainer", { onlyAvailable: "yes" }, "Invalid arguments for trainer"],
+		// Valid arguments pass the check and reach the game, which is not connected here.
+		["quests", { questId: 783 }, "No connection to the game client"],
+		["trainer", { onlyAvailable: true }, "No connection to the game client"],
+	];
+	for (const [name, args, expected] of cases) {
+		const prompts: string[][] = [];
+		const first = {
+			...call(name, {}),
+			content: [
+				{
+					type: "tool-call" as const,
+					toolCallId: "c1",
+					toolName: name,
+					input: JSON.stringify(args),
+				},
+			],
+		};
+		const replies = [first, text("done")];
+		const model = new MockLanguageModelV4({
+			doGenerate: async (options) => {
+				prompts.push(seen(options));
+				return replies.shift() ?? text("?");
+			},
+		});
+		const brain = new ModelBrain(settings, {
+			log,
+			tools: wowTools(new Game()),
+			model,
+		});
+		await brain.ask(hero, turn().t);
+		expect(
+			`${name} ${JSON.stringify(args)}: ${prompts[1]?.join("\n")}`,
+		).toContain(expected);
+	}
 });

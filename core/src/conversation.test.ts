@@ -120,4 +120,5 @@ test("keeps what stands inside code as it is", () => {
 	);
 	expect(plain("**Use `foo` here**")).toBe("Use foo here");
 	expect(plain("``a`__b__`c``")).toBe("a`__b__`c");
+	expect(plain("A\uE0000\uE000B and `foo`")).toBe("A0B and foo");
 });
