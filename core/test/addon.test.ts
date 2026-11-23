@@ -140,7 +140,8 @@ async function startApp(welcome = "the test app"): Promise<void> {
 		gameState,
 	);
 	transport.onMessage((body, { hello }) => {
-		if (!hello) conversation.receive(body);
+		if (hello) conversation.hello();
+		else conversation.receive(body);
 	});
 	await transport.start();
 	app = transport;
@@ -656,5 +657,86 @@ test("reads the second collectors through the addon and keeps session-only visit
 		services: [{ name: "Charge", cost: { copper: 100 } }],
 	});
 	expect(await call("bank")).toMatchObject({ cached: true });
+	expect(errors).toEqual([]);
+}, 60_000);
+
+test("collector revisions follow late events and restart with the interface", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	const call = async (name: string, args: Record<string, unknown> = {}) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return await tool.call(args);
+	};
+
+	// A defense change alone bumps stats, so the cached sheet is not served again.
+	at = await roundTrip("stats before", /heard: stats before$/, at);
+	expect(await call("stats")).toMatchObject({ defense: 100 });
+	command("set defense 101");
+	command("fire UNIT_DEFENSE player");
+	at = await roundTrip("stats after", /heard: stats after$/, at);
+	expect(await call("stats")).toMatchObject({ defense: 101, cached: false });
+
+	// Trainer names that load after the window opened still reach the snapshot.
+	command("set trainerNames 0");
+	command("fire TRAINER_SHOW");
+	at = await roundTrip("trainer open", /heard: trainer open$/, at);
+	expect(await call("trainer")).toMatchObject({
+		available: true,
+		services: [],
+	});
+	command("set trainerNames 1");
+	command("fire TRAINER_SERVICE_INFO_NAME_UPDATE");
+	command("fire TRAINER_CLOSED");
+	at = await roundTrip("names loaded", /heard: names loaded$/, at);
+	expect(await call("trainer")).toMatchObject({
+		cached: false,
+		trainerType: "general",
+		services: [{ name: "Charge", cost: { copper: 100 } }],
+	});
+
+	// A pet trainer's costs are training points.
+	command("set trainerType 3");
+	command("fire TRAINER_SHOW");
+	command("fire TRAINER_CLOSED");
+	at = await roundTrip("pet trainer", /heard: pet trainer$/, at);
+	expect(await call("trainer")).toMatchObject({
+		trainerType: "pet",
+		services: [{ name: "Charge", cost: { trainingPoints: 100 } }],
+	});
+
+	// Revisions restart with every interface load: merchant A and B both get revision 1.
+	command("reload");
+	at = await waitFor(CONNECTED, at);
+	command("fire MERCHANT_SHOW");
+	at = await roundTrip("merchant a", /heard: merchant a$/, at);
+	expect(await call("merchant")).toMatchObject({
+		revision: 1,
+		items: [{ name: "Water" }],
+	});
+	command("reload");
+	at = await waitFor(CONNECTED, at);
+	command("set merchantItem Ogre Tea");
+	command("set token 1");
+	command("fire MERCHANT_SHOW");
+	at = await roundTrip("merchant b", /heard: merchant b$/, at);
+	expect(await call("merchant")).toMatchObject({
+		revision: 1,
+		cached: false,
+		items: [
+			{
+				name: "Ogre Tea",
+				price: { copper: 0 },
+				extendedCost: [{ amount: 2, itemId: 29434, name: "Badge of Justice" }],
+			},
+		],
+	});
+
+	for (const [key, value] of Object.entries({
+		defense: "100",
+		merchantItem: "Water",
+		token: "0",
+		trainerType: "0",
+	}))
+		command(`set ${key} ${value}`);
 	expect(errors).toEqual([]);
 }, 60_000);

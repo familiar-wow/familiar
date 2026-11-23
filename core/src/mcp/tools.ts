@@ -257,7 +257,7 @@ export function wowTools(game: Game): Tool[] {
 		{
 			name: "merchant",
 			description:
-				"Goods offered by the merchant the player last opened during this WoW Forever session (NPC name, timestamp, items with ID, price, stack count and usability). Returns available=false if no merchant was opened since login/reload.",
+				"Goods offered by the merchant the player last opened during this WoW Forever session (NPC name, timestamp, items with ID, money price, other costs in items or currencies, stack count and usability). Returns available=false if no merchant was opened since login/reload.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -285,7 +285,7 @@ export function wowTools(game: Game): Tool[] {
 		{
 			name: "trainer",
 			description:
-				"Spells or skills offered by the class/profession trainer the player last opened during this WoW Forever session (NPC name, timestamp, status such as available/unavailable/used, required level and cost). Returns available=false if no trainer was opened since login/reload.",
+				"Spells or skills offered by the class/profession trainer the player last opened during this WoW Forever session (NPC name, timestamp, status such as available/unavailable/used, required level and cost in money, or in training points at a pet trainer). Returns available=false if no trainer was opened since login/reload.",
 			inputSchema: {
 				type: "object",
 				properties: {

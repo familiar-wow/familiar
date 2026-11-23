@@ -30,6 +30,9 @@
 --   slide <caption> <n> drag the slider with this caption to <n> and let go
 --   poke <addon>        something other than Familiar enables an addon, as an addon manager does
 --   equip <slot> <id>   put an item into a slot for the active character and fire equipment changed
+--   visit               open and close the bank, a merchant and a trainer
+--   set <key> <value>   change what a stubbed game API answers (see `stub`)
+--   fire <event> [arg]  fire a game event, with one optional argument
 --   texts               report what the font strings show
 -- Output: "chat <text>" for every line the addon prints, "window <text>" for every line added to
 -- a message frame, "backfill <text>" for every line restored into one, "font <file> <height>
@@ -440,6 +443,15 @@ end
 -- UI sessions ------------------------------------------------------------------------
 local env
 
+-- What a few game APIs answer, changed with "set <key> <value>"; it survives a reload.
+local stub = {
+	defense = "100", -- UnitDefenseSkill
+	merchantItem = "Water", -- the merchant's only offer
+	token = "0", -- 1: the offer also costs 2 Badge of Justice
+	trainerNames = "1", -- 0: service names have not loaded yet
+	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
+}
+
 local function fire(event, ...)
 	for _, frame in ipairs(frames) do
 		if frame.events[event] and frame.scripts.OnEvent then
@@ -716,11 +728,23 @@ local function api()
 	e.C_SpellBook = {GetNumSpellBookSkillLines = function() return 1 end,
 		GetSpellBookSkillLineInfo = function() return {name="Fire", itemIndexOffset=0, numSpellBookItems=2} end,
 		GetSpellBookItemInfo = function(i) return i == 1 and {name="Fireball", spellID=133, itemType=1} or {name="Future", spellID=999, itemType=2} end}
+	e.UnitDefenseSkill = function() return tonumber(stub.defense), 0 end
 	e.GetMerchantNumItems = function() return 1 end
-	e.C_MerchantFrame = {GetItemInfo = function() return {name="Water", price=25} end}
+	e.C_MerchantFrame = {GetItemInfo = function()
+		return {name=stub.merchantItem, price=stub.token == "1" and 0 or 25, hasExtendedCost=stub.token == "1"}
+	end}
+	e.GetMerchantItemCostInfo = function() return 1 end
+	e.GetMerchantItemCostItem = function(i, j)
+		assert(i == 1 and j == 1)
+		return 133633, 2, "|cnIQ4:|Hitem:29434::::::::70:::::|h[Badge of Justice]|h|r", nil
+	end
 	e.GetNumTrainerServices = function() return 1 end
-	e.GetTrainerServiceInfo = function() return "Charge", "available", nil, 4 end
+	e.GetTrainerServiceInfo = function()
+		if stub.trainerNames == "0" then return nil end
+		return "Charge", "available", nil, 4
+	end
 	e.GetTrainerServiceCost = function() return 100 end
+	e.C_Trainer = {GetTrainerType = function() return tonumber(stub.trainerType) end}
 	e.C_ClassTalents = {
 		GetActiveConfigID = function()
 			return 1
@@ -952,6 +976,13 @@ for line in io.lines() do
 		end
 	elseif command == "poke" then
 		env.C_AddOns.EnableAddOn(rest)
+	elseif command == "set" then
+		local key, value = rest:match("^(%S+)%s+(.-)$")
+		assert(stub[key], "unknown stub " .. tostring(key))
+		stub[key] = value
+	elseif command == "fire" then
+		local event, arg = rest:match("^(%S+)%s*(.-)$")
+		fire(event, arg ~= "" and arg or nil)
 	elseif command == "visit" then
 		for _, event in ipairs({"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "MERCHANT_SHOW", "MERCHANT_CLOSED", "TRAINER_SHOW", "TRAINER_CLOSED"}) do fire(event) end
 	elseif command == "equip" then

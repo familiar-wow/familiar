@@ -46,7 +46,7 @@ local REV_ORDER = {
 
 -- Cached last-seen payloads captured while the player has the bank, a merchant or a trainer open.
 local seen = {}
-local bankOpen = false
+local bankOpen, trainerOpen = false, false
 
 local function nowStamp()
 	if type(date) == "function" then
@@ -791,6 +791,27 @@ local function snapshotMerchant()
 				info.isUsable == false and "0" or "1",
 				clean(info.name),
 			}, "\t")
+			-- Items and currencies the offer costs besides money, one "mc" line each after its item.
+			if info.hasExtendedCost and GetMerchantItemCostInfo and GetMerchantItemCostItem then
+				local cok, costs = pcall(GetMerchantItemCostInfo, i)
+				for j = 1, (cok and costs) or 0 do
+					local iok, _, value, costLink, currencyName = pcall(GetMerchantItemCostItem, i, j)
+					if iok and value then
+						local kind, costId = "", ""
+						if costLink then
+							costId = costLink:match("item:(%d+)") or ""
+							if costId ~= "" then
+								kind = "item"
+							else
+								costId = costLink:match("currency:(%d+)") or ""
+								kind = costId ~= "" and "currency" or ""
+							end
+						end
+						local costName = currencyName or (costLink and costLink:match("%[(.-)%]")) or ""
+						lines[#lines + 1] = concat({ "mc", tostring(value), kind, costId, clean(costName) }, "\t")
+					end
+				end
+			end
 		end
 	end
 	seen.merchant = pack(lines)
@@ -812,7 +833,15 @@ local function snapshotTrainer()
 			npc = clean(n)
 		end
 	end
-	local lines = { format("meta\t%s\t%s", nowStamp(), npc) }
+	-- Enum.TrainerType: a pet trainer's service cost is training points, not money.
+	local trainerType = ""
+	if C_Trainer and C_Trainer.GetTrainerType then
+		local tok, t = pcall(C_Trainer.GetTrainerType)
+		if tok and t then
+			trainerType = tostring(t)
+		end
+	end
+	local lines = { format("meta\t%s\t%s\t%s", nowStamp(), npc, trainerType) }
 	for i = 1, count do
 		local iok, name, serviceType, _, reqLevel, subText = pcall(GetTrainerServiceInfo, i)
 		if iok and name and name ~= "" and serviceType ~= "header" then
@@ -878,11 +907,17 @@ Transport.OnMessage(function(body)
 end)
 
 -- Event wiring: bumps integer revisions, and snapshots last-seen frames while they are open.
+-- Every value collectStats reads has an event here, so a changed stat never keeps its revision.
 local UNIT_EVENTS = {
 	UNIT_STATS = "stats",
 	UNIT_MAXHEALTH = "stats",
 	UNIT_MAXPOWER = "stats",
 	UNIT_AURA = "stats",
+	UNIT_RESISTANCES = "stats", -- armor
+	UNIT_ATTACK_POWER = "stats",
+	UNIT_RANGED_ATTACK_POWER = "stats",
+	UNIT_DEFENSE = "stats",
+	PLAYER_DAMAGE_DONE_MODS = "stats", -- spell damage and healing
 }
 
 local BUMP_EVENTS = {
@@ -896,8 +931,10 @@ local BUMP_EVENTS = {
 	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },
 	TRAIT_TREE_CHANGED = { "talents" },
 	COMBAT_RATING_UPDATE = { "stats" },
+	SPELL_POWER_CHANGED = { "stats" },
 	PLAYER_LEVEL_UP = { "stats" },
-	SKILL_LINES_CHANGED = { "prof" },
+	-- Skill lines include the defense skill.
+	SKILL_LINES_CHANGED = { "prof", "stats" },
 	UPDATE_FACTION = { "rep" },
 	SPELLS_CHANGED = { "spells" },
 	LEARNED_SPELL_IN_TAB = { "spells" },
@@ -907,10 +944,13 @@ local EXTRA_EVENTS = {
 	"BANKFRAME_OPENED",
 	"BANKFRAME_CLOSED",
 	"PLAYERBANKSLOTS_CHANGED",
+	"BANK_TABS_CHANGED",
 	"MERCHANT_SHOW",
 	"MERCHANT_UPDATE",
 	"TRAINER_SHOW",
 	"TRAINER_UPDATE",
+	"TRAINER_SERVICE_INFO_NAME_UPDATE",
+	"TRAINER_CLOSED",
 }
 
 function Collect.Init()
@@ -948,14 +988,22 @@ function Collect.Init()
 			pcall(snapshotBank)
 		elseif event == "BANKFRAME_CLOSED" then
 			bankOpen = false
-		elseif event == "PLAYERBANKSLOTS_CHANGED" then
+		elseif event == "PLAYERBANKSLOTS_CHANGED" or event == "BANK_TABS_CHANGED" then
 			if bankOpen then
 				pcall(snapshotBank)
 			end
 		elseif event == "MERCHANT_SHOW" or event == "MERCHANT_UPDATE" then
 			pcall(snapshotMerchant)
-		elseif event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
+		elseif event == "TRAINER_SHOW" then
+			trainerOpen = true
 			pcall(snapshotTrainer)
+		elseif event == "TRAINER_CLOSED" then
+			trainerOpen = false
+		elseif event == "TRAINER_UPDATE" or event == "TRAINER_SERVICE_INFO_NAME_UPDATE" then
+			-- Service names can arrive after the window opens; rows without one were left out.
+			if trainerOpen then
+				pcall(snapshotTrainer)
+			end
 		end
 	end)
 end

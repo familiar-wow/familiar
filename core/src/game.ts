@@ -165,10 +165,20 @@ export interface BankState {
 	truncated?: boolean;
 }
 
+/** An item or currency an offer costs besides money (the merchant's "extended cost"). */
+export interface MerchantCost {
+	amount: number;
+	itemId?: number;
+	currencyId?: number;
+	name: string;
+}
+
 export interface MerchantItem {
 	id?: number;
 	name: string;
+	/** The money part of the price only; `extendedCost` lists what else the offer costs. */
 	price: { copper: number; formatted: string };
+	extendedCost?: MerchantCost[];
 	stackCount: number;
 	numAvailable: number;
 	usable: boolean;
@@ -186,14 +196,23 @@ export interface TrainerService {
 	name: string;
 	status: string;
 	requiredLevel: number;
-	cost: { copper: number; formatted: string };
+	/** Money, except at a pet trainer, where services cost the pet's training points. */
+	cost: { copper: number; formatted: string } | { trainingPoints: number };
 	subText?: string;
 }
+
+/** Enum.TrainerType in the WoW Forever client. */
+const TRAINER_TYPES: Record<string, TrainerState["trainerType"]> = {
+	"0": "general",
+	"2": "tradeskills",
+	"3": "pet",
+};
 
 export interface TrainerState {
 	available: boolean;
 	seenAt?: string;
 	npc?: string;
+	trainerType?: "general" | "tradeskills" | "pet";
 	services: TrainerService[];
 	truncated?: boolean;
 }
@@ -282,6 +301,20 @@ export class Game {
 			revs: { ...revs },
 			at: new Date(),
 		};
+	}
+
+	/**
+	 * Forgets everything the addon told before: its revision counters restart with every UI load,
+	 * so a cached slice from an earlier load could carry the same revision as new data.
+	 */
+	forget(): void {
+		this.last = undefined;
+		this.cache.clear();
+		for (const [id, waiting] of this.pending) {
+			clearTimeout(waiting.timer);
+			waiting.reject(new Error("The game reloaded its interface; ask again."));
+			this.pending.delete(id);
+		}
 	}
 
 	/** The character of the last question and when it asked, if there was one. */
@@ -750,6 +783,23 @@ export function parseMerchant(payload: string): MerchantState {
 		if (parts[0] === "meta") {
 			if (parts[1]) seenAt = parts[1];
 			if (parts[2]) npc = parts[2];
+		} else if (parts[0] === "mc") {
+			// An extended cost belongs to the item line right before it.
+			const item = items.at(-1);
+			const amount = optInt(parts[1]);
+			if (!item || amount === undefined) continue;
+			const costId = optInt(parts[3]);
+			const cost: MerchantCost = {
+				amount,
+				...(costId !== undefined && parts[2] === "item"
+					? { itemId: costId }
+					: {}),
+				...(costId !== undefined && parts[2] === "currency"
+					? { currencyId: costId }
+					: {}),
+				name: parts[4] ?? "",
+			};
+			item.extendedCost = [...(item.extendedCost ?? []), cost];
 		} else if (parts[0] === "m") {
 			const id = optInt(parts[1]);
 			const copper = optInt(parts[2]) ?? 0;
@@ -779,6 +829,7 @@ export function parseTrainer(payload: string): TrainerState {
 		return { available: false, services: [] };
 	let seenAt: string | undefined;
 	let npc: string | undefined;
+	let trainerType: TrainerState["trainerType"];
 	const services: TrainerService[] = [];
 	let truncated = false;
 	for (const line of linesOf(payload)) {
@@ -790,15 +841,19 @@ export function parseTrainer(payload: string): TrainerState {
 		if (parts[0] === "meta") {
 			if (parts[1]) seenAt = parts[1];
 			if (parts[2]) npc = parts[2];
+			trainerType = TRAINER_TYPES[parts[3] ?? ""];
 		} else if (parts[0] === "tr") {
 			const name = parts[5] ?? "";
 			if (!name) continue;
-			const copper = optInt(parts[3]) ?? 0;
+			const amount = optInt(parts[3]) ?? 0;
 			services.push({
 				name,
 				status: parts[1] ?? "",
 				requiredLevel: optInt(parts[2]) ?? 0,
-				cost: { copper, formatted: formatMoney(copper) },
+				cost:
+					trainerType === "pet"
+						? { trainingPoints: amount }
+						: { copper: amount, formatted: formatMoney(amount) },
 				...(parts[4] ? { subText: parts[4] } : {}),
 			});
 		}
@@ -807,6 +862,7 @@ export function parseTrainer(payload: string): TrainerState {
 		available: true,
 		...(seenAt ? { seenAt } : {}),
 		...(npc ? { npc } : {}),
+		...(trainerType ? { trainerType } : {}),
 		services,
 		...(truncated ? { truncated: true } : {}),
 	};

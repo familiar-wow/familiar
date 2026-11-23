@@ -161,8 +161,10 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		game,
 	);
 	transport.onMessage((body, { hello }) => {
-		if (hello)
+		if (hello) {
+			conversation.hello();
 			return log.say(`The addon says hello: ${new TextDecoder().decode(body)}`);
+		}
 		conversation.receive(body);
 	});
 	await transport.start();

@@ -37,6 +37,11 @@ export class Conversation {
 		);
 	}
 
+	/** The addon said hello: the game loaded its interface, so earlier game state is stale. */
+	hello(): void {
+		this.game.forget();
+	}
+
 	/** Handles a message from the addon. */
 	receive(body: Uint8Array): void {
 		const text = new TextDecoder().decode(body);
