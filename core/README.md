@@ -41,6 +41,20 @@ Two kinds of brain can answer, and `brain.use` picks one:
 - `"agent"` (the default): an agent you already use, such as Hermes, Codex or Claude Code, through ACP. Familiar is only the bridge to it.
 - `"model"`: Familiar's built-in agent with a model from a provider, by API key or on your own PC. See [The built-in agent](#the-built-in-agent).
 
+### Which one?
+
+|                                                  | Your own agent (`"agent"`)                                                      | Built-in agent (`"model"`)                                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| What you need                                    | an agent such as Hermes, Codex, Claude Code or Gemini CLI, set up and signed in | an API key from a provider, or a local model in Ollama or LM Studio                                                          |
+| Game tools: gear, bags, quests, talents, stats … | all of them, through the `wow` server                                           | all of them, called in the app                                                                                               |
+| Web research, skills, the agent's own memory     | whatever your agent has                                                         | none: it knows your character and what the model learned                                                                     |
+| Speed in our tests                               | through Hermes: 8–42 s with character data, 23–94 s with web research           | 2–8 s with small models                                                                                                      |
+| Cost                                             | your agent's plan or model                                                      | per question at your provider; with the small models we tested, about a tenth of a US cent or less (prices of November 2026) |
+| Model and prompt                                 | set in your agent                                                               | set in Familiar's settings, with Familiar's own rules                                                                        |
+| Good for                                         | research: where a quest NPC stands, what drops where, guides                    | quick questions about your character: gear, talents, quests, bags, what a trainer offers                                     |
+
+Every game tool Familiar adds reaches both. Where they differ is knowledge from outside the game, such as Forever drops, NPC locations or guides: an agent can search the web, the built-in agent cannot yet. A lookup of Forever game data for both (FAM-55) and the providers' own web search for the built-in agent are planned.
+
 On the first start, `familiar` writes its settings with the defaults: `%APPDATA%\Familiar\settings.json` on Windows, `~/.config/familiar/settings.json` on Linux. `--settings <file>` uses another file.
 
 ### Your own agent

@@ -14,6 +14,8 @@ You pick the AI behind it:
 - a local model in Ollama or LM Studio
 - an agent you already use, such as Hermes, OpenClaw, Gemini CLI, Codex or Pi
 
+A model with an API key answers questions about your character in a few seconds. An agent you already use takes longer but can also research the web. [How the two compare](core/README.md#which-one).
+
 The memory belongs to Familiar, not to the model, so switching models does not reset it.
 
 ## How it works

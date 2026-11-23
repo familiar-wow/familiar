@@ -1,6 +1,6 @@
 # ADR 0008: The built-in agent
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-23)
 - **Date:** 2026-11-23
 - **Deciders:** @Smidelis, @hermes-smidelis
 
