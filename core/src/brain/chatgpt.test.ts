@@ -2,7 +2,13 @@
 // ID tokens, renewal, sign-out, and a question on the plan through the Responses API.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Log } from "../log.ts";
@@ -170,6 +176,11 @@ beforeAll(async () => {
 					authorization: request.headers.get("authorization"),
 				});
 				const reply = fake.replies.shift() ?? ["text", "?"];
+				if (reply[0] === "503")
+					return Response.json(
+						{ error: { message: "busy", type: "server_error" } },
+						{ status: 503 },
+					);
 				const base = {
 					id: "resp_1",
 					created_at: 1,
@@ -319,7 +330,12 @@ beforeAll(async () => {
 					{ type: "response.output_item.done", output_index: 0, item: message },
 					{
 						type: "response.completed",
-						response: { ...base, status: "completed", usage },
+						response: {
+							...base,
+							status: "completed",
+							output: [message],
+							usage,
+						},
 					},
 				]);
 			}
@@ -819,6 +835,9 @@ test("a lock held by a running process is waited for, not taken", async () => {
 	const c = chatgpt(() => clock);
 	await c.signIn(browser(approve).open);
 	writeFileSync(`${c.file}.lock`, `${process.pid} someone-else`);
+	// Old, but its process runs: age alone must not make it stale.
+	const old = Date.now() / 1000 - 120;
+	utimesSync(`${c.file}.lock`, old, old);
 	setTimeout(() => rmSync(`${c.file}.lock`, { force: true }), 400);
 	clock += 3600;
 	const started = performance.now();
@@ -852,4 +871,21 @@ console.log(await c.accessToken());`,
 		fake.delayMs = 0;
 	}
 	expect(fake.tokenRequests.length).toBe(before + 1);
+});
+
+test("a long answer that ends complete in one piece counts", async () => {
+	const c = chatgpt();
+	await c.signIn(browser(approve).open);
+	const long = `${"Ashbringer is a fine sword. ".repeat(300)}End.`;
+	fake.replies = [["text", long]];
+	const brain = new ModelBrain(settings, { log, tools: [], chatgpt: c });
+	expect(await brain.ask(hero, turn())).toBe(long.trim());
+});
+
+test("an answer after a retried server error counts", async () => {
+	const c = chatgpt();
+	await c.signIn(browser(approve).open);
+	fake.replies = [["503"], ["text", "Second time lucky."]];
+	const brain = new ModelBrain(settings, { log, tools: [], chatgpt: c });
+	expect(await brain.ask(hero, turn())).toBe("Second time lucky.");
 });

@@ -181,19 +181,7 @@ export class ChatGpt {
 				break;
 			} catch (error) {
 				if ((error as { code?: string }).code !== "EEXIST") throw error;
-				const owner = readOwner(lock);
-				// A lock without an owner after 10 s was left by a process that died while
-				// creating it.
-				if (owner === undefined && age(lock) > 10_000) {
-					rmSync(lock, { force: true });
-					continue;
-				}
-				if (owner !== undefined && !alive(owner.pid)) {
-					// Only if it still is the dead owner's lock, not one taken over meanwhile.
-					if (readOwner(lock)?.text === owner.text)
-						rmSync(lock, { force: true });
-					continue;
-				}
+				if (this.takeOver(lock)) continue;
 				if (Date.now() > until)
 					throw new ChatGptError(
 						"Another Familiar is busy with the ChatGPT sign-in. Try again in a moment.",
@@ -205,6 +193,35 @@ export class ChatGpt {
 			return await work();
 		} finally {
 			if (readOwner(lock)?.text === mine) rmSync(lock, { force: true });
+		}
+	}
+
+	/**
+	 * Removes `lock` if its owner is gone, and says whether it did. Only one process at a time
+	 * may do this, under a second lock, and it checks the owner again there: otherwise two
+	 * could both find the same dead owner, and the slower one would remove the lock the faster
+	 * one had just taken.
+	 */
+	private takeOver(lock: string): boolean {
+		const owner = readOwner(lock);
+		const stale = owner === undefined ? age(lock) > 10_000 : !alive(owner.pid);
+		if (!stale) return false;
+		const guard = `${lock}.takeover`;
+		try {
+			closeSync(openSync(guard, "wx", 0o600));
+		} catch {
+			// Someone else is taking over; a guard left by a crash goes after 5 s.
+			if (age(guard) > 5_000) rmSync(guard, { force: true });
+			return false;
+		}
+		try {
+			const again = readOwner(lock);
+			if (again?.text !== owner?.text) return false;
+			if (again === undefined && age(lock) <= 10_000) return false;
+			rmSync(lock, { force: true });
+			return true;
+		} finally {
+			rmSync(guard, { force: true });
 		}
 	}
 
@@ -646,7 +663,9 @@ function currentSid(): string | undefined {
 		windowsHide: true,
 		timeout: 10_000,
 	});
-	sid = out.status === 0 ? out.stdout.match(/S-1-[\d-]+/)?.[0] : undefined;
+	// One CSV line: "DOMAIN\\user","S-1-5-…"; the SID is the last field.
+	const field = out.status === 0 ? out.stdout.trim().split(",").at(-1) : "";
+	sid = field?.replace(/"/g, "").match(/^S-1-[\d-]+$/)?.[0];
 	return sid;
 }
 

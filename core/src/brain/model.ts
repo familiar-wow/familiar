@@ -334,22 +334,45 @@ const WOW = {
 function watchEnds(ends: boolean[]): typeof fetch {
 	const watched = async (input: string | URL | Request, init?: RequestInit) => {
 		const response = await fetch(input, init);
-		if (!response.body) return response;
+		// Only answers that stream count; an error the SDK retries is no answer at all.
+		if (
+			!response.ok ||
+			!response.body ||
+			!response.headers.get("content-type")?.includes("text/event-stream")
+		)
+			return response;
 		const index = ends.push(false) - 1;
 		const decoder = new TextDecoder();
-		let tail = "";
+		// Whole events only: a long answer's final event can span many chunks.
+		let pending = "";
+		const look = (event: string) => {
+			const data = event
+				.split(/\r?\n/)
+				.filter((line) => line.startsWith("data:"))
+				.map((line) => line.slice(5).trimStart())
+				.join("\n");
+			if (!data) return;
+			let type: unknown;
+			try {
+				type = (JSON.parse(data) as { type?: unknown }).type;
+			} catch {
+				return;
+			}
+			if (type === "response.completed") ends[index] = true;
+			else if (type === "response.incomplete" || type === "response.failed")
+				ends[index] = false;
+		};
 		const body = response.body.pipeThrough(
 			new TransformStream<Uint8Array, Uint8Array>({
 				transform(chunk, controller) {
-					tail = (tail + decoder.decode(chunk, { stream: true })).slice(-4096);
-					const kinds = [
-						...tail.matchAll(/"type"\s*:\s*"(response\.[a-z_.]+)"/g),
-					];
-					const last = kinds.at(-1)?.[1];
-					if (last === "response.completed") ends[index] = true;
-					else if (last === "response.incomplete" || last === "response.failed")
-						ends[index] = false;
+					pending += decoder.decode(chunk, { stream: true });
+					const events = pending.split(/\r?\n\r?\n/);
+					pending = events.pop() ?? "";
+					for (const event of events) look(event);
 					controller.enqueue(chunk);
+				},
+				flush() {
+					look(pending + decoder.decode());
 				},
 			}),
 		);
