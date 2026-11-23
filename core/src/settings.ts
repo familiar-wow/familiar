@@ -112,7 +112,22 @@ export function loadSettings(file: string): Settings {
 		);
 	}
 	const result = Settings.safeParse(json);
-	if (!result.success)
-		throw new Error(`${file}:\n${z.prettifyError(result.error)}`);
+	if (!result.success) throw new Error(`${file}:\n${problems(result.error)}`);
 	return result.data;
+}
+
+/**
+ * What is wrong in the settings, one line each. Zod's messages quote no values, except the
+ * name of an unknown setting, which could be an API key in the wrong place, so that one is
+ * left out.
+ */
+function problems(error: z.ZodError): string {
+	return error.issues
+		.map((issue) => {
+			const at = issue.path.join(".") || "the settings";
+			return issue.code === "unrecognized_keys"
+				? `✖ ${at}: has ${issue.keys.length === 1 ? "a setting" : `${issue.keys.length} settings`} Familiar does not know (not shown here, in case it is a key)`
+				: `✖ ${at}: ${issue.message}`;
+		})
+		.join("\n");
 }

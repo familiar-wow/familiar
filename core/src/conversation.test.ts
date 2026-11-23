@@ -118,4 +118,6 @@ test("keeps what stands inside code as it is", () => {
 	expect(plain("Use `__name__` and `**kwargs`, then **go**.")).toBe(
 		"Use __name__ and **kwargs, then go.",
 	);
+	expect(plain("**Use `foo` here**")).toBe("Use foo here");
+	expect(plain("``a`__b__`c``")).toBe("a`__b__`c");
 });

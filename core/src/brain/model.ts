@@ -247,7 +247,9 @@ export class ModelBrain implements Brain {
 					description: t.description,
 					inputSchema: jsonSchema<Record<string, unknown>>(t.inputSchema),
 					execute: async (input, { abortSignal }) => {
-						const parsed = this.validators.get(t.name)?.safeParse(input ?? {});
+						// A call without arguments is an empty object; null or anything else is checked.
+						const value = input === undefined ? {} : input;
+						const parsed = this.validators.get(t.name)?.safeParse(value);
 						if (parsed && !parsed.success)
 							throw new Error(
 								`Invalid arguments for ${t.name}: ${z.prettifyError(parsed.error)}`,
@@ -307,7 +309,12 @@ export function describe(error: unknown, key: string | undefined): string {
 	)
 		text =
 			"the provider could not be reached. Check the address and the connection.";
-	else
-		text = `an unexpected error (${cause instanceof Error ? cause.name : typeof cause}).`;
+	else {
+		// Only a name like AI_InvalidArgumentError, never text from the error itself.
+		const name = cause instanceof Error ? cause.name : "";
+		text = /^[A-Za-z_]{0,40}Error$/.test(name)
+			? `an unexpected error (${name}).`
+			: "an unexpected error.";
+	}
 	return key ? text.replaceAll(key, "***") : text;
 }

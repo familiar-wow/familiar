@@ -39,6 +39,25 @@ test("the built-in agent needs a model, and openai-compatible a baseUrl", () => 
 	);
 });
 
+test("an unknown setting is reported without its name, which may be a key", () => {
+	const key = "sk-or-v1-TESTKEY0123456789";
+	withFile(
+		`{"brain":{"use":"model","model":{"provider":"openrouter","name":"x","${key}":true}}}`,
+		(file) => {
+			let message = "";
+			try {
+				loadSettings(file);
+			} catch (error) {
+				message = error instanceof Error ? error.message : String(error);
+			}
+			expect(message).toContain(
+				"brain.model: has a setting Familiar does not know",
+			);
+			expect(message).not.toContain(key);
+		},
+	);
+});
+
 test("broken JSON is reported without quoting the file, which may hold a key", () => {
 	const key = "AIzaSyTEST-not-a-real-key-123";
 	withFile(`{"brain":{"use":"model","model":{"apiKey": ${key} }}}`, (file) => {

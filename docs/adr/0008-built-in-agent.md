@@ -21,7 +21,7 @@ The `wow` tools (ADR 0007) are the same for every brain. A small agent loop arou
   - Claude stays API-key only (ADR 0001). _Sign in with ChatGPT_ comes as its own step once OpenAI's terms for it are final.
 - **Settings.** `brain.use` chooses the brain: `"agent"` (the player's agent through ACP, `brain.command`, the default so that existing settings keep working) or `"model"` (the built-in agent). `brain.model` names `provider`, `name` and optionally `baseUrl`. `brain.timeout` applies to both.
 - **API keys.** Until the desktop app keeps them in the system keychain (FAM-6), a key comes from the provider's usual environment variable, such as `OPENAI_API_KEY`, or from `brain.model.apiKey` in the settings file. Familiar never logs or sends a key anywhere but to its provider. Without a key, the window says which variable to set.
-- **Memory of the conversation.** Per character, the app keeps the last 12 questions and answers, without tool results, while it runs. Tool results are not kept because the game state changes; the model asks again. Lasting memory is phase 4.
+- **Memory of the conversation.** Per character, the app keeps the last 12 questions and answers, each answer up to 2000 characters, without tool results, while it runs. Tool results are not kept because the game state changes; the model asks again. Lasting memory is phase 4.
 - **No `wow` server for the built-in agent.** The HTTP server from ADR 0007 starts only when the brain is an agent through ACP.
 - **Data rules stay.** The model gets the player's questions, the header and what the tools return, nothing else from the game (ADR 0006). The app logs the provider, model, duration, tool names and token counts of each answer, not the text.
 

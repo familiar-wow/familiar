@@ -120,16 +120,21 @@ export class Conversation {
  * Game links such as [item:19019] stay as they are.
  */
 export function plain(text: string): string {
-	// Code keeps its content: only the backticks go, so `__init__` stays a name.
-	return text
+	// Code keeps its content: it is set aside, the marks around it go, then it comes back
+	// without its backticks, so `__init__` stays a name.
+	const code: string[] = [];
+	const marked = text.replace(
+		/(`+)([^\n]*?[^`\n])\1(?!`)/g,
+		(_, _ticks, inner: string) => {
+			code.push(inner);
+			return `\uE000${code.length - 1}\uE000`;
+		},
+	);
+	return marked
 		.replace(/^#{1,6} +/gm, "")
-		.split(/(`[^`\n]+`)/)
-		.map((part, i) =>
-			i % 2
-				? part.slice(1, -1)
-				: part.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1"),
-		)
-		.join("");
+		.replace(/\*\*(.+?)\*\*/g, "$1")
+		.replace(/__(.+?)__/g, "$1")
+		.replace(/\uE000(\d+)\uE000/g, (_, i: string) => code[Number(i)] ?? "");
 }
 
 /**

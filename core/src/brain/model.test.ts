@@ -300,33 +300,46 @@ test("text beside a tool call in the last round is no answer and is not remember
 	expect(prompts.at(-1)?.join("\n")).not.toContain("assistant: Let me check.");
 });
 
-test("arguments that do not fit the schema go back to the model, the tool does not run", async () => {
-	const prompts: string[][] = [];
-	let ran = 0;
-	const counted: Tool = {
-		...equipment,
-		call: (args) => {
-			ran++;
-			return equipment.call(args);
-		},
-	};
-	const replies = [
-		call("equipment", { slot: 123, unexpected: true }),
-		text("Sorry."),
-	];
-	const model = new MockLanguageModelV4({
-		doGenerate: async (options) => {
-			prompts.push(seen(options));
-			return replies.shift() ?? text("?");
-		},
+for (const [what, args] of [
+	["a wrong type", { slot: 123 }],
+	["an unknown argument", { slot: "head", unexpected: true }],
+	["null", null],
+] as const)
+	test(`arguments with ${what} go back to the model, and the tool does not run`, async () => {
+		const prompts: string[][] = [];
+		let ran = 0;
+		const counted: Tool = {
+			...equipment,
+			call: (a) => {
+				ran++;
+				return equipment.call(a);
+			},
+		};
+		const first = {
+			...call("equipment", {}),
+			content: [
+				{
+					type: "tool-call" as const,
+					toolCallId: "c1",
+					toolName: "equipment",
+					input: JSON.stringify(args),
+				},
+			],
+		};
+		const replies = [first, text("Sorry.")];
+		const model = new MockLanguageModelV4({
+			doGenerate: async (options) => {
+				prompts.push(seen(options));
+				return replies.shift() ?? text("?");
+			},
+		});
+		const brain = new ModelBrain(settings, { log, tools: [counted], model });
+		const { t, tools } = turn();
+		expect(await brain.ask(hero, t)).toBe("Sorry.");
+		expect(ran).toBe(0);
+		expect(tools).toEqual([]);
+		expect(prompts[1]?.join("\n")).toContain("Invalid arguments for equipment");
 	});
-	const brain = new ModelBrain(settings, { log, tools: [counted], model });
-	const { t, tools } = turn();
-	expect(await brain.ask(hero, t)).toBe("Sorry.");
-	expect(ran).toBe(0);
-	expect(tools).toEqual([]);
-	expect(prompts[1]?.join("\n")).toContain("Invalid arguments for equipment");
-});
 
 test("the timeout stops a tool that still waits for the game, and the next question runs", async () => {
 	const stuck: Tool = { ...equipment, call: () => new Promise(() => {}) };
@@ -421,4 +434,49 @@ test("a provider that cannot be set up answers with a message, and the next ques
 		if (saved.key === undefined) delete process.env.OPENAI_API_KEY;
 		else process.env.OPENAI_API_KEY = saved.key;
 	}
+});
+
+test("after the timeout, a late tool call from the model neither runs nor shows", async () => {
+	let ran = 0;
+	const counted: Tool = {
+		...equipment,
+		call: (a) => {
+			ran++;
+			return equipment.call(a);
+		},
+	};
+	// A model that ignores the abort and asks for a tool after the deadline.
+	const model = new MockLanguageModelV4({
+		doGenerate: async () => {
+			await Bun.sleep(300);
+			return call("equipment", {});
+		},
+	});
+	const brain = new ModelBrain(
+		{ ...settings, timeout: 0.1 },
+		{ log, tools: [counted], model },
+	);
+	const { t, tools } = turn();
+	expect(await brain.ask(hero, t)).toBe("No answer within 0.1 s.");
+	await Bun.sleep(500);
+	expect(ran).toBe(0);
+	expect(tools).toEqual([]);
+});
+
+test("keeps at most 2000 characters of each answer", async () => {
+	const prompts: string[][] = [];
+	const long = `${"x".repeat(2000)}TAIL`;
+	const replies = [text(long), text("ok")];
+	const model = new MockLanguageModelV4({
+		doGenerate: async (options) => {
+			prompts.push(seen(options));
+			return replies.shift() ?? text("?");
+		},
+	});
+	const brain = new ModelBrain(settings, { log, tools: [], model });
+	expect(await brain.ask(hero, turn().t)).toBe(long);
+	await brain.ask({ ...hero, text: "more" }, turn().t);
+	const kept = prompts[1]?.join("\n") ?? "";
+	expect(kept).toContain("x".repeat(2000));
+	expect(kept).not.toContain("TAIL");
 });
