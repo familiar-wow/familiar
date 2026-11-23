@@ -156,7 +156,7 @@ export class ModelBrain implements Brain {
 		const timeout = this.settings.timeout;
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), timeout * 1000);
-		// The deadline holds even if a provider or a tool ignores the abort.
+		// The deadline holds even if a provider, a tool or the sign-in ignores the abort.
 		const deadline = new Promise<never>((_, reject) =>
 			abort.signal.addEventListener(
 				"abort",
@@ -165,118 +165,120 @@ export class ModelBrain implements Brain {
 			),
 		);
 		deadline.catch(() => {});
-		if (plan && !this.options.model) {
-			// A fresh access token for each question: they last an hour. Renewing it counts
-			// against the question's time like everything else.
+		let done = false;
+		// On the plan: whether each streamed response ended with `response.completed`.
+		const ends: boolean[] = [];
+		try {
+			if (plan && !this.options.model) {
+				// A fresh access token for each question: they last an hour. Renewing it counts
+				// against the question's time like everything else.
+				try {
+					if (!this.options.chatgpt)
+						throw new ChatGptError("ChatGPT sign-in is not set up.");
+					const chatgpt = this.options.chatgpt;
+					key = await Promise.race([chatgpt.accessToken(), deadline]);
+					this.model = createOpenAI({
+						apiKey: key,
+						baseURL: chatgpt.api,
+						fetch: watchEnds(ends),
+					}).responses(settings.name);
+				} catch (error) {
+					if (abort.signal.aborted) return `No answer within ${timeout} s.`;
+					log.event("model-error", {
+						provider: settings.provider,
+						model: settings.name,
+						during: "sign-in",
+						error: describe(error, key),
+					});
+					return describe(error, key);
+				}
+			}
+			if (!this.model) {
+				const problem = missing(settings);
+				if (problem) return problem;
+				try {
+					this.model = languageModel(settings);
+				} catch (error) {
+					log.event("model-error", {
+						provider: settings.provider,
+						model: settings.name,
+						during: "setup",
+						error: describe(error, key),
+					});
+					return `The built-in agent could not set up ${settings.provider}: ${describe(error, key)}`;
+				}
+			}
+			const c = question.character;
+			const who =
+				c.name || c.realm ? `${c.name ?? ""}-${c.realm ?? ""}` : "unknown";
+			const past = this.history.get(who) ?? [];
+			const user: ModelMessage = { role: "user", content: asked(question) };
+			const started = performance.now();
 			try {
-				if (!this.options.chatgpt)
-					throw new ChatGptError("ChatGPT sign-in is not set up.");
-				key = await Promise.race([
-					this.options.chatgpt.accessToken(),
+				const request = {
+					model: this.model,
+					messages: [...past, user],
+					tools: this.toolSet(turn, () => done, plan),
+					stopWhen: isStepCount(MAX_STEPS),
+					abortSignal: abort.signal,
+					maxRetries: 1,
+				};
+				const result = await Promise.race([
+					plan
+						? planText({ ...request, instructions: rules({ web: false }) })
+						: generateText({ ...request, system: rules({ web: false }) }),
 					deadline,
 				]);
-				this.model = createOpenAI({
-					apiKey: key,
-					baseURL: this.options.chatgpt.api,
-				}).responses(settings.name);
-			} catch (error) {
-				log.event("model-error", {
+				const text = result.text.trim();
+				const tools = result.steps.flatMap((s) =>
+					s.toolCalls.map((t) => t.toolName),
+				);
+				// The last round still asked for tools: the model ran out of rounds, and any text
+				// it wrote alongside is a preamble, not the answer.
+				const exhausted = (result.steps.at(-1)?.toolCalls.length ?? 0) > 0;
+				// On the plan an answer counts only when every response said it is complete.
+				const cut =
+					plan &&
+					(result.steps.at(-1)?.finishReason !== "stop" ||
+						(!this.options.model &&
+							(ends.length === 0 || ends.some((end) => !end))));
+				const summary = {
 					provider: settings.provider,
 					model: settings.name,
-					during: "sign-in",
-					error: describe(error, key),
-				});
-				clearTimeout(timer);
+					ms: Math.round(performance.now() - started),
+					steps: result.steps.length,
+					tools,
+					inputTokens: result.totalUsage.inputTokens,
+					outputTokens: result.totalUsage.outputTokens,
+				};
+				if (exhausted) {
+					log.event("model-error", { ...summary, error: "out of rounds" });
+					return `The model used all ${MAX_STEPS} rounds of tool calls without an answer. Ask again, perhaps more narrowly.`;
+				}
+				if (cut) {
+					log.event("model-error", { ...summary, error: "incomplete answer" });
+					return "ChatGPT's answer was cut off. Ask again.";
+				}
+				if (!text) {
+					log.event("model-error", { ...summary, error: "empty answer" });
+					return "The model gave an empty answer.";
+				}
+				log.event("model-answer", summary);
+				const answer: ModelMessage = {
+					role: "assistant",
+					content: text.slice(0, KEPT),
+				};
+				this.history.set(who, [...past, user, answer].slice(-2 * HISTORY));
+				return text;
+			} catch (error) {
 				if (abort.signal.aborted) return `No answer within ${timeout} s.`;
-				abort.abort();
-				return describe(error, key);
-			}
-		}
-		if (!this.model) {
-			const problem = missing(settings);
-			if (problem) {
-				clearTimeout(timer);
-				return problem;
-			}
-			try {
-				this.model = languageModel(settings);
-			} catch (error) {
 				log.event("model-error", {
 					provider: settings.provider,
 					model: settings.name,
-					during: "setup",
 					error: describe(error, key),
 				});
-				clearTimeout(timer);
-				return `The built-in agent could not set up ${settings.provider}: ${describe(error, key)}`;
+				return `The model could not answer: ${describe(error, key)}`;
 			}
-		}
-		const c = question.character;
-		const who =
-			c.name || c.realm ? `${c.name ?? ""}-${c.realm ?? ""}` : "unknown";
-		const past = this.history.get(who) ?? [];
-		const user: ModelMessage = { role: "user", content: asked(question) };
-		let done = false;
-		const started = performance.now();
-		try {
-			const request = {
-				model: this.model,
-				messages: [...past, user],
-				tools: this.toolSet(turn, () => done, plan),
-				stopWhen: isStepCount(MAX_STEPS),
-				abortSignal: abort.signal,
-				maxRetries: 1,
-			};
-			const result = await Promise.race([
-				plan
-					? planText({ ...request, instructions: rules({ web: false }) })
-					: generateText({ ...request, system: rules({ web: false }) }),
-				deadline,
-			]);
-			const text = result.text.trim();
-			const tools = result.steps.flatMap((s) =>
-				s.toolCalls.map((t) => t.toolName),
-			);
-			// The last round still asked for tools: the model ran out of rounds, and any text it
-			// wrote alongside is a preamble, not the answer.
-			const exhausted = (result.steps.at(-1)?.toolCalls.length ?? 0) > 0;
-			log.event("model-answer", {
-				provider: settings.provider,
-				model: settings.name,
-				ms: Math.round(performance.now() - started),
-				steps: result.steps.length,
-				tools,
-				inputTokens: result.totalUsage.inputTokens,
-				outputTokens: result.totalUsage.outputTokens,
-				...(exhausted ? { exhausted: true } : {}),
-			});
-			if (exhausted)
-				return `The model used all ${MAX_STEPS} rounds of tool calls without an answer. Ask again, perhaps more narrowly.`;
-			// On the plan an answer counts only when the stream said it is complete.
-			const finish = result.steps.at(-1)?.finishReason;
-			if (plan && finish !== "stop") {
-				log.event("model-error", {
-					provider: settings.provider,
-					model: settings.name,
-					error: `incomplete answer (${finish ?? "no step"})`,
-				});
-				return "ChatGPT's answer was cut off. Ask again.";
-			}
-			if (!text) return "The model gave an empty answer.";
-			const answer: ModelMessage = {
-				role: "assistant",
-				content: text.slice(0, KEPT),
-			};
-			this.history.set(who, [...past, user, answer].slice(-2 * HISTORY));
-			return text;
-		} catch (error) {
-			if (abort.signal.aborted) return `No answer within ${timeout} s.`;
-			log.event("model-error", {
-				provider: settings.provider,
-				model: settings.name,
-				error: describe(error, key),
-			});
-			return `The model could not answer: ${describe(error, key)}`;
 		} finally {
 			done = true;
 			clearTimeout(timer);
@@ -323,6 +325,44 @@ const WOW = {
 	description:
 		"The player's character and game state in WoW Forever, read live from the game.",
 };
+
+/**
+ * A fetch that notes for each streamed response whether it ended with `response.completed`.
+ * The AI SDK reports an incomplete response without a reason as finished, so the stream itself
+ * is watched (developers.openai.com/siwc: only `response.completed` is a successful answer).
+ */
+function watchEnds(ends: boolean[]): typeof fetch {
+	const watched = async (input: string | URL | Request, init?: RequestInit) => {
+		const response = await fetch(input, init);
+		if (!response.body) return response;
+		const index = ends.push(false) - 1;
+		const decoder = new TextDecoder();
+		let tail = "";
+		const body = response.body.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				transform(chunk, controller) {
+					tail = (tail + decoder.decode(chunk, { stream: true })).slice(-4096);
+					const kinds = [
+						...tail.matchAll(/"type"\s*:\s*"(response\.[a-z_.]+)"/g),
+					];
+					const last = kinds.at(-1)?.[1];
+					if (last === "response.completed") ends[index] = true;
+					else if (last === "response.incomplete" || last === "response.failed")
+						ends[index] = false;
+					controller.enqueue(chunk);
+				},
+			}),
+		);
+		return new Response(body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
+	};
+	return Object.assign(watched, {
+		preconnect: fetch.preconnect,
+	}) as typeof fetch;
+}
 
 /**
  * One question on the player's ChatGPT plan. OpenAI's rules for it: streamed, nothing stored at

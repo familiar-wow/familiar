@@ -65,6 +65,11 @@ export interface Credentials {
 	scopes?: string[];
 	/** Unix seconds when the token response arrived. */
 	saved_at?: number;
+	/**
+	 * Changes with every sign-in and sign-out (not with renewals), so a sign-in that was
+	 * overtaken by another sign-in or a sign-out does not write over it.
+	 */
+	epoch?: string;
 }
 
 /** A problem the player can act on; its message is shown as it is and holds no secret. */
@@ -139,14 +144,16 @@ export class ChatGpt {
 	 */
 	private write(c: Credentials): void {
 		const tmp = `${this.file}.${process.pid}.${random(6)}.tmp`;
-		const fd = openSync(tmp, "wx", 0o600);
 		try {
-			writeSync(fd, `${JSON.stringify(c, null, "\t")}\n`);
-		} finally {
-			closeSync(fd);
-		}
-		try {
+			// The empty file is locked down first, so the tokens are never readable by others.
+			closeSync(openSync(tmp, "wx", 0o600));
 			restrict(tmp);
+			const fd = openSync(tmp, "r+");
+			try {
+				writeSync(fd, `${JSON.stringify(c, null, "\t")}\n`);
+			} finally {
+				closeSync(fd);
+			}
 			renameSync(tmp, this.file);
 		} catch (error) {
 			rmSync(tmp, { force: true });
@@ -156,23 +163,35 @@ export class ChatGpt {
 
 	/**
 	 * One change to the saved sign-in at a time, across all Familiar processes: renewals rotate
-	 * the refresh token, so two at once would lose one. A lock file older than 30 s is stale.
+	 * the refresh token, so two at once would lose one. The lock file names its owner; a lock
+	 * whose process is gone is taken over, and only the owner removes its own lock.
 	 */
 	private async locked<T>(work: () => Promise<T>): Promise<T> {
 		const lock = `${this.file}.lock`;
-		const until = Date.now() + 15_000;
+		const mine = `${process.pid} ${random(9)}`;
+		const until = Date.now() + 45_000;
 		for (;;) {
 			try {
-				closeSync(openSync(lock, "wx", 0o600));
+				const fd = openSync(lock, "wx", 0o600);
+				try {
+					writeSync(fd, mine);
+				} finally {
+					closeSync(fd);
+				}
 				break;
 			} catch (error) {
 				if ((error as { code?: string }).code !== "EEXIST") throw error;
-				try {
-					if (Date.now() - statSync(lock).mtimeMs > 30_000) {
+				const owner = readOwner(lock);
+				// A lock without an owner after 10 s was left by a process that died while
+				// creating it.
+				if (owner === undefined && age(lock) > 10_000) {
+					rmSync(lock, { force: true });
+					continue;
+				}
+				if (owner !== undefined && !alive(owner.pid)) {
+					// Only if it still is the dead owner's lock, not one taken over meanwhile.
+					if (readOwner(lock)?.text === owner.text)
 						rmSync(lock, { force: true });
-						continue;
-					}
-				} catch {
 					continue;
 				}
 				if (Date.now() > until)
@@ -185,7 +204,7 @@ export class ChatGpt {
 		try {
 			return await work();
 		} finally {
-			rmSync(lock, { force: true });
+			if (readOwner(lock)?.text === mine) rmSync(lock, { force: true });
 		}
 	}
 
@@ -237,6 +256,8 @@ export class ChatGpt {
 			server = Bun.serve({
 				hostname: "127.0.0.1",
 				port: this.firstPort,
+				// The browser waits for its page while the tokens are fetched and checked.
+				idleTimeout: 120,
 				fetch: handler,
 			});
 		} catch {
@@ -244,7 +265,12 @@ export class ChatGpt {
 				throw new ChatGptError(
 					`Port ${FIRST_PORT} on 127.0.0.1 is in use, and the first sign-in needs it. Close the program that uses it (often Codex during its own sign-in) and try again.`,
 				);
-			server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handler });
+			server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				idleTimeout: 120,
+				fetch: handler,
+			});
 		}
 		const redirect = `http://127.0.0.1:${server.port}/auth/callback`;
 		const clientId = saved.client_id ?? "dynamic_agent_client";
@@ -304,6 +330,15 @@ export class ChatGpt {
 				redirect_uri: redirect,
 				resource: RESOURCE,
 			});
+			if (
+				typeof tokens.access_token !== "string" ||
+				!tokens.access_token ||
+				typeof tokens.refresh_token !== "string" ||
+				!tokens.refresh_token
+			)
+				throw new ChatGptError(
+					"ChatGPT's sign-in server sent no usable tokens.",
+				);
 			const claims = await this.verify(tokens.id_token, issued, nonce);
 			if (saved.subject && claims.sub !== saved.subject)
 				throw new ChatGptError(
@@ -318,13 +353,20 @@ export class ChatGpt {
 				subject: String(claims.sub),
 				email: typeof claims.email === "string" ? claims.email : undefined,
 				id_token: String(tokens.id_token),
-				access_token: String(tokens.access_token),
-				refresh_token: String(tokens.refresh_token),
+				access_token: tokens.access_token,
+				refresh_token: tokens.refresh_token,
 				expires_in: Number(tokens.expires_in ?? 3600),
 				scopes,
 				saved_at: this.now(),
+				epoch: random(9),
 			};
-			await this.locked(async () => this.write(next));
+			await this.locked(async () => {
+				if (this.read().epoch !== saved.epoch)
+					throw new ChatGptError(
+						"Familiar was signed out or signed in elsewhere meanwhile. Sign in again.",
+					);
+				this.write(next);
+			});
 			if (!scopes.includes(PLAN_SCOPE))
 				throw new ChatGptError(
 					"Signed in, but ChatGPT plan usage was not allowed. Sign in again and allow it, or use an API key instead.",
@@ -390,10 +432,17 @@ export class ChatGpt {
 			}
 			throw error;
 		}
+		if (typeof tokens.access_token !== "string" || !tokens.access_token)
+			throw new ChatGptError(
+				"ChatGPT's sign-in server sent no usable token. Try again.",
+			);
 		const next: Credentials = {
 			...c,
-			access_token: String(tokens.access_token),
-			refresh_token: String(tokens.refresh_token ?? c.refresh_token),
+			access_token: tokens.access_token,
+			refresh_token:
+				typeof tokens.refresh_token === "string" && tokens.refresh_token
+					? tokens.refresh_token
+					: c.refresh_token,
 			id_token:
 				typeof tokens.id_token === "string" ? tokens.id_token : c.id_token,
 			expires_in: Number(tokens.expires_in ?? 3600),
@@ -433,9 +482,12 @@ export class ChatGpt {
 					revoked = false;
 				}
 			}
-			this.write(
-				forget ? { ext_agent_host_id: c.ext_agent_host_id } : withoutTokens(c),
-			);
+			this.write({
+				...(forget
+					? { ext_agent_host_id: c.ext_agent_host_id }
+					: withoutTokens(c)),
+				epoch: random(9),
+			});
 			return { revoked };
 		});
 	}
@@ -476,10 +528,16 @@ export class ChatGpt {
 		} catch {
 			throw new ChatGptError("ChatGPT's sign-in server could not be reached.");
 		}
-		const body = (await response.json().catch(() => ({}))) as Record<
-			string,
-			unknown
-		>;
+		let body: Record<string, unknown>;
+		try {
+			body = (await response.json()) as Record<string, unknown>;
+		} catch {
+			if (response.ok)
+				throw new ChatGptError(
+					"ChatGPT's sign-in server sent an incomplete answer. Try again.",
+				);
+			body = {};
+		}
 		if (!response.ok) {
 			// Only the machine-readable code, never the description, which could quote the request.
 			const code =
@@ -565,19 +623,61 @@ export class ChatGpt {
  */
 function restrict(file: string): void {
 	if (process.platform !== "win32") return;
-	const user = process.env.USERDOMAIN
-		? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
-		: process.env.USERNAME;
-	const done = user
-		? spawnSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], {
+	const sid = currentSid();
+	const done = sid
+		? spawnSync("icacls", [file, "/inheritance:r", "/grant:r", `*${sid}:F`], {
 				stdio: "ignore",
 				windowsHide: true,
+				timeout: 10_000,
 			})
 		: undefined;
 	if (done?.status !== 0)
 		throw new ChatGptError(
 			"Familiar could not restrict its ChatGPT sign-in file to your Windows user, so it did not keep it.",
 		);
+}
+
+let sid: string | undefined;
+/** The security ID of the user Familiar runs as, from Windows itself rather than the environment. */
+function currentSid(): string | undefined {
+	if (sid) return sid;
+	const out = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], {
+		encoding: "utf8",
+		windowsHide: true,
+		timeout: 10_000,
+	});
+	sid = out.status === 0 ? out.stdout.match(/S-1-[\d-]+/)?.[0] : undefined;
+	return sid;
+}
+
+/** Who holds a lock file: its process ID and the whole text, to tell owners apart. */
+function readOwner(lock: string): { pid: number; text: string } | undefined {
+	try {
+		const text = readFileSync(lock, "utf8");
+		const pid = Number(text.split(" ")[0]);
+		// A lock still being written has no owner yet; treat it as alive.
+		return Number.isInteger(pid) && pid > 0 ? { pid, text } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function age(file: string): number {
+	try {
+		return Date.now() - statSync(file).mtimeMs;
+	} catch {
+		return 0;
+	}
+}
+
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// EPERM: the process exists but belongs to someone else.
+		return (error as { code?: string }).code === "EPERM";
+	}
 }
 
 function withoutTokens(c: Credentials): Credentials {

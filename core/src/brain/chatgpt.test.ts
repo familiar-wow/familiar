@@ -2,7 +2,7 @@
 // ID tokens, renewal, sign-out, and a question on the plan through the Responses API.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Log } from "../log.ts";
@@ -39,6 +39,8 @@ const fake = {
 	delayMs: 0,
 	/** The scope a renewal grants, if it differs. */
 	refreshScope: "",
+	/** The token server answers 200 with half a JSON body. */
+	truncate: false,
 };
 let stranger: CryptoKeyPair;
 
@@ -111,6 +113,10 @@ beforeAll(async () => {
 				>;
 				fake.tokenRequests.push(form);
 				if (fake.delayMs) await Bun.sleep(fake.delayMs);
+				if (fake.truncate)
+					return new Response('{"access_token":"acc', {
+						headers: { "Content-Type": "application/json" },
+					});
 				if (form.grant_type === "authorization_code") {
 					const digest = new Uint8Array(
 						await crypto.subtle.digest(
@@ -189,7 +195,11 @@ beforeAll(async () => {
 							},
 						},
 					]);
-				if (reply[0] === "cut" || reply[0] === "incomplete") {
+				if (
+					reply[0] === "cut" ||
+					reply[0] === "incomplete" ||
+					reply[0] === "incomplete-null"
+				) {
 					const message = {
 						type: "message",
 						id: "msg_1",
@@ -219,6 +229,19 @@ beforeAll(async () => {
 							delta: "Half an ans",
 							logprobs: [],
 						},
+						...(reply[0] === "incomplete-null"
+							? [
+									{
+										type: "response.incomplete",
+										response: {
+											...base,
+											status: "incomplete",
+											incomplete_details: null,
+											usage,
+										},
+									},
+								]
+							: []),
 						...(reply[0] === "incomplete"
 							? [
 									{
@@ -714,8 +737,8 @@ test("without a sign-in the player hears how to sign in", async () => {
 	expect(await brain.ask(hero, turn())).toContain("familiar login chatgpt");
 });
 
-for (const kind of ["cut", "incomplete"])
-	test(`a ${kind === "cut" ? "broken-off" : "incomplete"} answer on the plan is not passed off as complete`, async () => {
+for (const kind of ["cut", "incomplete", "incomplete-null"])
+	test(`an answer on the plan that ends ${kind} is not passed off as complete`, async () => {
 		const c = chatgpt();
 		await c.signIn(browser(approve).open);
 		fake.replies = [[kind], ["text", "fresh"]];
@@ -745,4 +768,88 @@ test("a stalled sign-in server counts against the question's time", async () => 
 	} finally {
 		fake.delayMs = 0;
 	}
+});
+
+test("a sign-in overtaken by a sign-out does not bring the account back", async () => {
+	const c = chatgpt();
+	await c.signIn(browser(approve).open);
+	fake.delayMs = 200;
+	try {
+		const again = c.signIn(browser(approve).open);
+		await Bun.sleep(50);
+		await c.signOut({ forget: true });
+		await expect(again).rejects.toThrow("signed out or signed in elsewhere");
+	} finally {
+		fake.delayMs = 0;
+	}
+	expect(c.read().client_id).toBeUndefined();
+	expect(c.account()).toBeUndefined();
+});
+
+test("half an answer from the token server keeps the old sign-in", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	const before = c.read();
+	clock += 3600;
+	fake.truncate = true;
+	try {
+		await expect(c.accessToken()).rejects.toThrow("incomplete answer");
+	} finally {
+		fake.truncate = false;
+	}
+	expect(c.read().access_token).toBe(before.access_token);
+	expect(c.read().refresh_token).toBe(before.refresh_token);
+});
+
+test("a lock left by a process that is gone is taken over", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	// A process ID that cannot be running.
+	writeFileSync(`${c.file}.lock`, "2147483646 gone");
+	clock += 3600;
+	const started = performance.now();
+	await c.accessToken();
+	expect(performance.now() - started).toBeLessThan(2000);
+});
+
+test("a lock held by a running process is waited for, not taken", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	writeFileSync(`${c.file}.lock`, `${process.pid} someone-else`);
+	setTimeout(() => rmSync(`${c.file}.lock`, { force: true }), 400);
+	clock += 3600;
+	const started = performance.now();
+	await c.accessToken();
+	expect(performance.now() - started).toBeGreaterThan(350);
+});
+
+test("a renewal in another process and one here do not both renew", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	const folder = c.file.replace(/[\\/]chatgpt\.json$/, "");
+	clock += 3600;
+	const script = join(folder, "child.ts");
+	writeFileSync(
+		script,
+		`import { ChatGpt } from ${JSON.stringify(join(import.meta.dir, "chatgpt.ts"))};
+const c = new ChatGpt({ folder: ${JSON.stringify(folder)}, endpoints: ${JSON.stringify(endpoints)}, now: () => ${clock} });
+console.log(await c.accessToken());`,
+	);
+	fake.delayMs = 300;
+	const before = fake.tokenRequests.length;
+	try {
+		const child = Bun.spawn([process.execPath, script], { stdout: "pipe" });
+		await Bun.sleep(100);
+		const here = await c.accessToken();
+		const there = (await new Response(child.stdout).text()).trim();
+		expect(await child.exited).toBe(0);
+		expect(there).toBe(here);
+	} finally {
+		fake.delayMs = 0;
+	}
+	expect(fake.tokenRequests.length).toBe(before + 1);
 });
