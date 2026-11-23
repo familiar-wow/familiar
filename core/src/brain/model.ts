@@ -15,6 +15,7 @@ import {
 	type LanguageModel,
 	type ModelMessage,
 	RetryError,
+	streamText,
 	type ToolSet,
 	tool,
 } from "ai";
@@ -23,6 +24,7 @@ import type { Log } from "../log.ts";
 import type { Tool } from "../mcp/server.ts";
 import type { Settings } from "../settings.ts";
 import { asked, type Brain, type Question, rules, type Turn } from "./chat.ts";
+import { type ChatGpt, ChatGptError, USAGE_URL } from "./chatgpt.ts";
 
 type ModelSettings = NonNullable<Settings["brain"]["model"]>;
 type Env = Record<string, string | undefined>;
@@ -43,6 +45,8 @@ const PRESETS: Record<
 	ollama: { baseUrl: "http://127.0.0.1:11434/v1" },
 	lmstudio: { baseUrl: "http://127.0.0.1:1234/v1" },
 	"openai-compatible": {},
+	// Signed in through the browser (`familiar login chatgpt`), no key (brain/chatgpt.ts).
+	chatgpt: {},
 };
 
 /** Rounds of model calls per question; each round may call several tools. */
@@ -101,6 +105,8 @@ export interface ModelBrainOptions {
 	tools: Tool[];
 	/** The model to ask; by default the one the settings name. Tests pass a stand-in. */
 	model?: LanguageModel;
+	/** The ChatGPT sign-in, for the provider "chatgpt". */
+	chatgpt?: ChatGpt;
 }
 
 export class ModelBrain implements Brain {
@@ -145,7 +151,28 @@ export class ModelBrain implements Brain {
 		if (!settings)
 			return "No model is set: brain.model is missing in the settings.";
 		const { log } = this.options;
-		const key = this.options.model ? undefined : apiKey(settings);
+		const plan = settings.provider === "chatgpt";
+		let key = this.options.model ? undefined : apiKey(settings);
+		if (plan && !this.options.model) {
+			// A fresh access token for each question: they last an hour.
+			try {
+				if (!this.options.chatgpt)
+					throw new ChatGptError("ChatGPT sign-in is not set up.");
+				key = await this.options.chatgpt.accessToken();
+				this.model = createOpenAI({
+					apiKey: key,
+					baseURL: this.options.chatgpt.api,
+				}).responses(settings.name);
+			} catch (error) {
+				log.event("model-error", {
+					provider: settings.provider,
+					model: settings.name,
+					during: "sign-in",
+					error: describe(error, key),
+				});
+				return describe(error, key);
+			}
+		}
 		if (!this.model) {
 			const problem = missing(settings);
 			if (problem) return problem;
@@ -181,16 +208,18 @@ export class ModelBrain implements Brain {
 		let done = false;
 		const started = performance.now();
 		try {
+			const request = {
+				model: this.model,
+				messages: [...past, user],
+				tools: this.toolSet(turn, () => done, plan),
+				stopWhen: isStepCount(MAX_STEPS),
+				abortSignal: abort.signal,
+				maxRetries: 1,
+			};
 			const result = await Promise.race([
-				generateText({
-					model: this.model,
-					system: rules({ web: false }),
-					messages: [...past, user],
-					tools: this.toolSet(turn, () => done),
-					stopWhen: isStepCount(MAX_STEPS),
-					abortSignal: abort.signal,
-					maxRetries: 1,
-				}),
+				plan
+					? planText({ ...request, instructions: rules({ web: false }) })
+					: generateText({ ...request, system: rules({ web: false }) }),
 				deadline,
 			]);
 			const text = result.text.trim();
@@ -239,13 +268,15 @@ export class ModelBrain implements Brain {
 	 * do not fit a tool's schema go back to the model as an error, and so does a cancelled
 	 * question: a tool still waiting for the game stops waiting.
 	 */
-	private toolSet(turn: Turn, done: () => boolean): ToolSet {
+	private toolSet(turn: Turn, done: () => boolean, plan = false): ToolSet {
 		return Object.fromEntries(
 			this.options.tools.map((t) => [
 				t.name,
 				tool({
 					description: t.description,
 					inputSchema: jsonSchema<Record<string, unknown>>(t.inputSchema),
+					// ChatGPT plan usage takes function tools only inside a namespace.
+					...(plan ? { providerOptions: { openai: { namespace: WOW } } } : {}),
 					execute: async (input, { abortSignal }) => {
 						// A call without arguments is an empty object; null or anything else is checked.
 						const value = input === undefined ? {} : input;
@@ -263,6 +294,47 @@ export class ModelBrain implements Brain {
 				}),
 			]),
 		);
+	}
+}
+
+const WOW = {
+	name: "wow",
+	description:
+		"The player's character and game state in WoW Forever, read live from the game.",
+};
+
+/**
+ * One question on the player's ChatGPT plan. OpenAI's rules for it: streamed, nothing stored at
+ * OpenAI, the rules as `instructions` rather than a system message, and no sampling settings.
+ */
+async function planText(options: {
+	model: LanguageModel;
+	messages: ModelMessage[];
+	tools: ToolSet;
+	stopWhen: ReturnType<typeof isStepCount>;
+	abortSignal: AbortSignal;
+	maxRetries: number;
+	instructions: string;
+}) {
+	const { instructions, ...rest } = options;
+	let failure: unknown;
+	const result = streamText({
+		...rest,
+		providerOptions: { openai: { store: false, instructions } },
+		onError: ({ error }) => {
+			failure ??= error;
+		},
+	});
+	try {
+		const [text, steps, totalUsage] = await Promise.all([
+			result.text,
+			result.steps,
+			result.totalUsage,
+		]);
+		if (failure) throw failure;
+		return { text, steps, totalUsage };
+	} catch (error) {
+		throw failure ?? error;
 	}
 }
 
@@ -285,6 +357,10 @@ function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
  */
 export function describe(error: unknown, key: string | undefined): string {
 	const cause = RetryError.isInstance(error) ? error.lastError : error;
+	// Our own messages for the ChatGPT sign-in hold no secrets.
+	if (cause instanceof ChatGptError) return cause.message;
+	const plan = planProblem(cause);
+	if (plan) return plan;
 	let text: string;
 	if (APICallError.isInstance(cause)) {
 		const status = cause.statusCode;
@@ -317,4 +393,33 @@ export function describe(error: unknown, key: string | undefined): string {
 			: "an unexpected error.";
 	}
 	return key ? text.replaceAll(key, "***") : text;
+}
+
+/**
+ * The ChatGPT plan's own errors (developers.openai.com/siwc, errors and recovery), found by
+ * their fixed codes anywhere in the error, and answered with fixed words.
+ */
+function planProblem(error: unknown): string | undefined {
+	let seen = "";
+	try {
+		seen = APICallError.isInstance(error)
+			? `${error.responseBody ?? ""} ${JSON.stringify(error.data ?? "")}`
+			: `${error instanceof Error ? error.message : ""} ${JSON.stringify(error)}`;
+	} catch {
+		return undefined;
+	}
+	if (seen.includes("subscription_sharing_usage_limit_exceeded"))
+		return `You reached a ChatGPT usage limit, for your plan or for Familiar. Manage usage: ${USAGE_URL}`;
+	if (seen.includes("subscription_sharing_user_not_eligible"))
+		return "This ChatGPT account or workspace cannot use its plan in other apps. Use an API key instead.";
+	if (
+		seen.includes("subscription_sharing_usage_unavailable") ||
+		seen.includes("subscription_sharing_user_unavailable")
+	)
+		return "ChatGPT could not check your plan's usage just now. Try again in a minute.";
+	if (seen.includes("subscription_sharing_invalid_user"))
+		return "ChatGPT did not accept the sign-in. Run `familiar login chatgpt` again.";
+	if (seen.includes("subscription_sharing_unsupported_capability"))
+		return "ChatGPT plan usage does not support this model or request. Pick another model from `familiar login chatgpt`.";
+	return undefined;
 }

@@ -16,12 +16,16 @@ export const PROVIDERS = [
 	"ollama",
 	"lmstudio",
 	"openai-compatible",
+	"chatgpt",
 ] as const;
 
 const Model = z
 	.strictObject({
 		provider: z.enum(PROVIDERS),
-		/** The model's name at the provider, such as "gpt-5-mini" or "google/gemini-3-flash". */
+		/**
+		 * The model's name at the provider, such as "gpt-5-mini" or "google/gemini-3-flash". For
+		 * "chatgpt", one that `familiar login chatgpt` lists.
+		 */
 		name: z.string().min(1),
 		/** The API's address; needed for "openai-compatible", optional for the others. */
 		baseUrl: z.url().optional(),
