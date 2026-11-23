@@ -451,7 +451,20 @@ local stub = {
 	trainerNames = "1", -- 0: service names have not loaded yet
 	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
 	waypoint = "1", -- 0: the quest log has no waypoint, only an area on the map
+	poiMap = "1454", -- the map whose quest areas include quest 783
+	slowLoads = "0", -- load requests that go unanswered before uncached data arrives
+	done783 = "0", -- 1: quest 783 counts as completed
 }
+
+-- Whether a load request for uncached data is answered: only once `slowLoads` requests are spent.
+local function loadNow()
+	local left = tonumber(stub.slowLoads) or 0
+	if left > 0 then
+		stub.slowLoads = tostring(left - 1)
+		return false
+	end
+	return true
+end
 
 local function fire(event, ...)
 	for _, frame in ipairs(frames) do
@@ -587,7 +600,30 @@ local function api()
 			ilvl = 88,
 			quality = 5,
 		},
-		[2589] = { link = itemLink(2589, 1, "Linen Cloth"), equip = "", ilvl = 5, quality = 1, loads = true },
+		[2589] = {
+			link = itemLink(2589, 1, "Linen Cloth"),
+			equip = "",
+			ilvl = 5,
+			quality = 1,
+			loads = true,
+			minLevel = 0,
+			type = "Trade Goods",
+			subType = "Cloth",
+			stack = 200,
+			sell = 13,
+		},
+		[4306] = {
+			link = itemLink(4306, 1, "Silk Cloth"),
+			equip = "",
+			ilvl = 26,
+			quality = 1,
+			loads = true,
+			minLevel = 0,
+			type = "Trade Goods",
+			subType = "Cloth",
+			stack = 200,
+			sell = 150,
+		},
 		[6948] = { link = itemLink(6948, 1, "Hearthstone"), equip = "", ilvl = 1, quality = 1 },
 	}
 	local worn = character == "Alt" and { [16] = 19019 } or { [16] = 13262 }
@@ -623,7 +659,10 @@ local function api()
 		GetItemInfo = function(info)
 			local item = items[itemID(info)]
 			if item and not item.loads then
-				return item.link:match("%[(.-)%]"), item.link, item.quality, item.ilvl, nil, nil, nil, nil, item.equip
+				-- name, link, quality, item level, required level, type, subtype, stack, equip
+				-- location, icon, sell price
+				return item.link:match("%[(.-)%]"), item.link, item.quality, item.ilvl, item.minLevel,
+					item.type, item.subType, item.stack, item.equip, nil, item.sell
 			end
 		end,
 		GetItemInfoInstant = function(info)
@@ -635,7 +674,7 @@ local function api()
 			return item and item.ilvl or nil
 		end,
 		RequestLoadItemDataByID = function(id)
-			if items[id] then
+			if items[id] and loadNow() then
 				items[id].loads = nil
 			end
 		end,
@@ -665,7 +704,7 @@ local function api()
 	end
 	e.C_QuestLog = {
 		RequestLoadQuestByID = function(id)
-			if quests[id] then
+			if quests[id] and loadNow() then
 				quests[id].loads = nil
 			end
 		end,
@@ -677,6 +716,9 @@ local function api()
 			return quests[id] and quests[id].level or 0
 		end,
 		IsQuestFlaggedCompleted = function(id)
+			if id == 783 then
+				return stub.done783 == "1"
+			end
 			return quests[id] ~= nil and quests[id].done == true
 		end,
 		GetLogIndexForQuestID = function(id)
@@ -691,8 +733,8 @@ local function api()
 			return id == 783 and "Marshal McBride" or ""
 		end,
 		GetQuestsOnMap = function(map)
-			if map == 1454 then
-				return { { questID = 783, mapID = 1454, x = 0.5, y = 0.625 } }
+			if tostring(map) == stub.poiMap then
+				return { { questID = 783, mapID = map, x = 0.5, y = 0.625 } }
 			end
 			return {}
 		end,

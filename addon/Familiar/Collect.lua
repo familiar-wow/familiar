@@ -1062,10 +1062,18 @@ local function lookup(id, arg)
 			Tasks.Sleep(0.2)
 			waited = waited + 0.2
 		end
-		local payload = "none"
-		if exists then
+		local payload
+		if exists and not ready then
+			-- It exists, but the client did not load it in time: worth asking again.
+			payload = "loading"
+		elseif exists then
 			local ok, described = pcall(describeLookup, kind, number)
 			payload = ok and described or ("error\t" .. clean(described))
+		elseif kind == "quest" then
+			-- No title even after waiting: unknown, or the client could not load it.
+			payload = "none\tunsure"
+		else
+			payload = "none"
 		end
 		Transport.Send(format("state\n%s\nlookup\n0\n%s", id, payload))
 	end)

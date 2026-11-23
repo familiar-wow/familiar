@@ -236,8 +236,12 @@ export type LookupKind = "item" | "spell" | "quest";
 export interface LookupResult {
 	kind: LookupKind;
 	id: number;
-	/** False if the client knows no such thing: the ID does not exist in this game. */
+	/**
+	 * False if the client knows no such thing. For an item or spell the ID does not exist in this
+	 * game; for a quest the client could also have failed to load it in time (`unsure`).
+	 */
 	found: boolean;
+	unsure?: boolean;
 	name?: string;
 	quality?: number;
 	itemLevel?: number;
@@ -410,7 +414,8 @@ export class Game {
 
 	/**
 	 * What the game client knows about an item, spell or quest by ID, also one the player never
-	 * saw (FAM-61). Answers are kept until the interface reloads.
+	 * saw (FAM-61). Items and spells found are kept until the interface reloads; quests are asked
+	 * every time, because whether the character has done one changes while playing.
 	 */
 	async lookup(kind: LookupKind, id: number): Promise<LookupResult> {
 		const key = `${kind}:${id}`;
@@ -418,8 +423,10 @@ export class Game {
 		if (known) return known;
 		return this.pull(`lookup:${key}`, "lookup", key, (_rev, payload) => {
 			const result = parseLookup(kind, id, payload);
-			if (this.lookups.size >= 500) this.lookups.clear();
-			this.lookups.set(key, result);
+			if (kind !== "quest" && result.found) {
+				if (this.lookups.size >= 500) this.lookups.clear();
+				this.lookups.set(key, result);
+			}
 			return result;
 		});
 	}
@@ -971,7 +978,12 @@ export function parseLookup(
 	id: number,
 	payload: string,
 ): LookupResult {
+	if (payload === "loading")
+		throw new Error(
+			`The game is still loading ${kind} ${id}; ask again in a moment.`,
+		);
 	const result: LookupResult = { kind, id, found: false, tooltip: [] };
+	if (payload === "none\tunsure") result.unsure = true;
 	for (const line of linesOf(payload)) {
 		if (line === "truncated") {
 			result.truncated = true;

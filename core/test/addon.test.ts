@@ -754,6 +754,15 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 		if (!tool) throw new Error(`Missing tool: ${name}`);
 		return await tool.call(args);
 	};
+	const reset = () => {
+		for (const [key, value] of Object.entries({
+			waypoint: "1",
+			poiMap: "1454",
+			slowLoads: "0",
+			done783: "0",
+		}))
+			command(`set ${key} ${value}`);
+	};
 
 	// Without a waypoint, the quest's area on the player's map: here Orgrimmar.
 	command("set waypoint 0");
@@ -774,13 +783,25 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 			},
 		],
 	});
-	command("set waypoint 1");
+	// Marked only on the parent zone, the area is found there.
+	command("set poiMap 1411");
+	command("fire ZONE_CHANGED_NEW_AREA");
+	at = await roundTrip("parent zone", /heard: parent zone$/, at);
+	expect(await call("quests")).toMatchObject({
+		cached: false,
+		quests: [
+			{ id: 783, location: { source: "map", mapId: 1411, map: "Durotar" } },
+		],
+	});
 
 	expect(await call("lookup", { kind: "item", id: 2589 })).toMatchObject({
 		found: true,
 		name: "Linen Cloth",
 		quality: 1,
 		itemLevel: 5,
+		itemType: "Trade Goods",
+		itemSubType: "Cloth",
+		sellPrice: { copper: 13, formatted: "13c" },
 		tooltip: ["Max Stack: 200", "Sell Price: 13 copper"],
 	});
 	expect(await call("lookup", { kind: "spell", id: 133 })).toMatchObject({
@@ -792,6 +813,28 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 			"Hurls a fiery ball that causes 14 to 22 Fire damage.",
 		],
 	});
+
+	// An item the client loads too slowly is an error to retry, not an answer to keep.
+	command("set slowLoads 20");
+	await expect(call("lookup", { kind: "item", id: 4306 })).rejects.toThrow(
+		"still loading item 4306",
+	);
+	expect(await call("lookup", { kind: "item", id: 4306 })).toMatchObject({
+		found: true,
+		name: "Silk Cloth",
+		sellPrice: { copper: 150 },
+	});
+
+	// A quest's status is asked anew every time: it changes while playing.
+	expect(await call("lookup", { kind: "quest", id: 783 })).toMatchObject({
+		found: true,
+		completed: false,
+		inQuestLog: true,
+	});
+	command("set done783 1");
+	expect(await call("lookup", { kind: "quest", id: 783 })).toMatchObject({
+		completed: true,
+	});
 	expect(await call("lookup", { kind: "quest", id: 7 })).toMatchObject({
 		found: true,
 		name: "Kobold Camp Cleanup",
@@ -799,22 +842,23 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 		completed: true,
 		inQuestLog: false,
 	});
-	expect(await call("lookup", { kind: "quest", id: 783 })).toMatchObject({
-		found: true,
-		completed: false,
-		inQuestLog: true,
-	});
+
 	expect(await call("lookup", { kind: "item", id: 999999 })).toEqual({
 		kind: "item",
 		id: 999999,
 		found: false,
 		tooltip: [],
 	});
-	// The client cannot tell an unknown quest from a loading one, so it waits a few seconds.
+	// The client cannot tell an unknown quest from a loading one, so it waits and says so.
 	const started = performance.now();
-	expect(await call("lookup", { kind: "quest", id: 424242 })).toMatchObject({
+	expect(await call("lookup", { kind: "quest", id: 424242 })).toEqual({
+		kind: "quest",
+		id: 424242,
 		found: false,
+		unsure: true,
+		tooltip: [],
 	});
 	expect(performance.now() - started).toBeGreaterThan(2500);
+	reset();
 	expect(errors).toEqual([]);
-}, 60_000);
+}, 90_000);

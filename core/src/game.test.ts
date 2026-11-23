@@ -422,3 +422,30 @@ test("looks up through the addon once and answers again from memory until the in
 	await game.lookup("item", 2589);
 	expect(asked).toHaveLength(2);
 });
+
+test("a lookup still loading is an error, not an answer, and quests are never kept", async () => {
+	expect(() => parseLookup("item", 4306, "loading")).toThrow(
+		"still loading item 4306",
+	);
+	expect(parseLookup("quest", 424242, "none\tunsure")).toEqual({
+		kind: "quest",
+		id: 424242,
+		found: false,
+		unsure: true,
+		tooltip: [],
+	});
+	const game = new Game({ fetchTimeoutMs: 500 });
+	const answers = ["loading", "l\titem\t4306\tSilk Cloth"];
+	let quests = 0;
+	game.setFetcher((id, slice, arg) => {
+		const payload = arg?.startsWith("quest")
+			? `l\tquest\t783\tA Threat Within\nqd\t1\t${quests++ ? 1 : 0}\t1`
+			: (answers.shift() ?? "none");
+		queueMicrotask(() => game.receiveState(id, slice, 0, payload));
+		return true;
+	});
+	await expect(game.lookup("item", 4306)).rejects.toThrow("still loading");
+	expect(await game.lookup("item", 4306)).toMatchObject({ name: "Silk Cloth" });
+	expect(await game.lookup("quest", 783)).toMatchObject({ completed: false });
+	expect(await game.lookup("quest", 783)).toMatchObject({ completed: true });
+});

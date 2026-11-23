@@ -109,7 +109,7 @@ export function wowTools(game: Game): Tool[] {
 		{
 			name: "lookup",
 			description:
-				"What the WoW Forever client knows about any item, spell or quest by ID, also ones the player does not have: the name in the game's language, the tooltip as the game shows it (stats, effects, requirements, sell price), and for a quest its level, whether it is in the quest log and whether this character has completed it. Use it to explain an item or spell, to check whether the character did a quest, or to make sure of an ID before writing [item:ID], [spell:ID] or [quest:ID]. found=false means no such ID exists in Forever. It cannot search by name and knows nothing about drop locations, vendors or NPC positions.",
+				"What the WoW Forever client knows about any item, spell or quest by ID, also ones the player does not have: the name in the game's language, the tooltip as the game shows it (stats, effects, requirements, sell price), and for a quest its level, whether it is in the quest log and whether this character has completed it. Use it to explain an item or spell, to check whether the character did a quest, or to make sure of an ID before writing [item:ID], [spell:ID] or [quest:ID]. For an item or spell, found=false means no such ID exists in Forever; for a quest, unsure=true means the client may only have failed to load it. An error that the game is still loading means: ask again once. It cannot search by name and knows nothing about drop locations, vendors or NPC positions.",
 			inputSchema: {
 				type: "object",
 				properties: {
