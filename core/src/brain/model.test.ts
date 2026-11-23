@@ -2,13 +2,20 @@
 // errors and the timeout. The real providers are checked by hand, see core/README.md.
 import { expect, test } from "bun:test";
 import type { LanguageModelV4CallOptions } from "@ai-sdk/provider";
-import { APICallError } from "ai";
+import { APICallError, RetryError } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { Log } from "../log.ts";
 import type { Tool } from "../mcp/server.ts";
 import type { Settings } from "../settings.ts";
 import type { Question, Turn } from "./chat.ts";
-import { apiKey, MAX_STEPS, ModelBrain, missing } from "./model.ts";
+import {
+	apiKey,
+	describe,
+	HISTORY,
+	MAX_STEPS,
+	ModelBrain,
+	missing,
+} from "./model.ts";
 
 const usage = {
 	inputTokens: {
@@ -246,5 +253,172 @@ test("without a key it says so instead of asking", async () => {
 		expect(await brain.ask(hero, turn().t)).toContain("ANTHROPIC_API_KEY");
 	} finally {
 		if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+	}
+});
+
+test("keeps exactly the last HISTORY questions and answers", async () => {
+	const prompts: string[][] = [];
+	const model = new MockLanguageModelV4({
+		doGenerate: async (options) => {
+			prompts.push(seen(options));
+			return text(`answer ${prompts.length}`);
+		},
+	});
+	const brain = new ModelBrain(settings, { log, tools: [], model });
+	for (let i = 1; i <= HISTORY + 2; i++)
+		await brain.ask({ ...hero, text: `question ${i}` }, turn().t);
+	const last = prompts.at(-1)?.join("\n") ?? "";
+	// The last prompt holds the HISTORY exchanges before it, from question 2 on.
+	expect(last).not.toContain("Question: question 1\n");
+	expect(last).toContain("Question: question 2");
+	expect(last).toContain(`assistant: answer ${HISTORY + 1}`);
+	expect(prompts.at(-1)?.filter((m) => m.startsWith("user:"))).toHaveLength(
+		HISTORY + 1,
+	);
+});
+
+test("text beside a tool call in the last round is no answer and is not remembered", async () => {
+	const prompts: string[][] = [];
+	let n = 0;
+	const model = new MockLanguageModelV4({
+		doGenerate: async (options) => {
+			prompts.push(seen(options));
+			if (prompts.length > MAX_STEPS) return text("fresh");
+			const step = call("equipment", {}, `c${n++}`);
+			return {
+				...step,
+				content: [
+					{ type: "text" as const, text: "Let me check." },
+					...step.content,
+				],
+			};
+		},
+	});
+	const brain = new ModelBrain(settings, { log, tools: [equipment], model });
+	expect(await brain.ask(hero, turn().t)).toContain(`all ${MAX_STEPS} rounds`);
+	await brain.ask({ ...hero, text: "again" }, turn().t);
+	expect(prompts.at(-1)?.join("\n")).not.toContain("assistant: Let me check.");
+});
+
+test("arguments that do not fit the schema go back to the model, the tool does not run", async () => {
+	const prompts: string[][] = [];
+	let ran = 0;
+	const counted: Tool = {
+		...equipment,
+		call: (args) => {
+			ran++;
+			return equipment.call(args);
+		},
+	};
+	const replies = [
+		call("equipment", { slot: 123, unexpected: true }),
+		text("Sorry."),
+	];
+	const model = new MockLanguageModelV4({
+		doGenerate: async (options) => {
+			prompts.push(seen(options));
+			return replies.shift() ?? text("?");
+		},
+	});
+	const brain = new ModelBrain(settings, { log, tools: [counted], model });
+	const { t, tools } = turn();
+	expect(await brain.ask(hero, t)).toBe("Sorry.");
+	expect(ran).toBe(0);
+	expect(tools).toEqual([]);
+	expect(prompts[1]?.join("\n")).toContain("Invalid arguments for equipment");
+});
+
+test("the timeout stops a tool that still waits for the game, and the next question runs", async () => {
+	const stuck: Tool = { ...equipment, call: () => new Promise(() => {}) };
+	let n = 0;
+	const model = new MockLanguageModelV4({
+		doGenerate: async () => (n++ === 0 ? call("equipment", {}) : text("next")),
+	});
+	const brain = new ModelBrain(
+		{ ...settings, timeout: 0.2 },
+		{ log, tools: [stuck], model },
+	);
+	const started = performance.now();
+	expect(await brain.ask(hero, turn().t)).toBe("No answer within 0.2 s.");
+	expect(performance.now() - started).toBeLessThan(1000);
+	expect(await brain.ask({ ...hero, text: "next" }, turn().t)).toBe("next");
+});
+
+test("provider errors reach the player and the log in fixed words, never with the key", async () => {
+	const key = "sk-test-SECRET-1234";
+	const bad = new APICallError({
+		message: `Invalid request: key ${key} is malformed`,
+		url: "https://example.invalid",
+		requestBodyValues: { key },
+		statusCode: 400,
+		isRetryable: false,
+	});
+	expect(describe(bad, key)).toBe(
+		"the provider rejected the request (HTTP 400). Check brain.model.",
+	);
+	const limited = new RetryError({
+		message: `Failed after 2 attempts. Last error: ${key}`,
+		reason: "maxRetriesExceeded",
+		errors: [
+			new APICallError({
+				message: key,
+				url: "https://example.invalid",
+				requestBodyValues: {},
+				statusCode: 429,
+				isRetryable: true,
+			}),
+		],
+	});
+	expect(describe(limited, key)).toContain("HTTP 429");
+	expect(describe(new Error(`boom ${key}`), key)).toBe(
+		"an unexpected error (Error).",
+	);
+
+	const logged: string[] = [];
+	const model = new MockLanguageModelV4({
+		doGenerate: async () => {
+			throw bad;
+		},
+	});
+	const brain = new ModelBrain(settings, {
+		log: {
+			event: (_, data) => void logged.push(JSON.stringify(data)),
+			say: () => {},
+		},
+		tools: [],
+		model,
+	});
+	const reply = await brain.ask(hero, turn().t);
+	expect(reply).not.toContain(key);
+	expect(logged.join("\n")).not.toContain(key);
+});
+
+test("a provider that cannot be set up answers with a message, and the next question still runs", async () => {
+	const saved = {
+		url: process.env.OPENAI_BASE_URL,
+		key: process.env.OPENAI_API_KEY,
+	};
+	process.env.OPENAI_BASE_URL = "";
+	process.env.OPENAI_API_KEY = "sk-test";
+	try {
+		const brain = new ModelBrain(
+			{ ...settings, model: { provider: "openai", name: "gpt-test" } },
+			{ log, tools: [] },
+		);
+		const first = await Promise.race([
+			brain.ask(hero, turn().t),
+			Bun.sleep(2000).then(() => "hung"),
+		]);
+		expect(first).toContain("could not set up openai");
+		const second = await Promise.race([
+			brain.ask(hero, turn().t),
+			Bun.sleep(2000).then(() => "hung"),
+		]);
+		expect(second).toContain("could not set up openai");
+	} finally {
+		if (saved.url === undefined) delete process.env.OPENAI_BASE_URL;
+		else process.env.OPENAI_BASE_URL = saved.url;
+		if (saved.key === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = saved.key;
 	}
 });

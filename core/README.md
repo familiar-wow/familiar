@@ -113,7 +113,7 @@ For players without an agent of their own ([ADR 0008](../docs/adr/0008-built-in-
 
 `name` is the model's name at the provider. `baseUrl` overrides the provider's address, for example for Ollama on another PC. `apiKey` in the settings works too, but the environment variable keeps the key out of the file; the desktop app will keep it in the system keychain. Familiar sends the key only to the provider and never logs it. Without a key, the game window says which variable to set.
 
-Pick a fast model that can call tools. A small model answers questions about your character in a few seconds; a large model with long reasoning takes much longer and costs more. What you pay is between you and the provider.
+Pick a fast model that can call tools. A small model answers questions about your character in a few seconds; a large model with long reasoning takes much longer and costs more. What you pay is between you and the provider. Tested through OpenRouter on 2026-11-23, each answering in 2 to 8 s: `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `google/gemini-3.5-flash` and `deepseek/deepseek-v4.1-flash`.
 
 The built-in agent keeps the last 12 questions and answers of each character while `familiar` runs, so a follow-up question works; tool results are not kept, and the model fetches the game state again. Starting `familiar` again starts a fresh conversation. The log records the provider, model, duration, tool names and token counts of each answer, not its text. The `wow` server below does not start for the built-in agent: it calls the tools in the app itself.
 

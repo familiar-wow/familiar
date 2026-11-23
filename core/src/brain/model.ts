@@ -14,15 +14,18 @@ import {
 	jsonSchema,
 	type LanguageModel,
 	type ModelMessage,
+	RetryError,
 	type ToolSet,
 	tool,
 } from "ai";
+import { z } from "zod";
 import type { Log } from "../log.ts";
 import type { Tool } from "../mcp/server.ts";
 import type { Settings } from "../settings.ts";
 import { asked, type Brain, type Question, rules, type Turn } from "./chat.ts";
 
 type ModelSettings = NonNullable<Settings["brain"]["model"]>;
+type Env = Record<string, string | undefined>;
 
 /** Where each provider lives and which environment variable holds its key, if it needs one. */
 const PRESETS: Record<
@@ -44,13 +47,16 @@ const PRESETS: Record<
 
 /** Rounds of model calls per question; each round may call several tools. */
 export const MAX_STEPS = 8;
-/** Messages kept per character: the last questions and answers, without tool results. */
-const HISTORY = 12;
+/** Questions and answers kept per character, without tool results. */
+export const HISTORY = 12;
+/** Characters of an answer kept in the history; the window shows less anyway. */
+const KEPT = 2000;
+const CANCELLED = "The question was cancelled.";
 
 /** The key for `model`, from the settings or the provider's environment variable. */
 export function apiKey(
 	model: ModelSettings,
-	env: Record<string, string | undefined> = process.env,
+	env: Env = process.env,
 ): string | undefined {
 	const name = PRESETS[model.provider].env;
 	return model.apiKey ?? (name ? env[name] : undefined);
@@ -59,7 +65,7 @@ export function apiKey(
 /** What is missing before the model can answer, as a message for the player; or undefined. */
 export function missing(
 	model: ModelSettings,
-	env: Record<string, string | undefined> = process.env,
+	env: Env = process.env,
 ): string | undefined {
 	const name = PRESETS[model.provider].env;
 	if (!name || apiKey(model, env)) return undefined;
@@ -69,7 +75,7 @@ export function missing(
 /** The model the settings name, through the AI SDK provider that speaks its API. */
 export function languageModel(
 	model: ModelSettings,
-	env: Record<string, string | undefined> = process.env,
+	env: Env = process.env,
 ): LanguageModel {
 	const key = apiKey(model, env);
 	const baseURL = model.baseUrl ?? PRESETS[model.provider].baseUrl;
@@ -101,20 +107,31 @@ export class ModelBrain implements Brain {
 	private readonly history = new Map<string, ModelMessage[]>();
 	private queue: Promise<void> = Promise.resolve();
 	private model?: LanguageModel;
+	/** Checks the model's arguments against each tool's schema before the tool runs. */
+	private readonly validators = new Map<string, z.ZodType>();
 
 	constructor(
 		private readonly settings: Settings["brain"],
 		private readonly options: ModelBrainOptions,
 	) {
 		this.model = options.model;
+		for (const t of options.tools)
+			this.validators.set(
+				t.name,
+				z.fromJSONSchema(t.inputSchema as z.core.JSONSchema.JSONSchema),
+			);
 	}
 
 	/** Asks one question at a time. Resolves with the answer or a message for the player. */
 	ask(question: Question, turn: Turn): Promise<string> {
 		return new Promise((reply) => {
-			this.queue = this.queue.then(async () =>
-				reply(await this.answer(question, turn)),
-			);
+			this.queue = this.queue
+				.then(async () => reply(await this.answer(question, turn)))
+				// answer() does not throw. Should it ever, the player still hears, and the next
+				// question still runs.
+				.catch((error) =>
+					reply(`The built-in agent failed: ${describe(error, undefined)}`),
+				);
 		});
 	}
 
@@ -127,12 +144,23 @@ export class ModelBrain implements Brain {
 		const settings = this.settings.model;
 		if (!settings)
 			return "No model is set: brain.model is missing in the settings.";
+		const { log } = this.options;
+		const key = this.options.model ? undefined : apiKey(settings);
 		if (!this.model) {
 			const problem = missing(settings);
 			if (problem) return problem;
-			this.model = languageModel(settings);
+			try {
+				this.model = languageModel(settings);
+			} catch (error) {
+				log.event("model-error", {
+					provider: settings.provider,
+					model: settings.name,
+					during: "setup",
+					error: describe(error, key),
+				});
+				return `The built-in agent could not set up ${settings.provider}: ${describe(error, key)}`;
+			}
 		}
-		const { log } = this.options;
 		const c = question.character;
 		const who =
 			c.name || c.realm ? `${c.name ?? ""}-${c.realm ?? ""}` : "unknown";
@@ -141,21 +169,37 @@ export class ModelBrain implements Brain {
 		const timeout = this.settings.timeout;
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), timeout * 1000);
+		// The deadline holds even if a provider or a tool ignores the abort.
+		const deadline = new Promise<never>((_, reject) =>
+			abort.signal.addEventListener(
+				"abort",
+				() => reject(new Error(CANCELLED)),
+				{ once: true },
+			),
+		);
+		deadline.catch(() => {});
+		let done = false;
 		const started = performance.now();
 		try {
-			const result = await generateText({
-				model: this.model,
-				system: rules({ web: false }),
-				messages: [...past, user],
-				tools: this.toolSet(turn),
-				stopWhen: isStepCount(MAX_STEPS),
-				abortSignal: abort.signal,
-				maxRetries: 1,
-			});
+			const result = await Promise.race([
+				generateText({
+					model: this.model,
+					system: rules({ web: false }),
+					messages: [...past, user],
+					tools: this.toolSet(turn, () => done),
+					stopWhen: isStepCount(MAX_STEPS),
+					abortSignal: abort.signal,
+					maxRetries: 1,
+				}),
+				deadline,
+			]);
 			const text = result.text.trim();
 			const tools = result.steps.flatMap((s) =>
 				s.toolCalls.map((t) => t.toolName),
 			);
+			// The last round still asked for tools: the model ran out of rounds, and any text it
+			// wrote alongside is a preamble, not the answer.
+			const exhausted = (result.steps.at(-1)?.toolCalls.length ?? 0) > 0;
 			log.event("model-answer", {
 				provider: settings.provider,
 				model: settings.name,
@@ -164,45 +208,55 @@ export class ModelBrain implements Brain {
 				tools,
 				inputTokens: result.totalUsage.inputTokens,
 				outputTokens: result.totalUsage.outputTokens,
+				...(exhausted ? { exhausted: true } : {}),
 			});
-			if (!text)
-				return result.steps.length >= MAX_STEPS
-					? `The model used all ${MAX_STEPS} rounds of tool calls without an answer. Ask again, perhaps more narrowly.`
-					: "The model gave an empty answer.";
-			this.history.set(
-				who,
-				[...past, user, { role: "assistant" as const, content: text }].slice(
-					-HISTORY,
-				),
-			);
+			if (exhausted)
+				return `The model used all ${MAX_STEPS} rounds of tool calls without an answer. Ask again, perhaps more narrowly.`;
+			if (!text) return "The model gave an empty answer.";
+			const answer: ModelMessage = {
+				role: "assistant",
+				content: text.slice(0, KEPT),
+			};
+			this.history.set(who, [...past, user, answer].slice(-2 * HISTORY));
 			return text;
 		} catch (error) {
 			if (abort.signal.aborted) return `No answer within ${timeout} s.`;
 			log.event("model-error", {
 				provider: settings.provider,
 				model: settings.name,
-				error: describe(error),
+				error: describe(error, key),
 			});
-			return `The model could not answer: ${describe(error)}`;
+			return `The model could not answer: ${describe(error, key)}`;
 		} finally {
+			done = true;
 			clearTimeout(timer);
+			abort.abort();
 		}
 	}
 
-	/** The `wow` tools for the model. Each call shows in the window's status line. */
-	private toolSet(turn: Turn): ToolSet {
+	/**
+	 * The `wow` tools for the model. Each call shows in the window's status line. Arguments that
+	 * do not fit a tool's schema go back to the model as an error, and so does a cancelled
+	 * question: a tool still waiting for the game stops waiting.
+	 */
+	private toolSet(turn: Turn, done: () => boolean): ToolSet {
 		return Object.fromEntries(
 			this.options.tools.map((t) => [
 				t.name,
 				tool({
 					description: t.description,
 					inputSchema: jsonSchema<Record<string, unknown>>(t.inputSchema),
-					execute: async (args) => {
-						const shown = Object.values(args ?? {})
-							.map(String)
-							.join(", ");
+					execute: async (input, { abortSignal }) => {
+						const parsed = this.validators.get(t.name)?.safeParse(input ?? {});
+						if (parsed && !parsed.success)
+							throw new Error(
+								`Invalid arguments for ${t.name}: ${z.prettifyError(parsed.error)}`,
+							);
+						if (done() || abortSignal?.aborted) throw new Error(CANCELLED);
+						const args = (parsed?.data ?? {}) as Record<string, unknown>;
+						const shown = Object.values(args).map(String).join(", ");
 						turn.onTool(shown ? `${t.name}: ${shown}` : t.name);
-						return await t.call(args ?? {});
+						return await abortable(Promise.resolve(t.call(args)), abortSignal);
 					},
 				}),
 			]),
@@ -210,16 +264,50 @@ export class ModelBrain implements Brain {
 	}
 }
 
-/** A provider's error in a few words, without anything from the request. */
-function describe(error: unknown): string {
-	if (APICallError.isInstance(error)) {
-		if (error.statusCode === 401 || error.statusCode === 403)
-			return `the provider refused the API key (HTTP ${error.statusCode}).`;
-		if (error.statusCode === 404)
-			return "the provider does not know this model (HTTP 404). Check brain.model.name.";
-		if (error.statusCode === 429)
-			return "the provider is rate limiting or the account has no credit left (HTTP 429).";
-		return `HTTP ${error.statusCode ?? "error"}: ${error.message}`;
-	}
-	return error instanceof Error ? error.message : String(error);
+/** `work`, or a rejection as soon as `signal` aborts. */
+function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return work;
+	return new Promise<T>((resolve, reject) => {
+		const stop = () => reject(new Error(CANCELLED));
+		if (signal.aborted) return stop();
+		signal.addEventListener("abort", stop, { once: true });
+		work
+			.then(resolve, reject)
+			.finally(() => signal.removeEventListener("abort", stop));
+	});
+}
+
+/**
+ * A provider's error in fixed words. A provider's own message may quote the request, and with
+ * it a key, so none of it reaches the log or the game; the key is masked on top of that.
+ */
+export function describe(error: unknown, key: string | undefined): string {
+	const cause = RetryError.isInstance(error) ? error.lastError : error;
+	let text: string;
+	if (APICallError.isInstance(cause)) {
+		const status = cause.statusCode;
+		if (status === 401 || status === 403)
+			text = `the provider refused the API key (HTTP ${status}).`;
+		else if (status === 402)
+			text = "the account has no credit left (HTTP 402).";
+		else if (status === 404)
+			text =
+				"the provider does not know this model (HTTP 404). Check brain.model.name.";
+		else if (status === 429)
+			text =
+				"the provider is rate limiting or the account has no credit left (HTTP 429).";
+		else if (status !== undefined && status >= 500)
+			text = `the provider has a problem (HTTP ${status}). Try again later.`;
+		else if (status !== undefined)
+			text = `the provider rejected the request (HTTP ${status}). Check brain.model.`;
+		else text = "the provider could not be reached.";
+	} else if (
+		cause instanceof Error &&
+		/fetch|ECONNREFUSED|ENOTFOUND|network/i.test(cause.message)
+	)
+		text =
+			"the provider could not be reached. Check the address and the connection.";
+	else
+		text = `an unexpected error (${cause instanceof Error ? cause.name : typeof cause}).`;
+	return key ? text.replaceAll(key, "***") : text;
 }

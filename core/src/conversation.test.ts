@@ -113,3 +113,9 @@ test("strips the Markdown models write anyway, and keeps game links", () => {
 		"Gear\nYou wield [item:13262], see this and /cast Charge.\n2 * 3 = 6, a_b_c",
 	);
 });
+
+test("keeps what stands inside code as it is", () => {
+	expect(plain("Use `__name__` and `**kwargs`, then **go**.")).toBe(
+		"Use __name__ and **kwargs, then go.",
+	);
+});

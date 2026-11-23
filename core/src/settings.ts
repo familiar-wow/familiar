@@ -105,9 +105,10 @@ export function loadSettings(file: string): Settings {
 	let json: unknown;
 	try {
 		json = JSON.parse(readFileSync(file, "utf8"));
-	} catch (error) {
+	} catch {
+		// The parser's message quotes the text around the mistake, which may be an API key.
 		throw new Error(
-			`${file} is not valid JSON: ${error instanceof Error ? error.message : error}`,
+			`${file} is not valid JSON. Check the quotes, commas and brackets near the last change.`,
 		);
 	}
 	const result = Settings.safeParse(json);
