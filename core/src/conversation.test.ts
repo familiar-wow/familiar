@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Conversation, STATUS_MS } from "./conversation.ts";
+import { Conversation, plain, STATUS_MS } from "./conversation.ts";
 import { Game } from "./game.ts";
 import type { Log } from "./log.ts";
 
@@ -102,4 +102,14 @@ test("notes the character of each question for the game tools", async () => {
 	conversation.receive(encode("question\nname: Alt\n\nand now?"));
 	await Bun.sleep(10);
 	expect(game.character?.character).toEqual({ name: "Alt" });
+});
+
+test("strips the Markdown models write anyway, and keeps game links", () => {
+	expect(
+		plain(
+			"## Gear\nYou wield **[item:13262]**, see __this__ and `/cast Charge`.\n2 * 3 = 6, a_b_c",
+		),
+	).toBe(
+		"Gear\nYou wield [item:13262], see this and /cast Charge.\n2 * 3 = 6, a_b_c",
+	);
 });

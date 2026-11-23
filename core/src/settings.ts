@@ -1,13 +1,51 @@
-// The settings file, until the desktop app has a settings page (FAM-6). It holds the bridge's
-// settings only: the brain itself is set up in the agent (ADR 0006).
+// The settings file, until the desktop app has a settings page (FAM-6). For the player's own
+// agent it holds the bridge's settings only: that brain is set up in the agent (ADR 0006). For
+// the built-in agent it names the model and its provider (ADR 0008).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+/** Providers the built-in agent can ask (brain/model.ts). */
+export const PROVIDERS = [
+	"openai",
+	"anthropic",
+	"google",
+	"openrouter",
+	"deepseek",
+	"ollama",
+	"lmstudio",
+	"openai-compatible",
+] as const;
+
+const Model = z
+	.strictObject({
+		provider: z.enum(PROVIDERS),
+		/** The model's name at the provider, such as "gpt-5-mini" or "google/gemini-3-flash". */
+		name: z.string().min(1),
+		/** The API's address; needed for "openai-compatible", optional for the others. */
+		baseUrl: z.url().optional(),
+		/**
+		 * The API key. Better left out: then it comes from the provider's environment variable,
+		 * such as OPENAI_API_KEY. The desktop app will keep it in the system keychain (FAM-6).
+		 */
+		apiKey: z.string().min(1).optional(),
+	})
+	.refine((m) => m.provider !== "openai-compatible" || m.baseUrl, {
+		message: 'The provider "openai-compatible" needs a baseUrl.',
+		path: ["baseUrl"],
+	});
+
 const Settings = z.strictObject({
 	brain: z
 		.strictObject({
+			/**
+			 * Which brain answers: "agent", the player's own agent through ACP (`command`), or
+			 * "model", Familiar's built-in agent with a model from a provider (`model`).
+			 */
+			use: z.enum(["agent", "model"]).default("agent"),
+			/** The model for the built-in agent. */
+			model: Model.optional(),
 			/** Starts an agent that speaks ACP on stdin and stdout. */
 			command: z.array(z.string().min(1)).min(1).default(["hermes", "acp"]),
 			/**
@@ -22,6 +60,11 @@ const Settings = z.strictObject({
 			 * agent runs, which matters for an agent on another machine.
 			 */
 			cwd: z.string().min(1).optional(),
+		})
+		.refine((b) => b.use !== "model" || b.model, {
+			message:
+				'brain.use is "model", so brain.model must name a provider and a model.',
+			path: ["model"],
 		})
 		.prefault({}),
 	mcp: z

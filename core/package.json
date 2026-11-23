@@ -1,6 +1,6 @@
 {
 	"name": "@familiar/core",
-	"version": "0.8.0",
+	"version": "0.9.0",
 	"private": true,
 	"type": "module",
 	"scripts": {
@@ -9,12 +9,18 @@
 		"build": "bun scripts/build.ts"
 	},
 	"devDependencies": {
+		"@ai-sdk/provider": "4.0.39",
 		"@types/bun": "1.4.4",
 		"opentype.js": "2.0.0",
 		"typescript": "7.0.2"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "2.7.0",
+		"@ai-sdk/anthropic": "4.0.107",
+		"@ai-sdk/google": "4.0.124",
+		"@ai-sdk/openai": "4.0.122",
+		"@ai-sdk/openai-compatible": "3.0.94",
+		"ai": "7.0.180",
 		"zod": "4.6.7"
 	}
 }

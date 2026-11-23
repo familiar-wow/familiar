@@ -77,7 +77,7 @@ export class Conversation {
 			onPermission: (title) => this.permission(title),
 		});
 		status.stop();
-		const text = clip(reply, MAX_ANSWER);
+		const text = clip(plain(reply), MAX_ANSWER);
 		if (this.down({ kind: "answer", text })) {
 			const s = ((performance.now() - asked) / 1000).toFixed(1);
 			this.log.say(
@@ -112,6 +112,19 @@ export class Conversation {
 			return false;
 		}
 	}
+}
+
+/**
+ * The answer without the Markdown that models write even when told not to: the game window
+ * shows plain text, so **bold**, __bold__, `code` and "# " headings would show as their marks.
+ * Game links such as [item:19019] stay as they are.
+ */
+export function plain(text: string): string {
+	return text
+		.replace(/\*\*(.+?)\*\*/g, "$1")
+		.replace(/__(.+?)__/g, "$1")
+		.replace(/`([^`\n]+)`/g, "$1")
+		.replace(/^#{1,6} +/gm, "");
 }
 
 /**
