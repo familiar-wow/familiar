@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { AcpBrain } from "./brain/acp.ts";
 import type { Brain } from "./brain/chat.ts";
+import { ChatGpt, ChatGptError, USAGE_URL } from "./brain/chatgpt.ts";
 import { ModelBrain, missing } from "./brain/model.ts";
 import { Conversation } from "./conversation.ts";
 import { echoBrain } from "./echo.ts";
@@ -36,6 +37,9 @@ const USAGE = `familiar ${VERSION}: the Familiar app for development builds
   familiar              install or update the addon, then answer questions until Ctrl+C
   familiar check        show which client it found, without changing anything
   familiar uninstall    remove the addon and its helpers (close WoW first)
+  familiar login chatgpt    sign in with ChatGPT, so your ChatGPT plan answers
+  familiar logout chatgpt   sign out of ChatGPT; --forget also forgets the account,
+                            so that another ChatGPT account can sign in
 
 Options:
   --wow <folder>       the _forever_ client folder, if it is not found automatically
@@ -117,6 +121,14 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 		);
 		const problem = missing(model);
 		if (problem) console.log(`\n!! ${problem}\n`);
+		if (model.provider === "chatgpt") {
+			const account = new ChatGpt({ folder: dirname(settingsFile) }).account();
+			console.log(
+				account
+					? `        Using ChatGPT plan (${account}). Manage usage: ${USAGE_URL}`
+					: "\n!! Not signed in to ChatGPT. Run `familiar login chatgpt`, then start Familiar again.\n",
+			);
+		}
 	} else {
 		console.log(
 			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
@@ -158,7 +170,11 @@ async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 	// Starts nothing until the first question.
 	const brain: Brain & { stop?: () => void } =
 		use === "model"
-			? new ModelBrain(settings.brain, { log, tools: wowTools(game) })
+			? new ModelBrain(settings.brain, {
+					log,
+					tools: wowTools(game),
+					chatgpt: new ChatGpt({ folder: dirname(settingsFile) }),
+				})
 			: new AcpBrain(settings.brain, {
 					folder: dirname(settingsFile),
 					log,
@@ -212,6 +228,61 @@ async function check(paths: WowPaths): Promise<void> {
 		console.log(`${`${label}:`.padEnd(13)}${value}`);
 }
 
+/** Opens `url` in the default browser; the address is printed too, in case that fails. */
+function openBrowser(url: string): void {
+	const command =
+		process.platform === "win32"
+			? ["rundll32", "url.dll,FileProtocolHandler", url]
+			: process.platform === "darwin"
+				? ["open", url]
+				: ["xdg-open", url];
+	try {
+		Bun.spawn(command, { stdout: "ignore", stderr: "ignore" });
+	} catch {
+		// The printed address is enough.
+	}
+}
+
+async function login(folder: string): Promise<void> {
+	mkdirSync(folder, { recursive: true });
+	const chatgpt = new ChatGpt({ folder });
+	try {
+		const account = await chatgpt.signIn((url) => {
+			console.log(
+				`Continue with ChatGPT in your browser. If it does not open, copy this address into it:\n\n${url}\n\nWaiting for the browser …`,
+			);
+			openBrowser(url);
+		});
+		console.log(
+			`\nSigned in as ${account}.\n\nYou're using your ChatGPT plan: Familiar's answers count toward your plan's usage. Manage usage and Familiar's limit: ${USAGE_URL}\n`,
+		);
+		const models = await chatgpt.models();
+		if (models.length) {
+			console.log("Models your plan offers (name to use in the settings):");
+			for (const m of models) console.log(`  ${m.slug.padEnd(28)} ${m.name}`);
+			const pick = models[0]?.slug ?? "<model>";
+			console.log(
+				`\nIn settings.json:\n  "brain": { "use": "model", "model": { "provider": "chatgpt", "name": "${pick}" } }`,
+			);
+		}
+	} catch (error) {
+		exitWith(
+			error instanceof ChatGptError
+				? error.message
+				: `Sign-in failed: ${error instanceof Error ? error.name : "unknown error"}.`,
+		);
+	}
+}
+
+async function logout(folder: string, forget: boolean): Promise<void> {
+	const { revoked } = await new ChatGpt({ folder }).signOut({ forget });
+	console.log(
+		revoked
+			? "Signed out of ChatGPT."
+			: "Signed out here, but ChatGPT did not confirm it. To be sure, disconnect Familiar in ChatGPT's settings.",
+	);
+}
+
 async function main(): Promise<void> {
 	const { values, positionals } = parseArgs({
 		args: Bun.argv.slice(2),
@@ -220,6 +291,7 @@ async function main(): Promise<void> {
 			logs: { type: "string" },
 			settings: { type: "string" },
 			echo: { type: "boolean" },
+			forget: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean" },
 		},
@@ -237,6 +309,15 @@ async function main(): Promise<void> {
 		return void console.log(
 			`Removed ${removed.folders} addon folders and ${removed.rows} AddOns.txt rows.`,
 		);
+	}
+	if (command === "login" || command === "logout") {
+		if (positionals[1] !== "chatgpt") exitWith(USAGE);
+		const folder = dirname(
+			resolve(values.settings ?? join(settingsFolder(), "settings.json")),
+		);
+		return command === "login"
+			? login(folder)
+			: logout(folder, values.forget ?? false);
 	}
 	if (command !== "run") exitWith(USAGE);
 	const settingsFile = resolve(

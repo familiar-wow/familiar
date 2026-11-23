@@ -45,7 +45,7 @@ Two kinds of brain can answer, and `brain.use` picks one:
 
 |                                                  | Your own agent (`"agent"`)                                                      | Built-in agent (`"model"`)                                                                                                   |
 | ------------------------------------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| What you need                                    | an agent such as Hermes, Codex, Claude Code or Gemini CLI, set up and signed in | an API key from a provider, or a local model in Ollama or LM Studio                                                          |
+| What you need                                    | an agent such as Hermes, Codex, Claude Code or Gemini CLI, set up and signed in | a ChatGPT plan, an API key from a provider, or a local model in Ollama or LM Studio                                          |
 | Game tools: gear, bags, quests, talents, stats … | all of them, through the `wow` server                                           | all of them, called in the app                                                                                               |
 | Web research, skills, the agent's own memory     | whatever your agent has                                                         | none: it knows your character and what the model learned                                                                     |
 | Speed in our tests                               | through Hermes: 8–42 s with character data, 23–94 s with web research           | 2–8 s with small models                                                                                                      |
@@ -124,10 +124,23 @@ For players without an agent of their own ([ADR 0008](../docs/adr/0008-built-in-
 | `ollama`            | none                              | a local model, `http://127.0.0.1:11434/v1`    |
 | `lmstudio`          | none                              | a local model, `http://127.0.0.1:1234/v1`     |
 | `openai-compatible` | none, or `apiKey`                 | any OpenAI-compatible server; needs `baseUrl` |
+| `chatgpt`           | none: `familiar login chatgpt`    | your ChatGPT plan instead of a key, see below |
 
 `name` is the model's name at the provider. `baseUrl` overrides the provider's address, for example for Ollama on another PC. `apiKey` in the settings works too, but the environment variable keeps the key out of the file; the desktop app will keep it in the system keychain. Familiar sends the key only to the provider and never logs it. Without a key, the game window says which variable to set.
 
 Pick a fast model that can call tools. A small model answers questions about your character in a few seconds; a large model with long reasoning takes much longer and costs more. What you pay is between you and the provider. Tested through OpenRouter on 2026-11-23, each answering in 2 to 8 s: `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `google/gemini-3.5-flash` and `deepseek/deepseek-v4.1-flash`.
+
+#### Your ChatGPT plan
+
+With a ChatGPT plan (Go, Plus, Pro or Business), the built-in agent can answer on that plan instead of an API key, through _Sign in with ChatGPT_. OpenAI allows this for open-source apps that run on your own PC.
+
+1. Run `familiar login chatgpt`. Your browser opens; choose **Continue** and allow Familiar to use your ChatGPT plan. The first sign-in needs port 1455 on `127.0.0.1` for the way back to Familiar.
+2. Familiar lists the models your plan offers. Put one of them into the settings: `"model": { "provider": "chatgpt", "name": "<model>" }`.
+3. Start `familiar` as usual. The console shows _Using ChatGPT plan_ and the account.
+
+Familiar's answers count toward your plan's usage like any other use of it. In [ChatGPT's usage settings](https://chatgpt.com/settings/usage) you see what Familiar used and can set a limit for it. When a limit is reached, the game window says so and links there. `familiar logout chatgpt` signs out and ends the session at OpenAI; you can also disconnect Familiar in ChatGPT's settings.
+
+The sign-in is kept in `chatgpt.json` next to the settings until the desktop app keeps it in the system keychain. Only your user may read it: on Linux and macOS through the file mode, on Windows through an access list with just your account (`icacls`); if Familiar cannot set that, it does not keep the sign-in. Familiar renews the access token itself, one renewal at a time even across several running copies, and never logs or prints a token. `familiar logout chatgpt --forget` also forgets the account, so that another ChatGPT account can sign in. On this route OpenAI stores nothing of the conversation. Claude subscriptions cannot be used this way: Anthropic allows Claude in other apps only with an API key.
 
 The built-in agent keeps the last 12 questions and answers of each character while `familiar` runs, each answer up to 2000 characters, so a follow-up question works; tool results are not kept, and the model fetches the game state again. Starting `familiar` again starts a fresh conversation. The log records the provider, model, duration, tool names and token counts of each answer, not its text. The `wow` server below does not start for the built-in agent: it calls the tools in the app itself.
 

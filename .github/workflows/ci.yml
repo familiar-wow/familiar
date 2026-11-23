@@ -107,7 +107,7 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - run: bun test acp.test bank.test server.test game.test
+      - run: bun test acp.test bank.test server.test game.test chatgpt.test model.test settings.test
         working-directory: core
 
   # The only check the ruleset for main requires. Add every new job to `needs`.
