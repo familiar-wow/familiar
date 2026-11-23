@@ -5,16 +5,16 @@ import {
 	Game,
 	parseBags,
 	parseEquipment,
+	parseLookup,
 	parseMerchant,
 	parseQuests,
 	parseTalents,
 	parseTrainer,
-	type Slice,
 } from "./game.ts";
 
 test("pulls once per revision, serves unchanged slices from cache, and isolates characters", async () => {
 	const game = new Game({ fetchTimeoutMs: 500 });
-	const fetches: { id: number; slice: Slice }[] = [];
+	const fetches: { id: number; slice: string }[] = [];
 	let weapon = "Ashbringer";
 	let rev = 1;
 	game.setFetcher((id, slice) => {
@@ -317,4 +317,108 @@ test("parses merchant extended costs and pet trainer points", () => {
 		copper: 100,
 		formatted: "1s 0c",
 	});
+});
+
+test("parses where a quest leads, from a waypoint or the quest's area on the map", () => {
+	const log = parseQuests(
+		[
+			"q\t783\t1\t0\t1\tElwynn Forest\tA Threat Within",
+			"w\twaypoint\t1429\tElwynn Forest\t48.1\t42.0\tMarshal McBride",
+			"o\t0\tSpeak with Marshal McBride: 0/1",
+			"q\t7\t3\t0\t0\tElwynn Forest\tKobold Camp Cleanup",
+			"w\tmap\t1429\tElwynn Forest\t40.5\t83.0\t",
+			"q\t8\t5\t0\t0\t\tNo map",
+		].join("\n"),
+	);
+	expect(log.quests[0]).toMatchObject({
+		id: 783,
+		location: {
+			source: "waypoint",
+			mapId: 1429,
+			map: "Elwynn Forest",
+			x: 48.1,
+			y: 42,
+			note: "Marshal McBride",
+		},
+		objectives: [{ text: "Speak with Marshal McBride: 0/1" }],
+	});
+	expect(log.quests[1]?.location).toEqual({
+		source: "map",
+		mapId: 1429,
+		map: "Elwynn Forest",
+		x: 40.5,
+		y: 83,
+	});
+	expect(log.quests[2]?.location).toBeUndefined();
+});
+
+test("parses a lookup of an item, a spell, a quest and an unknown ID", () => {
+	expect(
+		parseLookup(
+			"item",
+			2589,
+			"l\titem\t2589\tLinen Cloth\ni\t1\t5\t0\tTrade Goods\tCloth\t\t13\nt\tMax Stack: 200",
+		),
+	).toEqual({
+		kind: "item",
+		id: 2589,
+		found: true,
+		name: "Linen Cloth",
+		quality: 1,
+		itemLevel: 5,
+		itemType: "Trade Goods",
+		itemSubType: "Cloth",
+		sellPrice: { copper: 13, formatted: "13c" },
+		tooltip: ["Max Stack: 200"],
+	});
+	expect(
+		parseLookup(
+			"spell",
+			133,
+			"l\tspell\t133\tFireball\nd\tHurls a fiery ball.\nt\t30 Mana  35 yd range",
+		),
+	).toMatchObject({
+		found: true,
+		name: "Fireball",
+		description: "Hurls a fiery ball.",
+		tooltip: ["30 Mana  35 yd range"],
+	});
+	expect(
+		parseLookup("quest", 7, "l\tquest\t7\tKobold Camp Cleanup\nqd\t3\t1\t0"),
+	).toMatchObject({
+		found: true,
+		questLevel: 3,
+		completed: true,
+		inQuestLog: false,
+	});
+	expect(parseLookup("item", 999999, "none")).toEqual({
+		kind: "item",
+		id: 999999,
+		found: false,
+		tooltip: [],
+	});
+});
+
+test("looks up through the addon once and answers again from memory until the interface reloads", async () => {
+	const game = new Game({ fetchTimeoutMs: 500 });
+	const asked: { slice: string; arg?: string }[] = [];
+	game.setFetcher((id, slice, arg) => {
+		asked.push({ slice, arg });
+		queueMicrotask(() =>
+			game.receiveState(id, slice, 0, "l\titem\t2589\tLinen Cloth"),
+		);
+		return true;
+	});
+	const [a, b] = await Promise.all([
+		game.lookup("item", 2589),
+		game.lookup("item", 2589),
+	]);
+	expect(a).toEqual(b);
+	expect(await game.lookup("item", 2589)).toMatchObject({
+		name: "Linen Cloth",
+	});
+	expect(asked).toEqual([{ slice: "lookup", arg: "item:2589" }]);
+	game.forget();
+	await game.lookup("item", 2589);
+	expect(asked).toHaveLength(2);
 });

@@ -450,6 +450,7 @@ local stub = {
 	token = "0", -- 1: the offer also costs 2 Badge of Justice
 	trainerNames = "1", -- 0: service names have not loaded yet
 	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
+	waypoint = "1", -- 0: the quest log has no waypoint, only an area on the map
 }
 
 local function fire(event, ...)
@@ -598,10 +599,19 @@ local function api()
 			category = "Elwynn Forest",
 			loads = true,
 		},
+		-- Not in the log, but done before.
+		[7] = { title = "Kobold Camp Cleanup", level = 3, done = true },
+	}
+	local maps = {
+		[1454] = { name = "Orgrimmar", parentMapID = 1411 },
+		[1411] = { name = "Durotar", parentMapID = 1414 },
+		[1429] = { name = "Elwynn Forest", parentMapID = 1415 },
 	}
 	local tooltips = {
 		["item:19019"] = { "Thunderfury, Blessed Blade of the Windseeker", "Binds when picked up", { "One-Hand", "Sword" } },
 		["item:13262"] = { "Ashbringer", "Binds when picked up" },
+		["item:2589"] = { "Linen Cloth", "Max Stack: 200", "Sell Price: 13 copper" },
+		["spell:133"] = { "Fireball", { "30 Mana", "35 yd range" }, "Hurls a fiery ball that causes 14 to 22 Fire damage." },
 	}
 	local function itemID(info)
 		return tonumber(info) or tonumber(tostring(info):match("item:(%d+)"))
@@ -613,7 +623,7 @@ local function api()
 		GetItemInfo = function(info)
 			local item = items[itemID(info)]
 			if item and not item.loads then
-				return item.link:match("%[(.-)%]"), item.link
+				return item.link:match("%[(.-)%]"), item.link, item.quality, item.ilvl, nil, nil, nil, nil, item.equip
 			end
 		end,
 		GetItemInfoInstant = function(info)
@@ -645,6 +655,9 @@ local function api()
 		GetSpellName = function(id)
 			return spellNames[id]
 		end,
+		GetSpellDescription = function(id)
+			return id == 133 and "Hurls a fiery ball that causes 14 to 22 Fire damage." or ""
+		end,
 	}
 	e.GetQuestLink = function(id)
 		local quest = quests[id]
@@ -655,6 +668,33 @@ local function api()
 			if quests[id] then
 				quests[id].loads = nil
 			end
+		end,
+		GetTitleForQuestID = function(id)
+			local quest = quests[id]
+			return quest and not quest.loads and quest.title or nil
+		end,
+		GetQuestDifficultyLevel = function(id)
+			return quests[id] and quests[id].level or 0
+		end,
+		IsQuestFlaggedCompleted = function(id)
+			return quests[id] ~= nil and quests[id].done == true
+		end,
+		GetLogIndexForQuestID = function(id)
+			return id == 783 and 2 or nil
+		end,
+		GetNextWaypoint = function(id)
+			if id == 783 and stub.waypoint == "1" then
+				return 1429, 0.481, 0.42
+			end
+		end,
+		GetNextWaypointText = function(id)
+			return id == 783 and "Marshal McBride" or ""
+		end,
+		GetQuestsOnMap = function(map)
+			if map == 1454 then
+				return { { questID = 783, mapID = 1454, x = 0.5, y = 0.625 } }
+			end
+			return {}
 		end,
 		GetNumQuestLogEntries = function()
 			return 2
@@ -682,6 +722,10 @@ local function api()
 	e.C_Map = {
 		GetBestMapForUnit = function()
 			return 1454
+		end,
+		GetMapInfo = function(map)
+			local info = maps[map]
+			return info and { mapID = map, name = info.name, parentMapID = info.parentMapID } or nil
 		end,
 		GetPlayerMapPosition = function()
 			return {

@@ -4,6 +4,7 @@
 -- travels over the lane until the player's agent actually calls a tool (ADR 0001, ADR 0007).
 local _, ns = ...
 local Transport = ns.Transport
+local Tasks = ns.Tasks
 
 local format, concat, sort = string.format, table.concat, table.sort
 
@@ -261,6 +262,72 @@ local function collectBags()
 	return pack(lines)
 end
 
+local function mapName(mapID)
+	if C_Map and C_Map.GetMapInfo then
+		local ok, info = pcall(C_Map.GetMapInfo, mapID)
+		if ok and type(info) == "table" and info.name then
+			return clean(info.name)
+		end
+	end
+	return ""
+end
+
+local function percent(v)
+	return format("%.1f", (tonumber(v) or 0) * 100)
+end
+
+-- The quests the world map marks on the player's map and on its parent zone (FAM-61).
+local function questAreas()
+	local areas = {}
+	if not (C_Map and C_Map.GetBestMapForUnit and C_QuestLog.GetQuestsOnMap) then
+		return areas
+	end
+	local ok, map = pcall(C_Map.GetBestMapForUnit, "player")
+	if not ok or not map then
+		return areas
+	end
+	local maps = { map }
+	if C_Map.GetMapInfo then
+		local iok, info = pcall(C_Map.GetMapInfo, map)
+		if iok and type(info) == "table" and (info.parentMapID or 0) > 0 then
+			maps[2] = info.parentMapID
+		end
+	end
+	for _, m in ipairs(maps) do
+		local qok, list = pcall(C_QuestLog.GetQuestsOnMap, m)
+		if qok and type(list) == "table" then
+			for _, poi in ipairs(list) do
+				if type(poi) == "table" and poi.questID and poi.x and poi.y and not areas[poi.questID] then
+					areas[poi.questID] = { map = poi.mapID or m, x = poi.x, y = poi.y }
+				end
+			end
+		end
+	end
+	return areas
+end
+
+-- Where a quest leads, as the world map shows it: its next waypoint, else its area on the map.
+-- Coordinates are in percent of the map, as players and guides write them.
+local function questLocation(id, areas)
+	if C_QuestLog.GetNextWaypoint then
+		local ok, map, x, y = pcall(C_QuestLog.GetNextWaypoint, id)
+		if ok and map and x and y and (x > 0 or y > 0) then
+			local text = ""
+			if C_QuestLog.GetNextWaypointText then
+				local tok, t = pcall(C_QuestLog.GetNextWaypointText, id)
+				if tok and t then
+					text = clean(t)
+				end
+			end
+			return concat({ "w", "waypoint", tostring(map), mapName(map), percent(x), percent(y), text }, "\t")
+		end
+	end
+	local area = areas[id]
+	if area then
+		return concat({ "w", "map", tostring(area.map), mapName(area.map), percent(area.x), percent(area.y), "" }, "\t")
+	end
+end
+
 local function collectQuests()
 	local lines = {}
 	if not (C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo) then
@@ -270,6 +337,7 @@ local function collectQuests()
 	if not ok or not count then
 		return ""
 	end
+	local areas = questAreas()
 	local category = ""
 	for i = 1, count do
 		local iok, info = pcall(C_QuestLog.GetInfo, i)
@@ -301,6 +369,10 @@ local function collectQuests()
 					category,
 					clean(info.title or ""),
 				}, "\t")
+				local where = questLocation(id, areas)
+				if where then
+					lines[#lines + 1] = where
+				end
 				if C_QuestLog.GetQuestObjectives then
 					local ook, objs = pcall(C_QuestLog.GetQuestObjectives, id)
 					if ook and type(objs) == "table" then
@@ -886,10 +958,128 @@ local COLLECTORS = {
 	trainer = collectSeen("trainer"),
 }
 
--- Responds to pull requests from the app: "fetch\n<id>\n<slice>".
+-- Any item, spell or quest by ID, also ones the player never saw (FAM-61): what the client knows
+-- about it. Data the client has not loaded yet is asked for and waited on, a few seconds at most.
+local LOOKUP_WAIT = 3
+
+-- Whether the thing exists, and whether its data is there; asks the client to load it if not.
+local function loaded(kind, id)
+	if kind == "item" then
+		if C_Item.DoesItemExistByID and not C_Item.DoesItemExistByID(id) then
+			return false, true
+		end
+		if C_Item.GetItemInfo(id) then
+			return true, true
+		end
+		C_Item.RequestLoadItemDataByID(id)
+		return true, false
+	elseif kind == "spell" then
+		if not C_Spell.DoesSpellExist(id) then
+			return false, true
+		end
+		if C_Spell.IsSpellDataCached and not C_Spell.IsSpellDataCached(id) then
+			C_Spell.RequestLoadSpellData(id)
+			return true, false
+		end
+		return true, true
+	elseif kind == "quest" then
+		local title = C_QuestLog.GetTitleForQuestID(id)
+		if title and title ~= "" then
+			return true, true
+		end
+		-- The client cannot tell an unknown quest from one still loading.
+		C_QuestLog.RequestLoadQuestByID(id)
+		return false, false
+	end
+	return false, true
+end
+
+local function describeLookup(kind, id)
+	local lines = {}
+	if kind == "item" then
+		local name, _, quality, ilvl, minLevel, itemType, subType, _, equip, _, sell = C_Item.GetItemInfo(id)
+		lines[1] = concat({ "l", kind, tostring(id), clean(name or "") }, "\t")
+		lines[2] = concat({
+			"i",
+			tostring(quality or ""),
+			tostring(ilvl or ""),
+			tostring(minLevel or ""),
+			clean(itemType or ""),
+			clean(subType or ""),
+			clean(equip or ""),
+			tostring(sell or ""),
+		}, "\t")
+	elseif kind == "spell" then
+		lines[1] = concat({ "l", kind, tostring(id), clean(C_Spell.GetSpellName(id) or "") }, "\t")
+		if C_Spell.GetSpellDescription then
+			local ok, text = pcall(C_Spell.GetSpellDescription, id)
+			if ok and text and text ~= "" then
+				lines[#lines + 1] = "d\t" .. clean(text)
+			end
+		end
+	else
+		lines[1] = concat({ "l", kind, tostring(id), clean(C_QuestLog.GetTitleForQuestID(id) or "") }, "\t")
+		local level, done, inLog = "", "", ""
+		if C_QuestLog.GetQuestDifficultyLevel then
+			local ok, v = pcall(C_QuestLog.GetQuestDifficultyLevel, id)
+			level = ok and v and tostring(v) or ""
+		end
+		if C_QuestLog.IsQuestFlaggedCompleted then
+			local ok, v = pcall(C_QuestLog.IsQuestFlaggedCompleted, id)
+			done = ok and (v and "1" or "0") or ""
+		end
+		if C_QuestLog.GetLogIndexForQuestID then
+			local ok, v = pcall(C_QuestLog.GetLogIndexForQuestID, id)
+			inLog = ok and (v and "1" or "0") or ""
+		end
+		lines[2] = concat({ "qd", level, done, inLog }, "\t")
+	end
+	for _, line in ipairs(ns.Links.Tooltip(kind .. ":" .. id)) do
+		lines[#lines + 1] = "t\t" .. line
+	end
+	return pack(lines)
+end
+
+local function lookup(id, arg)
+	local kind, number = arg:match("^(%a+):(%d+)$")
+	number = tonumber(number)
+	if not (kind == "item" or kind == "spell" or kind == "quest") or not number then
+		Transport.Send(format("state\n%s\nlookup\n0\nerror\tunknown lookup", id))
+		return
+	end
+	Tasks.Spawn("lookup", function()
+		local waited, exists, ready = 0, false, false
+		while true do
+			local ok, e, r = pcall(loaded, kind, number)
+			if not ok then
+				Transport.Send(format("state\n%s\nlookup\n0\nerror\t%s", id, clean(e)))
+				return
+			end
+			exists, ready = e, r
+			if ready or waited >= LOOKUP_WAIT then
+				break
+			end
+			Tasks.Sleep(0.2)
+			waited = waited + 0.2
+		end
+		local payload = "none"
+		if exists then
+			local ok, described = pcall(describeLookup, kind, number)
+			payload = ok and described or ("error\t" .. clean(described))
+		end
+		Transport.Send(format("state\n%s\nlookup\n0\n%s", id, payload))
+	end)
+end
+
+-- Responds to pull requests from the app: "fetch\n<id>\n<slice>", and for a lookup
+-- "fetch\n<id>\nlookup\n<kind>:<id>".
 Transport.OnMessage(function(body)
-	local id, slice = body:match("^fetch\n(%d+)\n([a-z]+)$")
+	local id, slice, arg = body:match("^fetch\n(%d+)\n([a-z]+)\n?([a-z]*:?%d*)$")
 	if not id then
+		return
+	end
+	if slice == "lookup" then
+		lookup(id, arg)
 		return
 	end
 	local fn = COLLECTORS[slice]
@@ -927,6 +1117,9 @@ local BUMP_EVENTS = {
 	PLAYER_MONEY = { "bags" },
 	QUEST_LOG_UPDATE = { "quests" },
 	QUEST_WATCH_LIST_CHANGED = { "quests" },
+	-- Quest areas depend on the map the player is on.
+	QUEST_POI_UPDATE = { "quests" },
+	ZONE_CHANGED_NEW_AREA = { "quests" },
 	TRAIT_CONFIG_UPDATED = { "talents" },
 	ACTIVE_COMBAT_CONFIG_CHANGED = { "talents" },
 	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },

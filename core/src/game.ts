@@ -53,6 +53,18 @@ export interface QuestObjective {
 	finished: boolean;
 }
 
+/** Where a quest leads, as the game's world map shows it (FAM-61). */
+export interface QuestLocation {
+	/** "waypoint": the next step the map points to; "map": the quest's area on the player's map. */
+	source: "waypoint" | "map";
+	mapId: number;
+	map: string;
+	/** Percent of the map, as players and guides write coordinates. */
+	x: number;
+	y: number;
+	note?: string;
+}
+
 export interface QuestEntry {
 	id: number;
 	title: string;
@@ -60,6 +72,7 @@ export interface QuestEntry {
 	complete: boolean;
 	watched: boolean;
 	category?: string;
+	location?: QuestLocation;
 	objectives: QuestObjective[];
 }
 
@@ -217,6 +230,32 @@ export interface TrainerState {
 	truncated?: boolean;
 }
 
+export type LookupKind = "item" | "spell" | "quest";
+
+/** What the game client knows about one item, spell or quest by ID (FAM-61). */
+export interface LookupResult {
+	kind: LookupKind;
+	id: number;
+	/** False if the client knows no such thing: the ID does not exist in this game. */
+	found: boolean;
+	name?: string;
+	quality?: number;
+	itemLevel?: number;
+	requiredLevel?: number;
+	itemType?: string;
+	itemSubType?: string;
+	equipSlot?: string;
+	sellPrice?: { copper: number; formatted: string };
+	description?: string;
+	questLevel?: number;
+	/** Whether this character has completed the quest. */
+	completed?: boolean;
+	inQuestLog?: boolean;
+	/** The tooltip as the game shows it, without the name line. */
+	tooltip: string[];
+	truncated?: boolean;
+}
+
 export interface SliceMap {
 	eq: EquipmentState;
 	bags: BagsState;
@@ -244,9 +283,9 @@ interface CachedEntry {
 }
 
 interface PendingFetch {
-	charKey: string;
-	slice: Slice;
-	resolve: (result: SliceResult<Slice>) => void;
+	slice: string;
+	/** Takes the addon's answer; throws to reject. */
+	settle: (rev: number, payload: string) => void;
 	reject: (error: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
 }
@@ -279,8 +318,10 @@ export class Game {
 	};
 	private readonly cache = new Map<string, Map<Slice, CachedEntry>>();
 	private readonly pending = new Map<number, PendingFetch>();
-	private readonly inflight = new Map<string, Promise<SliceResult<Slice>>>();
-	private fetcher?: (id: number, slice: Slice) => boolean;
+	private readonly inflight = new Map<string, Promise<unknown>>();
+	/** Lookups by kind and ID; game data does not change while the client runs. */
+	private readonly lookups = new Map<string, LookupResult>();
+	private fetcher?: (id: number, slice: string, arg?: string) => boolean;
 	private nextId = 1;
 	private readonly fetchTimeoutMs: number;
 
@@ -289,7 +330,7 @@ export class Game {
 	}
 
 	/** Wires how the cache asks the addon for a slice. Returns false if the transport cannot send. */
-	setFetcher(fn: (id: number, slice: Slice) => boolean): void {
+	setFetcher(fn: (id: number, slice: string, arg?: string) => boolean): void {
 		this.fetcher = fn;
 	}
 
@@ -310,6 +351,7 @@ export class Game {
 	forget(): void {
 		this.last = undefined;
 		this.cache.clear();
+		this.lookups.clear();
 		this.inflight.clear();
 		for (const [id, waiting] of this.pending) {
 			clearTimeout(waiting.timer);
@@ -342,13 +384,59 @@ export class Game {
 				cached: true,
 			};
 		}
-		const flightKey = `${charKey}:${slice}`;
+		return this.pull(
+			`${charKey}:${slice}`,
+			slice,
+			undefined,
+			(rev, payload) => {
+				const data = parseSlice(slice, payload);
+				const at = new Date();
+				let byChar = this.cache.get(charKey);
+				if (!byChar) {
+					byChar = new Map();
+					this.cache.set(charKey, byChar);
+				}
+				byChar.set(slice, { rev, data, at });
+				if (this.last && this.last.key === charKey) this.last.revs[slice] = rev;
+				return {
+					...data,
+					revision: rev,
+					asOf: at.toISOString(),
+					cached: false,
+				};
+			},
+		);
+	}
+
+	/**
+	 * What the game client knows about an item, spell or quest by ID, also one the player never
+	 * saw (FAM-61). Answers are kept until the interface reloads.
+	 */
+	async lookup(kind: LookupKind, id: number): Promise<LookupResult> {
+		const key = `${kind}:${id}`;
+		const known = this.lookups.get(key);
+		if (known) return known;
+		return this.pull(`lookup:${key}`, "lookup", key, (_rev, payload) => {
+			const result = parseLookup(kind, id, payload);
+			if (this.lookups.size >= 500) this.lookups.clear();
+			this.lookups.set(key, result);
+			return result;
+		});
+	}
+
+	/** Asks the addon once; concurrent calls with the same key share the answer. */
+	private pull<T>(
+		flightKey: string,
+		slice: string,
+		arg: string | undefined,
+		settle: (rev: number, payload: string) => T,
+	): Promise<T> {
 		const running = this.inflight.get(flightKey);
-		if (running) return running as unknown as Promise<SliceResult<K>>;
+		if (running) return running as Promise<T>;
 		if (!this.fetcher) throw new Error("No connection to the game client.");
 
 		const id = this.nextId++;
-		const promise = new Promise<SliceResult<Slice>>((resolve, reject) => {
+		const promise = new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				reject(
@@ -357,8 +445,13 @@ export class Game {
 					),
 				);
 			}, this.fetchTimeoutMs);
-			this.pending.set(id, { charKey, slice, resolve, reject, timer });
-			if (!this.fetcher?.(id, slice)) {
+			this.pending.set(id, {
+				slice,
+				settle: (rev, payload) => resolve(settle(rev, payload)),
+				reject,
+				timer,
+			});
+			if (!this.fetcher?.(id, slice, arg)) {
 				clearTimeout(timer);
 				this.pending.delete(id);
 				reject(
@@ -373,7 +466,7 @@ export class Game {
 				this.inflight.delete(flightKey);
 		});
 		this.inflight.set(flightKey, promise);
-		return promise as unknown as Promise<SliceResult<K>>;
+		return promise;
 	}
 
 	/** Delivers a `state` message from the addon for an earlier `fetch`. */
@@ -394,22 +487,11 @@ export class Game {
 			);
 			return;
 		}
-		const data = parseSlice(waiting.slice, payload);
-		const at = new Date();
-		let byChar = this.cache.get(waiting.charKey);
-		if (!byChar) {
-			byChar = new Map();
-			this.cache.set(waiting.charKey, byChar);
+		try {
+			waiting.settle(rev, payload);
+		} catch (error) {
+			waiting.reject(error instanceof Error ? error : new Error(String(error)));
 		}
-		byChar.set(waiting.slice, { rev, data, at });
-		if (this.last && this.last.key === waiting.charKey)
-			this.last.revs[waiting.slice] = rev;
-		waiting.resolve({
-			...data,
-			revision: rev,
-			asOf: at.toISOString(),
-			cached: false,
-		});
 	}
 }
 
@@ -563,6 +645,19 @@ export function parseQuests(payload: string): QuestsState {
 				objectives: [],
 			};
 			quests.push(current);
+		} else if (parts[0] === "w" && current) {
+			const mapId = optInt(parts[2]);
+			const x = optNum(parts[4]);
+			const y = optNum(parts[5]);
+			if (mapId !== undefined && x !== undefined && y !== undefined)
+				current.location = {
+					source: parts[1] === "waypoint" ? "waypoint" : "map",
+					mapId,
+					map: parts[3] ?? "",
+					x,
+					y,
+					...(parts[6] ? { note: parts[6] } : {}),
+				};
 		} else if (parts[0] === "o" && current) {
 			current.objectives.push({
 				finished: parts[1] === "1",
@@ -869,4 +964,48 @@ export function parseTrainer(payload: string): TrainerState {
 		services,
 		...(truncated ? { truncated: true } : {}),
 	};
+}
+
+export function parseLookup(
+	kind: LookupKind,
+	id: number,
+	payload: string,
+): LookupResult {
+	const result: LookupResult = { kind, id, found: false, tooltip: [] };
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			result.truncated = true;
+			continue;
+		}
+		const parts = line.split("\t");
+		if (parts[0] === "l") {
+			result.found = true;
+			if (parts[3]) result.name = parts[3];
+		} else if (parts[0] === "i") {
+			const quality = optInt(parts[1]);
+			const itemLevel = optInt(parts[2]);
+			const requiredLevel = optInt(parts[3]);
+			const sell = optInt(parts[7]);
+			if (quality !== undefined) result.quality = quality;
+			if (itemLevel !== undefined) result.itemLevel = itemLevel;
+			if (requiredLevel) result.requiredLevel = requiredLevel;
+			if (parts[4]) result.itemType = parts[4];
+			if (parts[5]) result.itemSubType = parts[5];
+			if (parts[6]) result.equipSlot = parts[6];
+			if (sell !== undefined)
+				result.sellPrice = { copper: sell, formatted: formatMoney(sell) };
+		} else if (parts[0] === "d" && parts[1]) {
+			result.description = parts[1];
+		} else if (parts[0] === "qd") {
+			const level = optInt(parts[1]);
+			if (level) result.questLevel = level;
+			if (parts[2] === "1" || parts[2] === "0")
+				result.completed = parts[2] === "1";
+			if (parts[3] === "1" || parts[3] === "0")
+				result.inQuestLog = parts[3] === "1";
+		} else if (parts[0] === "t") {
+			result.tooltip.push(parts.slice(1).join(" "));
+		}
+	}
+	return result;
 }
