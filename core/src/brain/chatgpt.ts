@@ -5,14 +5,17 @@
 //
 // The flow: OAuth with PKCE in the player's browser and a callback on 127.0.0.1, a client that
 // registers itself on the first sign-in, tokens kept in a file next to the settings, an access
-// token renewed before each use. Familiar never logs a token.
+// token renewed before each use. Familiar never logs or prints a token.
+import { spawnSync } from "node:child_process";
 import {
-	chmodSync,
+	closeSync,
 	existsSync,
+	openSync,
 	readFileSync,
 	renameSync,
 	rmSync,
-	writeFileSync,
+	statSync,
+	writeSync,
 } from "node:fs";
 import { join } from "node:path";
 
@@ -27,6 +30,8 @@ const PLAN_SCOPE = "chatgpt.tokens.use.direct";
 const FIRST_PORT = 1455;
 /** Renew this long before the access token expires. */
 const MARGIN_S = 300;
+/** No request to OpenAI's sign-in server waits longer. */
+const REQUEST_MS = 20_000;
 
 /** Where OpenAI lives; tests pass a stand-in. */
 export interface Endpoints {
@@ -62,7 +67,7 @@ export interface Credentials {
 	saved_at?: number;
 }
 
-/** A problem the player can act on; its message is shown as it is. */
+/** A problem the player can act on; its message is shown as it is and holds no secret. */
 export class ChatGptError extends Error {
 	override name = "ChatGptError";
 }
@@ -101,14 +106,8 @@ export class ChatGpt {
 
 	/** The saved sign-in, with this installation's host ID created on first use. */
 	read(): Credentials {
-		if (existsSync(this.file)) {
-			try {
-				const saved = JSON.parse(readFileSync(this.file, "utf8"));
-				if (typeof saved?.ext_agent_host_id === "string") return saved;
-			} catch {
-				// A broken file counts as no sign-in; the host ID is made anew below.
-			}
-		}
+		const saved = this.load();
+		if (saved) return saved;
 		const fresh: Credentials = {
 			ext_agent_host_id: `urn:uuid:${crypto.randomUUID()}`,
 		};
@@ -116,27 +115,84 @@ export class ChatGpt {
 		return fresh;
 	}
 
-	/** Who is signed in, for messages; undefined if nobody is. */
-	account(): string | undefined {
-		const c = this.read();
-		return c.refresh_token ? (c.email ?? "a ChatGPT account") : undefined;
+	private load(): Credentials | undefined {
+		if (!existsSync(this.file)) return undefined;
+		try {
+			const saved = JSON.parse(readFileSync(this.file, "utf8"));
+			if (typeof saved?.ext_agent_host_id === "string") return saved;
+		} catch {
+			// A broken file counts as no sign-in.
+		}
+		return undefined;
 	}
 
-	/** Owner-only, written to a new file and renamed, so a crash never leaves half a file. */
-	private write(c: Credentials): void {
-		const tmp = `${this.file}.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(c, null, "\t")}\n`, { mode: 0o600 });
-		try {
-			chmodSync(tmp, 0o600);
-		} catch {
-			// Windows keeps the file in the user's profile; chmod does little there.
-		}
-		renameSync(tmp, this.file);
+	/** Who is signed in, for messages; undefined if nobody is. */
+	account(): string | undefined {
+		const c = this.load();
+		return c?.refresh_token ? (c.email ?? "a ChatGPT account") : undefined;
 	}
 
 	/**
-	 * Signs in through the player's browser. `open` shows the address (and may open it);
-	 * resolves with the account's email once ChatGPT plan usage is allowed.
+	 * Writes a new file next to the old one and renames it, so a crash never leaves half a file.
+	 * Only the player's own user may read it: mode 0600, and on Windows an ACL without
+	 * inherited entries.
+	 */
+	private write(c: Credentials): void {
+		const tmp = `${this.file}.${process.pid}.${random(6)}.tmp`;
+		const fd = openSync(tmp, "wx", 0o600);
+		try {
+			writeSync(fd, `${JSON.stringify(c, null, "\t")}\n`);
+		} finally {
+			closeSync(fd);
+		}
+		try {
+			restrict(tmp);
+			renameSync(tmp, this.file);
+		} catch (error) {
+			rmSync(tmp, { force: true });
+			throw error;
+		}
+	}
+
+	/**
+	 * One change to the saved sign-in at a time, across all Familiar processes: renewals rotate
+	 * the refresh token, so two at once would lose one. A lock file older than 30 s is stale.
+	 */
+	private async locked<T>(work: () => Promise<T>): Promise<T> {
+		const lock = `${this.file}.lock`;
+		const until = Date.now() + 15_000;
+		for (;;) {
+			try {
+				closeSync(openSync(lock, "wx", 0o600));
+				break;
+			} catch (error) {
+				if ((error as { code?: string }).code !== "EEXIST") throw error;
+				try {
+					if (Date.now() - statSync(lock).mtimeMs > 30_000) {
+						rmSync(lock, { force: true });
+						continue;
+					}
+				} catch {
+					continue;
+				}
+				if (Date.now() > until)
+					throw new ChatGptError(
+						"Another Familiar is busy with the ChatGPT sign-in. Try again in a moment.",
+					);
+				await Bun.sleep(50);
+			}
+		}
+		try {
+			return await work();
+		} finally {
+			rmSync(lock, { force: true });
+		}
+	}
+
+	/**
+	 * Signs in through the player's browser. `open` gets the address to open; it carries no
+	 * token and may be printed. Resolves with the account's email once ChatGPT plan usage is
+	 * allowed.
 	 */
 	async signIn(
 		open: (url: string) => void,
@@ -156,13 +212,23 @@ export class ChatGpt {
 		);
 		let finish: (url: URL) => void = () => {};
 		const called = new Promise<URL>((resolve) => (finish = resolve));
-		const handler = (request: Request) => {
+		// The browser waits for its page until the sign-in is really checked.
+		let showPage: (ok: boolean) => void = () => {};
+		const page = new Promise<boolean>((resolve) => (showPage = resolve));
+		const handler = async (request: Request) => {
 			const url = new URL(request.url);
-			if (url.pathname !== "/auth/callback")
-				return new Response("Not found", { status: 404 });
+			// Only the browser coming back from this very attempt ends it; anything else is
+			// turned away and the sign-in keeps waiting.
+			if (
+				request.method !== "GET" ||
+				url.pathname !== "/auth/callback" ||
+				url.searchParams.get("state") !== state
+			)
+				return new Response("Not this sign-in.", { status: 400 });
 			finish(url);
+			const ok = await page;
 			return new Response(
-				`<!doctype html><meta charset="utf-8"><title>${APP_NAME}</title><p>${url.searchParams.has("code") ? "Signed in. You can close this tab and go back to the game." : "Sign-in was not completed. You can close this tab."}</p>`,
+				`<!doctype html><meta charset="utf-8"><title>${APP_NAME}</title><p>${ok ? "Signed in. You can close this tab and go back to the game." : "Sign-in was not completed. See Familiar's console, then you can close this tab."}</p>`,
 				{ headers: { "Content-Type": "text/html; charset=utf-8" } },
 			);
 		};
@@ -194,11 +260,11 @@ export class ChatGpt {
 			code_challenge: challenge,
 			ext_agent_host_id: saved.ext_agent_host_id,
 		});
+		// The address is shown to the player, so it gets no ID token as a hint; the email picks
+		// the account in the browser just as well.
 		if (!saved.client_id) query.set("agent_name_hint", APP_NAME);
-		else {
-			if (saved.id_token) query.set("id_token_hint", saved.id_token);
-			if (saved.email) query.set("login_hint", saved.email);
-		}
+		else if (saved.email) query.set("login_hint", saved.email);
+		let ok = false;
 		try {
 			open(`${this.endpoints.authorize}?${query}`);
 			const timer = setTimeout(
@@ -210,10 +276,6 @@ export class ChatGpt {
 			const p = back.searchParams;
 			if (p.get("error") === "timeout")
 				throw new ChatGptError("Sign-in timed out. Try again.");
-			if (p.get("state") !== state)
-				throw new ChatGptError(
-					"The browser came back from a different sign-in. Try again.",
-				);
 			if (p.get("error") === "access_denied")
 				throw new ChatGptError(
 					"Sign-in was declined in the browser. Try again and allow Familiar to use your ChatGPT plan.",
@@ -245,7 +307,7 @@ export class ChatGpt {
 			const claims = await this.verify(tokens.id_token, issued, nonce);
 			if (saved.subject && claims.sub !== saved.subject)
 				throw new ChatGptError(
-					"That is a different ChatGPT account than the one Familiar knows. Sign out first with `familiar logout chatgpt`.",
+					"That is a different ChatGPT account than the one Familiar knows. To switch accounts, run `familiar logout chatgpt --forget` first.",
 				);
 			const scopes = String(tokens.scope ?? "")
 				.split(/\s+/)
@@ -262,21 +324,36 @@ export class ChatGpt {
 				scopes,
 				saved_at: this.now(),
 			};
-			this.write(next);
+			await this.locked(async () => this.write(next));
 			if (!scopes.includes(PLAN_SCOPE))
 				throw new ChatGptError(
 					"Signed in, but ChatGPT plan usage was not allowed. Sign in again and allow it, or use an API key instead.",
 				);
+			ok = true;
 			return next.email ?? "your ChatGPT account";
 		} finally {
-			// Gently: the browser still waits for the page that says it may close.
+			showPage(ok);
+			// Gently: the browser still waits for its page.
 			void server.stop();
 		}
 	}
 
 	/** A valid access token, renewed when it is about to expire. One renewal at a time. */
 	async accessToken(): Promise<string> {
-		const c = this.read();
+		const fresh = this.usable(this.read());
+		if (fresh) return fresh;
+		this.refreshing ??= this.locked(async () => {
+			// Another process may have renewed while this one waited for the lock.
+			const now = this.read();
+			return this.usable(now) ?? (await this.renew(now));
+		}).finally(() => {
+			this.refreshing = undefined;
+		});
+		return await this.refreshing;
+	}
+
+	/** The saved access token if it may be used as it is; throws if there is no usable sign-in. */
+	private usable(c: Credentials): string | undefined {
 		if (!c.refresh_token || !c.client_id)
 			throw new ChatGptError(
 				"Not signed in to ChatGPT. Run `familiar login chatgpt` and restart Familiar.",
@@ -286,14 +363,12 @@ export class ChatGpt {
 				"ChatGPT plan usage is not allowed for Familiar. Run `familiar login chatgpt` again and allow it.",
 			);
 		const expires = (c.saved_at ?? 0) + (c.expires_in ?? 0);
-		if (c.access_token && this.now() < expires - MARGIN_S)
-			return c.access_token;
-		this.refreshing ??= this.renew(c).finally(() => {
-			this.refreshing = undefined;
-		});
-		return await this.refreshing;
+		return c.access_token && this.now() < expires - MARGIN_S
+			? c.access_token
+			: undefined;
 	}
 
+	/** Called under the lock. */
 	private async renew(c: Credentials): Promise<string> {
 		let tokens: Record<string, unknown>;
 		try {
@@ -329,31 +404,40 @@ export class ChatGpt {
 			saved_at: this.now(),
 		};
 		this.write(next);
-		return next.access_token as string;
+		// The renewed grant may no longer allow the plan; then the new token is not used.
+		return this.usable(next) ?? next.access_token ?? "";
 	}
 
-	/** Ends the renewable session at OpenAI, then forgets the tokens. */
-	async signOut(): Promise<{ revoked: boolean }> {
-		const c = this.read();
-		let revoked = !c.refresh_token;
-		if (c.refresh_token && c.client_id) {
-			try {
-				const response = await this.fetch(this.endpoints.revoke, {
-					method: "POST",
-					headers: { "Content-Type": "application/x-www-form-urlencoded" },
-					body: new URLSearchParams({
-						token: c.refresh_token,
-						token_type_hint: "refresh_token",
-						client_id: c.client_id,
-					}),
-				});
-				revoked = response.ok;
-			} catch {
-				revoked = false;
+	/**
+	 * Ends the renewable session at OpenAI, then forgets the tokens. `forget` also forgets the
+	 * registration, so that another ChatGPT account can sign in.
+	 */
+	async signOut({ forget = false } = {}): Promise<{ revoked: boolean }> {
+		return await this.locked(async () => {
+			const c = this.read();
+			let revoked = !c.refresh_token;
+			if (c.refresh_token && c.client_id) {
+				try {
+					const response = await this.fetch(this.endpoints.revoke, {
+						method: "POST",
+						headers: { "Content-Type": "application/x-www-form-urlencoded" },
+						body: new URLSearchParams({
+							token: c.refresh_token,
+							token_type_hint: "refresh_token",
+							client_id: c.client_id,
+						}),
+						signal: AbortSignal.timeout(REQUEST_MS),
+					});
+					revoked = response.ok;
+				} catch {
+					revoked = false;
+				}
 			}
-		}
-		this.write(withoutTokens(c));
-		return { revoked };
+			this.write(
+				forget ? { ext_agent_host_id: c.ext_agent_host_id } : withoutTokens(c),
+			);
+			return { revoked };
+		});
 	}
 
 	/** The models this account may use, as `slug` and name, in OpenAI's order. */
@@ -361,6 +445,7 @@ export class ChatGpt {
 		const token = await this.accessToken();
 		const response = await this.fetch(`${this.endpoints.api}/models`, {
 			headers: { Authorization: `Bearer ${token}` },
+			signal: AbortSignal.timeout(REQUEST_MS),
 		});
 		if (!response.ok)
 			throw new ChatGptError(
@@ -377,11 +462,6 @@ export class ChatGpt {
 			}));
 	}
 
-	/** Forgets everything, including the registration; for tests and a clean start. */
-	reset(): void {
-		rmSync(this.file, { force: true });
-	}
-
 	private async tokenRequest(
 		form: Record<string, string>,
 	): Promise<Record<string, unknown>> {
@@ -391,6 +471,7 @@ export class ChatGpt {
 				method: "POST",
 				headers: { "Content-Type": "application/x-www-form-urlencoded" },
 				body: new URLSearchParams(form),
+				signal: AbortSignal.timeout(REQUEST_MS),
 			});
 		} catch {
 			throw new ChatGptError("ChatGPT's sign-in server could not be reached.");
@@ -421,15 +502,27 @@ export class ChatGpt {
 		const [h, p, s] = token.split(".");
 		if (!h || !p || !s)
 			throw new ChatGptError("ChatGPT sent a broken ID token.");
-		const header = JSON.parse(new TextDecoder().decode(unbase64url(h)));
-		const claims = JSON.parse(new TextDecoder().decode(unbase64url(p)));
+		let header: Record<string, unknown>;
+		let claims: Record<string, unknown>;
+		try {
+			header = JSON.parse(new TextDecoder().decode(unbase64url(h)));
+			claims = JSON.parse(new TextDecoder().decode(unbase64url(p)));
+		} catch {
+			throw new ChatGptError("ChatGPT sent a broken ID token.");
+		}
 		if (header.alg !== "RS256")
 			throw new ChatGptError(
 				"ChatGPT's ID token uses an unexpected signature.",
 			);
-		const keys = (await (await this.fetch(this.endpoints.jwks)).json()) as {
-			keys?: (Record<string, unknown> & { kid?: string })[];
-		};
+		let keys: { keys?: (Record<string, unknown> & { kid?: string })[] };
+		try {
+			const response = await this.fetch(this.endpoints.jwks, {
+				signal: AbortSignal.timeout(REQUEST_MS),
+			});
+			keys = (await response.json()) as typeof keys;
+		} catch {
+			throw new ChatGptError("ChatGPT's signing keys could not be loaded.");
+		}
 		const jwk = keys.keys?.find((k) => k.kid === header.kid);
 		if (!jwk)
 			throw new ChatGptError(
@@ -464,6 +557,27 @@ export class ChatGpt {
 			);
 		return claims;
 	}
+}
+
+/**
+ * Lets only the current user read `file`. Unix mode bits do that elsewhere; on Windows the file
+ * gets an ACL with just the user's own entry, so a folder shared with others does not leak it.
+ */
+function restrict(file: string): void {
+	if (process.platform !== "win32") return;
+	const user = process.env.USERDOMAIN
+		? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+		: process.env.USERNAME;
+	const done = user
+		? spawnSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], {
+				stdio: "ignore",
+				windowsHide: true,
+			})
+		: undefined;
+	if (done?.status !== 0)
+		throw new ChatGptError(
+			"Familiar could not restrict its ChatGPT sign-in file to your Windows user, so it did not keep it.",
+		);
 }
 
 function withoutTokens(c: Credentials): Credentials {

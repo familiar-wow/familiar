@@ -153,46 +153,6 @@ export class ModelBrain implements Brain {
 		const { log } = this.options;
 		const plan = settings.provider === "chatgpt";
 		let key = this.options.model ? undefined : apiKey(settings);
-		if (plan && !this.options.model) {
-			// A fresh access token for each question: they last an hour.
-			try {
-				if (!this.options.chatgpt)
-					throw new ChatGptError("ChatGPT sign-in is not set up.");
-				key = await this.options.chatgpt.accessToken();
-				this.model = createOpenAI({
-					apiKey: key,
-					baseURL: this.options.chatgpt.api,
-				}).responses(settings.name);
-			} catch (error) {
-				log.event("model-error", {
-					provider: settings.provider,
-					model: settings.name,
-					during: "sign-in",
-					error: describe(error, key),
-				});
-				return describe(error, key);
-			}
-		}
-		if (!this.model) {
-			const problem = missing(settings);
-			if (problem) return problem;
-			try {
-				this.model = languageModel(settings);
-			} catch (error) {
-				log.event("model-error", {
-					provider: settings.provider,
-					model: settings.name,
-					during: "setup",
-					error: describe(error, key),
-				});
-				return `The built-in agent could not set up ${settings.provider}: ${describe(error, key)}`;
-			}
-		}
-		const c = question.character;
-		const who =
-			c.name || c.realm ? `${c.name ?? ""}-${c.realm ?? ""}` : "unknown";
-		const past = this.history.get(who) ?? [];
-		const user: ModelMessage = { role: "user", content: asked(question) };
 		const timeout = this.settings.timeout;
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), timeout * 1000);
@@ -205,6 +165,57 @@ export class ModelBrain implements Brain {
 			),
 		);
 		deadline.catch(() => {});
+		if (plan && !this.options.model) {
+			// A fresh access token for each question: they last an hour. Renewing it counts
+			// against the question's time like everything else.
+			try {
+				if (!this.options.chatgpt)
+					throw new ChatGptError("ChatGPT sign-in is not set up.");
+				key = await Promise.race([
+					this.options.chatgpt.accessToken(),
+					deadline,
+				]);
+				this.model = createOpenAI({
+					apiKey: key,
+					baseURL: this.options.chatgpt.api,
+				}).responses(settings.name);
+			} catch (error) {
+				log.event("model-error", {
+					provider: settings.provider,
+					model: settings.name,
+					during: "sign-in",
+					error: describe(error, key),
+				});
+				clearTimeout(timer);
+				if (abort.signal.aborted) return `No answer within ${timeout} s.`;
+				abort.abort();
+				return describe(error, key);
+			}
+		}
+		if (!this.model) {
+			const problem = missing(settings);
+			if (problem) {
+				clearTimeout(timer);
+				return problem;
+			}
+			try {
+				this.model = languageModel(settings);
+			} catch (error) {
+				log.event("model-error", {
+					provider: settings.provider,
+					model: settings.name,
+					during: "setup",
+					error: describe(error, key),
+				});
+				clearTimeout(timer);
+				return `The built-in agent could not set up ${settings.provider}: ${describe(error, key)}`;
+			}
+		}
+		const c = question.character;
+		const who =
+			c.name || c.realm ? `${c.name ?? ""}-${c.realm ?? ""}` : "unknown";
+		const past = this.history.get(who) ?? [];
+		const user: ModelMessage = { role: "user", content: asked(question) };
 		let done = false;
 		const started = performance.now();
 		try {
@@ -241,6 +252,16 @@ export class ModelBrain implements Brain {
 			});
 			if (exhausted)
 				return `The model used all ${MAX_STEPS} rounds of tool calls without an answer. Ask again, perhaps more narrowly.`;
+			// On the plan an answer counts only when the stream said it is complete.
+			const finish = result.steps.at(-1)?.finishReason;
+			if (plan && finish !== "stop") {
+				log.event("model-error", {
+					provider: settings.provider,
+					model: settings.name,
+					error: `incomplete answer (${finish ?? "no step"})`,
+				});
+				return "ChatGPT's answer was cut off. Ask again.";
+			}
 			if (!text) return "The model gave an empty answer.";
 			const answer: ModelMessage = {
 				role: "assistant",

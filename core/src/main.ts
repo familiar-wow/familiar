@@ -38,7 +38,8 @@ const USAGE = `familiar ${VERSION}: the Familiar app for development builds
   familiar check        show which client it found, without changing anything
   familiar uninstall    remove the addon and its helpers (close WoW first)
   familiar login chatgpt    sign in with ChatGPT, so your ChatGPT plan answers
-  familiar logout chatgpt   sign out of ChatGPT
+  familiar logout chatgpt   sign out of ChatGPT; --forget also forgets the account,
+                            so that another ChatGPT account can sign in
 
 Options:
   --wow <folder>       the _forever_ client folder, if it is not found automatically
@@ -273,8 +274,8 @@ async function login(folder: string): Promise<void> {
 	}
 }
 
-async function logout(folder: string): Promise<void> {
-	const { revoked } = await new ChatGpt({ folder }).signOut();
+async function logout(folder: string, forget: boolean): Promise<void> {
+	const { revoked } = await new ChatGpt({ folder }).signOut({ forget });
 	console.log(
 		revoked
 			? "Signed out of ChatGPT."
@@ -290,6 +291,7 @@ async function main(): Promise<void> {
 			logs: { type: "string" },
 			settings: { type: "string" },
 			echo: { type: "boolean" },
+			forget: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean" },
 		},
@@ -313,7 +315,9 @@ async function main(): Promise<void> {
 		const folder = dirname(
 			resolve(values.settings ?? join(settingsFolder(), "settings.json")),
 		);
-		return command === "login" ? login(folder) : logout(folder);
+		return command === "login"
+			? login(folder)
+			: logout(folder, values.forget ?? false);
 	}
 	if (command !== "run") exitWith(USAGE);
 	const settingsFile = resolve(

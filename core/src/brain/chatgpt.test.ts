@@ -1,6 +1,7 @@
 // Sign in with ChatGPT against a stand-in for OpenAI: the browser, the token server with signed
 // ID tokens, renewal, sign-out, and a question on the plan through the Responses API.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +30,17 @@ const fake = {
 	responses: [] as Record<string, unknown>[],
 	replies: [] as string[][],
 	serial: 0,
+	/** The PKCE challenge the browser saw, checked against the verifier at the exchange. */
+	challenge: "",
+	/** Changes to the next ID token's claims, and whether to sign it with a stranger's key. */
+	claims: {} as Record<string, unknown>,
+	forge: false,
+	/** Milliseconds the token server waits before it answers. */
+	delayMs: 0,
+	/** The scope a renewal grants, if it differs. */
+	refreshScope: "",
 };
+let stranger: CryptoKeyPair;
 
 async function idToken(claims: Record<string, unknown>): Promise<string> {
 	const enc = (o: unknown) =>
@@ -38,7 +49,7 @@ async function idToken(claims: Record<string, unknown>): Promise<string> {
 	const body = enc(claims);
 	const sig = await crypto.subtle.sign(
 		"RSASSA-PKCS1-v1_5",
-		keys.privateKey,
+		fake.forge ? stranger.privateKey : keys.privateKey,
 		new TextEncoder().encode(`${head}.${body}`),
 	);
 	return `${head}.${body}.${base64url(new Uint8Array(sig))}`;
@@ -55,6 +66,16 @@ const sse = (events: Record<string, unknown>[]) =>
 	);
 
 beforeAll(async () => {
+	stranger = (await crypto.subtle.generateKey(
+		{
+			name: "RSASSA-PKCS1-v1_5",
+			modulusLength: 2048,
+			publicExponent: new Uint8Array([1, 0, 1]),
+			hash: "SHA-256",
+		},
+		true,
+		["sign", "verify"],
+	)) as CryptoKeyPair;
 	keys = (await crypto.subtle.generateKey(
 		{
 			name: "RSASSA-PKCS1-v1_5",
@@ -89,6 +110,17 @@ beforeAll(async () => {
 					string
 				>;
 				fake.tokenRequests.push(form);
+				if (fake.delayMs) await Bun.sleep(fake.delayMs);
+				if (form.grant_type === "authorization_code") {
+					const digest = new Uint8Array(
+						await crypto.subtle.digest(
+							"SHA-256",
+							new TextEncoder().encode(form.code_verifier ?? ""),
+						),
+					);
+					if (base64url(digest) !== fake.challenge)
+						return Response.json({ error: "invalid_grant" }, { status: 400 });
+				}
 				if (form.grant_type === "refresh_token" && fake.refreshError)
 					return Response.json(
 						{
@@ -108,10 +140,14 @@ beforeAll(async () => {
 						email: "hero@example.com",
 						nonce: fake.nonce,
 						exp: Math.floor(Date.now() / 1000) + 3600,
+						...fake.claims,
 					}),
 					token_type: "Bearer",
 					expires_in: 3600,
-					scope: fake.scope,
+					scope:
+						form.grant_type === "refresh_token" && fake.refreshScope
+							? fake.refreshScope
+							: fake.scope,
 				});
 			}
 			if (url.pathname === "/v1/models")
@@ -153,6 +189,51 @@ beforeAll(async () => {
 							},
 						},
 					]);
+				if (reply[0] === "cut" || reply[0] === "incomplete") {
+					const message = {
+						type: "message",
+						id: "msg_1",
+						role: "assistant",
+						status: "in_progress",
+						content: [],
+					};
+					return sse([
+						{ type: "response.created", response: base },
+						{
+							type: "response.output_item.added",
+							output_index: 0,
+							item: message,
+						},
+						{
+							type: "response.content_part.added",
+							item_id: "msg_1",
+							output_index: 0,
+							content_index: 0,
+							part: { type: "output_text", text: "", annotations: [] },
+						},
+						{
+							type: "response.output_text.delta",
+							item_id: "msg_1",
+							output_index: 0,
+							content_index: 0,
+							delta: "Half an ans",
+							logprobs: [],
+						},
+						...(reply[0] === "incomplete"
+							? [
+									{
+										type: "response.incomplete",
+										response: {
+											...base,
+											status: "incomplete",
+											incomplete_details: { reason: "max_output_tokens" },
+											usage,
+										},
+									},
+								]
+							: []),
+					]);
+				}
 				if (reply[0] === "call") {
 					const item = {
 						type: "function_call",
@@ -238,10 +319,10 @@ afterAll(() => {
 	for (const f of folders) rmSync(f, { recursive: true, force: true });
 });
 
-function chatgpt(now?: () => number) {
-	const folder = mkdtempSync(join(tmpdir(), "familiar-chatgpt-"));
-	folders.push(folder);
-	return new ChatGpt({ folder, endpoints, firstPort: 0, now });
+function chatgpt(now?: () => number, folder?: string) {
+	const where = folder ?? mkdtempSync(join(tmpdir(), "familiar-chatgpt-"));
+	if (!folder) folders.push(where);
+	return new ChatGpt({ folder: where, endpoints, firstPort: 0, now });
 }
 
 /** The player's browser: approves (or not) and comes back to Familiar's callback. */
@@ -252,6 +333,7 @@ function browser(answer: (params: URLSearchParams) => Record<string, string>) {
 		const params = new URL(url).searchParams;
 		seen.push(params);
 		fake.nonce = params.get("nonce") ?? undefined;
+		fake.challenge = params.get("code_challenge") ?? "";
 		const back = new URL(params.get("redirect_uri") ?? "");
 		for (const [k, v] of Object.entries(answer(params)))
 			back.searchParams.set(k, v);
@@ -298,6 +380,14 @@ test("signs in through the browser, registers, and keeps the tokens owner-only",
 	});
 	if (process.platform !== "win32")
 		expect(statSync(c.file).mode & 0o777).toBe(0o600);
+	else {
+		// Only the player's own account, nothing inherited from the folder.
+		const acl = spawnSync("icacls", [c.file], { encoding: "utf8" }).stdout;
+		expect(acl).toContain(process.env.USERNAME ?? "?");
+		expect(acl).not.toMatch(
+			/Everyone|BUILTIN\\Users|Authenticated Users|\(I\)/,
+		);
+	}
 	expect(c.account()).toBe("hero@example.com");
 	expect(await c.models()).toEqual([{ slug: "gpt-plan", name: "GPT Plan" }]);
 
@@ -306,16 +396,32 @@ test("signs in through the browser, registers, and keeps the tokens owner-only",
 	await c.signIn(again.open);
 	expect(again.seen[0]?.get("client_id")).toBe(CLIENT);
 	expect(again.seen[0]?.has("agent_name_hint")).toBe(false);
-	expect(again.seen[0]?.get("id_token_hint")).toBe(saved.id_token ?? "");
+	expect(again.seen[0]?.has("id_token_hint")).toBe(false);
+	expect(again.seen[0]?.get("login_hint")).toBe("hero@example.com");
 	expect(again.seen[0]?.get("ext_agent_host_id")).toBe(saved.ext_agent_host_id);
 });
 
-test("refuses a wrong state, a declined consent, a missing plan permission and a bad ID token", async () => {
-	const wrongState = browser((p) => ({ ...approve(p), state: "other" }));
-	await expect(chatgpt().signIn(wrongState.open)).rejects.toThrow(
-		"different sign-in",
+test("a stray request to the callback is turned away, and the sign-in keeps waiting", async () => {
+	const c = chatgpt();
+	const strays: number[] = [];
+	const done = c.signIn(
+		(url) => {
+			const params = new URL(url).searchParams;
+			const back = params.get("redirect_uri") ?? "";
+			void (async () => {
+				// Another program on the PC, without the state, and once with a wrong one.
+				strays.push((await fetch(`${back}?code=evil`)).status);
+				strays.push((await fetch(`${back}?code=evil&state=guess`)).status);
+				browser(approve).open(url);
+			})();
+		},
+		{ timeoutMs: 5000 },
 	);
+	expect(await done).toBe("hero@example.com");
+	expect(strays).toEqual([400, 400]);
+});
 
+test("refuses a declined consent and a missing plan permission", async () => {
 	const declined = browser((p) => ({
 		error: "access_denied",
 		state: p.get("state") ?? "",
@@ -325,23 +431,82 @@ test("refuses a wrong state, a declined consent, a missing plan permission and a
 
 	fake.scope = "openid profile email offline_access";
 	const noPlan = chatgpt();
-	await expect(noPlan.signIn(browser(approve).open)).rejects.toThrow(
+	const page = browser(approve);
+	await expect(noPlan.signIn(page.open)).rejects.toThrow(
 		"plan usage was not allowed",
 	);
+	// The browser hears that it did not work, not "signed in".
+	expect(await page.pages[0]).toContain("was not completed");
 	await expect(noPlan.accessToken()).rejects.toThrow(
 		"not allowed for Familiar",
 	);
 	fake.scope =
 		"chatgpt.tokens.use.direct email offline_access openid profile resource.invoke";
+});
 
-	// A token for another nonce, as from a replayed sign-in.
-	const replay = browser(approve);
+for (const [what, change] of [
+	["another nonce", { nonce: "someone-else" }],
+	["another issuer", { iss: "https://evil.example" }],
+	["another audience", { aud: "oaiapp_other" }],
+	["an expired token", { exp: 1000 }],
+	["a stranger's signature", { forge: true }],
+] as const)
+	test(`refuses an ID token with ${what}`, async () => {
+		const { forge, ...claims } = { forge: false, ...change } as {
+			forge: boolean;
+		} & Record<string, unknown>;
+		const c = chatgpt();
+		const pending = c.signIn((url) => {
+			browser(approve).open(url);
+			// Set after the browser stored the real nonce.
+			fake.claims = claims;
+			fake.forge = forge;
+		});
+		try {
+			await expect(pending).rejects.toThrow("did not check out");
+		} finally {
+			fake.claims = {};
+			fake.forge = false;
+		}
+		expect(c.account()).toBeUndefined();
+	});
+
+test("the code exchange proves the PKCE verifier", async () => {
 	const c = chatgpt();
 	const pending = c.signIn((url) => {
-		replay.open(url);
-		fake.nonce = "someone-else";
+		browser(approve).open(url);
+		fake.challenge = "not-the-challenge";
 	});
-	await expect(pending).rejects.toThrow("did not check out");
+	await expect(pending).rejects.toThrow("invalid_grant");
+});
+
+test("the printed address never carries a token", async () => {
+	const c = chatgpt();
+	await c.signIn(browser(approve).open);
+	const shown: string[] = [];
+	await c.signIn((url) => {
+		shown.push(url);
+		browser(approve).open(url);
+	});
+	const params = new URL(shown[0] ?? "").searchParams;
+	expect(params.has("id_token_hint")).toBe(false);
+	expect(params.get("login_hint")).toBe("hero@example.com");
+	expect(shown[0]).not.toContain(c.read().id_token ?? "none");
+});
+
+test("a different account needs --forget, which then lets it sign in", async () => {
+	const c = chatgpt();
+	await c.signIn(browser(approve).open);
+	fake.sub = "user-2";
+	try {
+		await expect(c.signIn(browser(approve).open)).rejects.toThrow("--forget");
+		await c.signOut({ forget: true });
+		expect(c.read().client_id).toBeUndefined();
+		expect(await c.signIn(browser(approve).open)).toBe("hero@example.com");
+		expect(c.read().subject).toBe("user-2");
+	} finally {
+		fake.sub = "user-1";
+	}
 });
 
 test("renews the access token once, shortly before it expires", async () => {
@@ -379,6 +544,57 @@ test("a revoked sign-in asks to sign in again and never shows the token", async 
 	expect(message).not.toContain("refresh-");
 	expect(c.read().refresh_token).toBeUndefined();
 	expect(c.read().client_id).toBe(CLIENT);
+});
+
+test("two Familiar processes renew one after the other, not both", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const a = chatgpt(() => clock);
+	await a.signIn(browser(approve).open);
+	// A second process: its own object on the same file.
+	const b = chatgpt(() => clock, a.file.replace(/[\\/]chatgpt\.json$/, ""));
+	clock += 3600;
+	fake.delayMs = 100;
+	const before = fake.tokenRequests.length;
+	try {
+		const [x, y] = await Promise.all([a.accessToken(), b.accessToken()]);
+		expect(x).toBe(y);
+	} finally {
+		fake.delayMs = 0;
+	}
+	expect(fake.tokenRequests.length).toBe(before + 1);
+});
+
+test("signing out while another process renews does not bring the tokens back", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const a = chatgpt(() => clock);
+	await a.signIn(browser(approve).open);
+	const b = chatgpt(() => clock, a.file.replace(/[\\/]chatgpt\.json$/, ""));
+	clock += 3600;
+	fake.delayMs = 150;
+	try {
+		const renewing = a.accessToken();
+		await Bun.sleep(30);
+		await b.signOut();
+		await renewing;
+	} finally {
+		fake.delayMs = 0;
+	}
+	// The sign-out came after the renewal and removed its tokens too.
+	expect(a.account()).toBeUndefined();
+	expect(a.read().refresh_token).toBeUndefined();
+});
+
+test("a renewal that drops the plan permission does not hand out the new token", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	clock += 3600;
+	fake.refreshScope = "openid email";
+	try {
+		await expect(c.accessToken()).rejects.toThrow("not allowed for Familiar");
+	} finally {
+		fake.refreshScope = "";
+	}
 });
 
 test("signs out at OpenAI and keeps only the registration", async () => {
@@ -496,4 +712,37 @@ test("without a sign-in the player hears how to sign in", async () => {
 		chatgpt: chatgpt(),
 	});
 	expect(await brain.ask(hero, turn())).toContain("familiar login chatgpt");
+});
+
+for (const kind of ["cut", "incomplete"])
+	test(`a ${kind === "cut" ? "broken-off" : "incomplete"} answer on the plan is not passed off as complete`, async () => {
+		const c = chatgpt();
+		await c.signIn(browser(approve).open);
+		fake.replies = [[kind], ["text", "fresh"]];
+		const brain = new ModelBrain(settings, { log, tools: [], chatgpt: c });
+		expect(await brain.ask(hero, turn())).toBe(
+			"ChatGPT's answer was cut off. Ask again.",
+		);
+		fake.responses = [];
+		await brain.ask({ ...hero, text: "again" }, turn());
+		expect(JSON.stringify(fake.responses[0])).not.toContain("Half an ans");
+	});
+
+test("a stalled sign-in server counts against the question's time", async () => {
+	let clock = Math.floor(Date.now() / 1000);
+	const c = chatgpt(() => clock);
+	await c.signIn(browser(approve).open);
+	clock += 3600;
+	fake.delayMs = 1500;
+	try {
+		const brain = new ModelBrain(
+			{ ...settings, timeout: 0.2 },
+			{ log, tools: [], chatgpt: c },
+		);
+		const started = performance.now();
+		expect(await brain.ask(hero, turn())).toBe("No answer within 0.2 s.");
+		expect(performance.now() - started).toBeLessThan(1000);
+	} finally {
+		fake.delayMs = 0;
+	}
 });
