@@ -25,6 +25,8 @@
 --   stall <n> <ms>      the nth AddOns.txt write from now halts <ms> with the file emptied
 --   focus               put the focus into the addon's input line
 --   shiftclick <link>   shift-click something that has <link>, as the game's frames do
+--   linkclick <button> <link>  click a link in the addon's history: LeftButton, RightButton or
+--                       shift (a shift-click); reports "itemref <link>" or "questlog <id>"
 --   enter <text>        type <text> into the addon's input line and press Enter
 --   click <caption>     click the button with this caption
 --   slide <caption> <n> drag the slider with this caption to <n> and let go
@@ -444,12 +446,16 @@ end
 local env
 
 -- What a few game APIs answer, changed with "set <key> <value>"; it survives a reload.
+-- Whether the click being simulated holds a modifier key, as IsModifiedClick reports.
+local modifier = false
+
 local stub = {
 	defense = "100", -- UnitDefenseSkill
 	merchantItem = "Water", -- the merchant's only offer
 	token = "0", -- 1: the offer also costs 2 Badge of Justice
 	trainerNames = "1", -- 0: service names have not loaded yet
 	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
+	combat = "0", -- 1: the player is in combat (InCombatLockdown)
 }
 
 local function fire(event, ...)
@@ -651,6 +657,9 @@ local function api()
 		return quest and not quest.loads and quest.link or nil
 	end
 	e.C_QuestLog = {
+		GetLogIndexForQuestID = function(id)
+			return id == 783 and 2 or nil
+		end,
 		RequestLoadQuestByID = function(id)
 			if quests[id] then
 				quests[id].loads = nil
@@ -839,7 +848,18 @@ local function api()
 			return false
 		end,
 	}
-	e.SetItemRef = function() end
+	e.SetItemRef = function(link)
+		out("itemref", link)
+	end
+	e.IsModifiedClick = function()
+		return modifier
+	end
+	e.InCombatLockdown = function()
+		return stub.combat == "1"
+	end
+	e.QuestMapFrame_OpenToQuestDetails = function(id)
+		out("questlog", tostring(id))
+	end
 	e.GameTooltip = newFrame(nil)
 	e.C_AddOns = {
 		GetNumAddOns = function()
@@ -940,6 +960,18 @@ for line in io.lines() do
 		drops = tonumber(rest)
 	elseif command == "focus" then
 		editBoxes[#editBoxes]:SetFocus()
+	elseif command == "linkclick" then
+		local button, link = rest:match("^(%S+)%s+(.+)$")
+		modifier = button == "shift"
+		for _, frame in ipairs(frames) do
+			if frame.scripts.OnHyperlinkClick then
+				local ok, err = pcall(frame.scripts.OnHyperlinkClick, frame, link, link, modifier and "LeftButton" or button)
+				if not ok then
+					out("error", err)
+				end
+			end
+		end
+		modifier = false
 	elseif command == "shiftclick" then
 		env.ChatFrameUtil.InsertLink(rest)
 	elseif command == "enter" then
