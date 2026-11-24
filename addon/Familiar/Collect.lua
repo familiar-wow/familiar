@@ -1061,7 +1061,12 @@ local function collectTaxi()
 	end
 	local mine = FACTION[UnitFactionGroup and UnitFactionGroup("player") or ""]
 	local lines, seen = {}, {}
-	for _, continent in ipairs(continents()) do
+	local list = continents()
+	if #list == 0 then
+		-- No map yet, as during a loading screen: an error is asked again, an empty list is kept.
+		return "error\tthe game has no map for the character right now; ask again in a moment"
+	end
+	for _, continent in ipairs(list) do
 		local ok, nodes = pcall(C_TaxiMap.GetTaxiNodesForMap, continent)
 		if ok and type(nodes) == "table" then
 			local cname = mapName(continent)
@@ -1287,6 +1292,8 @@ local BUMP_EVENTS = {
 	TAXIMAP_OPENED = { "taxi" },
 	TAXIMAP_CLOSED = { "taxi" },
 	TAXI_NODE_STATUS_CHANGED = { "taxi" },
+	-- A new world (log in, instance, ship) can change the continents the list covers.
+	PLAYER_ENTERING_WORLD = { "taxi" },
 	TRAIT_CONFIG_UPDATED = { "talents" },
 	ACTIVE_COMBAT_CONFIG_CHANGED = { "talents" },
 	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },

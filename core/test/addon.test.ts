@@ -228,7 +228,8 @@ test("messages go up and replies come down, across /reload, a character switch a
 		bank: 0,
 		merchant: 0,
 		trainer: 0,
-		taxi: 1,
+		// Entering the world bumps it once.
+		taxi: 2,
 	});
 	// The window: a question typed into its input line, the tool the agent calls, and a
 	// permission request the player answers in game.
@@ -761,6 +762,8 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 			poiMap: "1454",
 			slowLoads: "0",
 			done783: "0",
+			noMap: "0",
+			ratchet: "0",
 		}))
 			command(`set ${key} ${value}`);
 	};
@@ -852,6 +855,27 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 		).nodes.map((n) => n.id),
 	).toEqual([25, 80]);
 	expect(await call("flightpaths")).toMatchObject({ cached: true });
+	// A flight path found at a flight master shows at once.
+	command("set ratchet 1");
+	command("fire TAXI_NODE_STATUS_CHANGED");
+	at = await roundTrip("found ratchet", /heard: found ratchet$/, at);
+	expect(
+		(await call("flightpaths", { known: true })) as {
+			cached: boolean;
+			nodes: { id: number }[];
+		},
+	).toMatchObject({
+		cached: false,
+		nodes: [{ id: 23 }, { id: 25 }, { id: 80 }, { id: 18 }],
+	});
+	// Without a map, as during a loading screen, it is an error to retry, not an empty list.
+	command("set noMap 1");
+	command("fire TAXIMAP_CLOSED");
+	at = await roundTrip("no map", /heard: no map$/, at);
+	await expect(call("flightpaths")).rejects.toThrow("no map for the character");
+	command("set noMap 0");
+	expect(await call("flightpaths")).toMatchObject({ cached: false });
+	command("set ratchet 0");
 
 	expect(await call("lookup", { kind: "item", id: 2589 })).toMatchObject({
 		found: true,

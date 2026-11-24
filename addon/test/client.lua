@@ -454,6 +454,8 @@ local stub = {
 	poiMap = "1454", -- the map whose quest areas include quest 783
 	slowLoads = "0", -- load requests that go unanswered before uncached data arrives
 	done783 = "0", -- 1: quest 783 counts as completed
+	noMap = "0", -- 1: the game has no map for the player, as during a loading screen
+	ratchet = "0", -- 1: the character has found the flight path at Ratchet
 }
 
 -- Whether a load request for uncached data is answered: only once `slowLoads` requests are spent.
@@ -798,6 +800,9 @@ local function api()
 	}
 	e.C_Map = {
 		GetBestMapForUnit = function()
+			if stub.noMap == "1" then
+				return nil
+			end
 			return 1454
 		end,
 		GetMapInfo = function(map)
@@ -827,11 +832,12 @@ local function api()
 			local info = node and maps[node.zone]
 			return info and { mapID = node.zone, name = info.name, mapType = info.mapType } or nil
 		end,
+		-- World coordinates use their own continent IDs and units, as in the client.
 		GetWorldPosFromMapPos = function(continent, pos)
-			return continent, vector(pos.x, pos.y)
+			return continent + 10000, vector(pos.x * 1000, pos.y * 1000)
 		end,
-		GetMapPosFromWorldPos = function(continent, pos, zone)
-			local node = nodeAt(continent, pos.x, pos.y)
+		GetMapPosFromWorldPos = function(instance, pos, zone)
+			local node = nodeAt(instance - 10000, pos.x / 1000, pos.y / 1000)
 			if node and node.zone == zone then
 				return zone, vector(node.zx, node.zy)
 			end
@@ -854,7 +860,7 @@ local function api()
 					name = node.name,
 					position = vector(node.x, node.y),
 					faction = node.faction,
-					isUndiscovered = node.undiscovered == true,
+					isUndiscovered = node.undiscovered == true and not (node.nodeID == 80 and stub.ratchet == "1"),
 				}
 			end
 			return list
