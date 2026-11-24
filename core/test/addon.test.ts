@@ -765,6 +765,12 @@ test("a click on a quest in the log opens the quest log, other links their toolt
 		"itemref quest:783:1",
 	]);
 	command("set combat 0");
+	// If the quest log cannot open, the click still shows the tooltip.
+	command("set questMapFails 1");
+	expect(await click("LeftButton quest:783:1")).toEqual([
+		"itemref quest:783:1",
+	]);
+	command("set questMapFails 0");
 	expect(await click("LeftButton item:19019::::::::60")).toEqual([
 		"itemref item:19019::::::::60",
 	]);

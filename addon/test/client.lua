@@ -456,6 +456,7 @@ local stub = {
 	trainerNames = "1", -- 0: service names have not loaded yet
 	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
 	combat = "0", -- 1: the player is in combat (InCombatLockdown)
+	questMapFails = "0", -- 1: opening the quest log raises an error
 }
 
 local function fire(event, ...)
@@ -858,6 +859,9 @@ local function api()
 		return stub.combat == "1"
 	end
 	e.QuestMapFrame_OpenToQuestDetails = function(id)
+		if stub.questMapFails == "1" then
+			error("the quest map could not open")
+		end
 		out("questlog", tostring(id))
 	end
 	e.GameTooltip = newFrame(nil)
