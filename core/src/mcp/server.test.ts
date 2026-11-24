@@ -89,6 +89,8 @@ test("lists its tools with what a model needs to call them", async () => {
 		"equipment",
 		"bags",
 		"quests",
+		"flightpaths",
+		"lookup",
 		"talents",
 		"stats",
 		"professions",

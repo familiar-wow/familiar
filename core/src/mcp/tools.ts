@@ -1,6 +1,6 @@
 // The tools of the `wow` server. Each one describes itself: its name, description and
 // parameters are all the agent's model learns about it (FAM-3). They only read (ADR 0007).
-import { formatMoney, type Game } from "../game.ts";
+import { formatMoney, type Game, type LookupKind } from "../game.ts";
 import type { Tool } from "./server.ts";
 
 export function wowTools(game: Game): Tool[] {
@@ -84,7 +84,7 @@ export function wowTools(game: Game): Tool[] {
 		{
 			name: "quests",
 			description:
-				"The player's active quest log in WoW Forever: quest ID, title (in the game's language), level, category/zone, whether it is complete or tracked, and each objective with its progress. Call this before answering questions about current quests or where to go next.",
+				"The player's active quest log in WoW Forever: quest ID, title (in the game's language), level, category/zone, whether it is complete or tracked, each objective with its progress, and where the quest leads when the game's world map shows it: the next waypoint, or the quest's area on the player's current map, as map name and x/y in percent. Call this before answering questions about current quests or where to go next.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -105,6 +105,66 @@ export function wowTools(game: Game): Tool[] {
 					quests: log.quests.filter((q) => q.id === wanted),
 				};
 			},
+		},
+		{
+			name: "flightpaths",
+			description:
+				"The flight paths of the player's faction and the neutral ones in WoW Forever, on every continent: name, whether this character has found it (known), continent, the zone it lies in and its x/y in percent of that zone. Use it to plan a route, for example to turn in quests in several zones: travel between known flight paths is possible, unknown ones must first be found on foot. It does not say which flight paths connect directly; routes between known ones are usually possible with stops.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					known: {
+						type: "boolean",
+						description:
+							"true: only flight paths the character has found; false: only those still to find. Leave out for all.",
+					},
+					search: {
+						type: "string",
+						description:
+							"Optional case-insensitive part of a flight path, zone or continent name.",
+					},
+				},
+				additionalProperties: false,
+			},
+			call: async ({ known, search }) => {
+				const state = await game.get("taxi");
+				const term =
+					typeof search === "string" ? search.toLowerCase() : undefined;
+				return {
+					...state,
+					nodes: state.nodes.filter(
+						(n) =>
+							(known === undefined || n.known === known) &&
+							(!term ||
+								`${n.name} ${n.zone} ${n.continent}`
+									.toLowerCase()
+									.includes(term)),
+					),
+				};
+			},
+		},
+		{
+			name: "lookup",
+			description:
+				"What the WoW Forever client knows about any item, spell or quest by ID, also ones the player does not have: the name in the game's language, the tooltip as the game shows it (stats, effects, requirements, sell price), and for a quest its level, whether it is in the quest log and whether this character has completed it. Use it to explain an item or spell, to check whether the character did a quest, or to make sure of an ID before writing [item:ID], [spell:ID] or [quest:ID]. For an item or spell, found=false means no such ID exists in Forever; for a quest, unsure=true means the client may only have failed to load it. An error that the game is still loading means: ask again once. It cannot search by name and knows nothing about drop locations, vendors or NPC positions.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					kind: {
+						type: "string",
+						enum: ["item", "spell", "quest"],
+						description: "What the ID is.",
+					},
+					id: {
+						type: "integer",
+						minimum: 1,
+						description: "The item, spell or quest ID.",
+					},
+				},
+				required: ["kind", "id"],
+				additionalProperties: false,
+			},
+			call: ({ kind, id }) => game.lookup(kind as LookupKind, Number(id)),
 		},
 		{
 			name: "talents",

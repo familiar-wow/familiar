@@ -87,6 +87,7 @@ local function tooltip(hyperlink)
 	end
 	return lines
 end
+Links.Tooltip = tooltip
 
 -- The links in what the player typed. Returns the question for the brain: each link as
 -- [kind:id name], then the tooltips.

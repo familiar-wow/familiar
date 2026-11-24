@@ -5,16 +5,17 @@ import {
 	Game,
 	parseBags,
 	parseEquipment,
+	parseLookup,
 	parseMerchant,
 	parseQuests,
 	parseTalents,
+	parseTaxi,
 	parseTrainer,
-	type Slice,
 } from "./game.ts";
 
 test("pulls once per revision, serves unchanged slices from cache, and isolates characters", async () => {
 	const game = new Game({ fetchTimeoutMs: 500 });
-	const fetches: { id: number; slice: Slice }[] = [];
+	const fetches: { id: number; slice: string }[] = [];
 	let weapon = "Ashbringer";
 	let rev = 1;
 	game.setFetcher((id, slice) => {
@@ -316,5 +317,173 @@ test("parses merchant extended costs and pet trainer points", () => {
 	expect(general.services[0]?.cost).toEqual({
 		copper: 100,
 		formatted: "1s 0c",
+	});
+});
+
+test("parses where a quest leads, from a waypoint or the quest's area on the map", () => {
+	const log = parseQuests(
+		[
+			"q\t783\t1\t0\t1\tElwynn Forest\tA Threat Within",
+			"w\twaypoint\t1429\tElwynn Forest\t48.1\t42.0\tMarshal McBride",
+			"o\t0\tSpeak with Marshal McBride: 0/1",
+			"q\t7\t3\t0\t0\tElwynn Forest\tKobold Camp Cleanup",
+			"w\tmap\t1429\tElwynn Forest\t40.5\t83.0\t",
+			"q\t8\t5\t0\t0\t\tNo map",
+		].join("\n"),
+	);
+	expect(log.quests[0]).toMatchObject({
+		id: 783,
+		location: {
+			source: "waypoint",
+			mapId: 1429,
+			map: "Elwynn Forest",
+			x: 48.1,
+			y: 42,
+			note: "Marshal McBride",
+		},
+		objectives: [{ text: "Speak with Marshal McBride: 0/1" }],
+	});
+	expect(log.quests[1]?.location).toEqual({
+		source: "map",
+		mapId: 1429,
+		map: "Elwynn Forest",
+		x: 40.5,
+		y: 83,
+	});
+	expect(log.quests[2]?.location).toBeUndefined();
+});
+
+test("parses a lookup of an item, a spell, a quest and an unknown ID", () => {
+	expect(
+		parseLookup(
+			"item",
+			2589,
+			"l\titem\t2589\tLinen Cloth\ni\t1\t5\t0\tTrade Goods\tCloth\t\t13\nt\tMax Stack: 200",
+		),
+	).toEqual({
+		kind: "item",
+		id: 2589,
+		found: true,
+		name: "Linen Cloth",
+		quality: 1,
+		itemLevel: 5,
+		itemType: "Trade Goods",
+		itemSubType: "Cloth",
+		sellPrice: { copper: 13, formatted: "13c" },
+		tooltip: ["Max Stack: 200"],
+	});
+	expect(
+		parseLookup(
+			"spell",
+			133,
+			"l\tspell\t133\tFireball\nd\tHurls a fiery ball.\nt\t30 Mana  35 yd range",
+		),
+	).toMatchObject({
+		found: true,
+		name: "Fireball",
+		description: "Hurls a fiery ball.",
+		tooltip: ["30 Mana  35 yd range"],
+	});
+	expect(
+		parseLookup("quest", 7, "l\tquest\t7\tKobold Camp Cleanup\nqd\t3\t1\t0"),
+	).toMatchObject({
+		found: true,
+		questLevel: 3,
+		completed: true,
+		inQuestLog: false,
+	});
+	expect(parseLookup("item", 999999, "none")).toEqual({
+		kind: "item",
+		id: 999999,
+		found: false,
+		tooltip: [],
+	});
+});
+
+test("looks up through the addon once and answers again from memory until the interface reloads", async () => {
+	const game = new Game({ fetchTimeoutMs: 500 });
+	const asked: { slice: string; arg?: string }[] = [];
+	game.setFetcher((id, slice, arg) => {
+		asked.push({ slice, arg });
+		queueMicrotask(() =>
+			game.receiveState(id, slice, 0, "l\titem\t2589\tLinen Cloth"),
+		);
+		return true;
+	});
+	const [a, b] = await Promise.all([
+		game.lookup("item", 2589),
+		game.lookup("item", 2589),
+	]);
+	expect(a).toEqual(b);
+	expect(await game.lookup("item", 2589)).toMatchObject({
+		name: "Linen Cloth",
+	});
+	expect(asked).toEqual([{ slice: "lookup", arg: "item:2589" }]);
+	game.forget();
+	await game.lookup("item", 2589);
+	expect(asked).toHaveLength(2);
+});
+
+test("a lookup still loading is an error, not an answer, and quests are never kept", async () => {
+	expect(() => parseLookup("item", 4306, "loading")).toThrow(
+		"still loading item 4306",
+	);
+	expect(parseLookup("quest", 424242, "none\tunsure")).toEqual({
+		kind: "quest",
+		id: 424242,
+		found: false,
+		unsure: true,
+		tooltip: [],
+	});
+	const game = new Game({ fetchTimeoutMs: 500 });
+	const answers = ["loading", "l\titem\t4306\tSilk Cloth"];
+	let quests = 0;
+	game.setFetcher((id, slice, arg) => {
+		const payload = arg?.startsWith("quest")
+			? `l\tquest\t783\tA Threat Within\nqd\t1\t${quests++ ? 1 : 0}\t1`
+			: (answers.shift() ?? "none");
+		queueMicrotask(() => game.receiveState(id, slice, 0, payload));
+		return true;
+	});
+	await expect(game.lookup("item", 4306)).rejects.toThrow("still loading");
+	expect(await game.lookup("item", 4306)).toMatchObject({ name: "Silk Cloth" });
+	expect(await game.lookup("quest", 783)).toMatchObject({ completed: false });
+	expect(await game.lookup("quest", 783)).toMatchObject({ completed: true });
+});
+
+test("parses flight paths and skips broken lines", () => {
+	expect(
+		parseTaxi(
+			[
+				"f\t23\t1\tOrgrimmar, Durotar\tKalimdor\t1454\tOrgrimmar\t45.2\t63.9",
+				"f\t80\t0\tRatchet, The Barrens\tKalimdor\t1414\tKalimdor\t60.0\t55.0",
+				"f\tx\t1\tbroken",
+				"truncated",
+			].join("\n"),
+		),
+	).toEqual({
+		nodes: [
+			{
+				id: 23,
+				name: "Orgrimmar, Durotar",
+				known: true,
+				continent: "Kalimdor",
+				mapId: 1454,
+				zone: "Orgrimmar",
+				x: 45.2,
+				y: 63.9,
+			},
+			{
+				id: 80,
+				name: "Ratchet, The Barrens",
+				known: false,
+				continent: "Kalimdor",
+				mapId: 1414,
+				zone: "Kalimdor",
+				x: 60,
+				y: 55,
+			},
+		],
+		truncated: true,
 	});
 });
