@@ -228,6 +228,7 @@ test("messages go up and replies come down, across /reload, a character switch a
 		bank: 0,
 		merchant: 0,
 		trainer: 0,
+		taxi: 1,
 	});
 	// The window: a question typed into its input line, the tool the agent calls, and a
 	// permission request the player answers in game.
@@ -793,6 +794,64 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 			{ id: 783, location: { source: "map", mapId: 1411, map: "Durotar" } },
 		],
 	});
+	// Marked only in a zone far away on the same continent, it is found there too.
+	command("set poiMap 1443");
+	command("fire QUEST_POI_UPDATE");
+	at = await roundTrip("far zone", /heard: far zone$/, at);
+	expect(await call("quests")).toMatchObject({
+		cached: false,
+		quests: [
+			{ id: 783, location: { source: "map", mapId: 1443, map: "Desolace" } },
+		],
+	});
+
+	// Flight paths of the Horde and neutral ones, on both continents, in zone coordinates.
+	expect(await call("flightpaths")).toMatchObject({
+		cached: false,
+		nodes: [
+			{
+				id: 23,
+				name: "Orgrimmar, Durotar",
+				known: true,
+				continent: "Kalimdor",
+				mapId: 1454,
+				zone: "Orgrimmar",
+				x: 45.2,
+				y: 63.9,
+			},
+			{
+				id: 25,
+				name: "Crossroads, The Barrens",
+				known: true,
+				zone: "The Barrens",
+				x: 51.4,
+				y: 30.3,
+			},
+			{ id: 80, name: "Ratchet, The Barrens", known: false },
+			{
+				id: 18,
+				name: "Booty Bay, Stranglethorn",
+				known: true,
+				continent: "Eastern Kingdoms",
+				zone: "Stranglethorn Vale",
+			},
+		],
+	});
+	expect(
+		(
+			(await call("flightpaths", { known: true })) as {
+				nodes: { id: number }[];
+			}
+		).nodes.map((n) => n.id),
+	).toEqual([23, 25, 18]);
+	expect(
+		(
+			(await call("flightpaths", { search: "barrens" })) as {
+				nodes: { id: number }[];
+			}
+		).nodes.map((n) => n.id),
+	).toEqual([25, 80]);
+	expect(await call("flightpaths")).toMatchObject({ cached: true });
 
 	expect(await call("lookup", { kind: "item", id: 2589 })).toMatchObject({
 		found: true,

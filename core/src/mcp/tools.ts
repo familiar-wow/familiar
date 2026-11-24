@@ -107,6 +107,43 @@ export function wowTools(game: Game): Tool[] {
 			},
 		},
 		{
+			name: "flightpaths",
+			description:
+				"The flight paths of the player's faction and the neutral ones in WoW Forever, on every continent: name, whether this character has found it (known), continent, the zone it lies in and its x/y in percent of that zone. Use it to plan a route, for example to turn in quests in several zones: travel between known flight paths is possible, unknown ones must first be found on foot. It does not say which flight paths connect directly; routes between known ones are usually possible with stops.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					known: {
+						type: "boolean",
+						description:
+							"true: only flight paths the character has found; false: only those still to find. Leave out for all.",
+					},
+					search: {
+						type: "string",
+						description:
+							"Optional case-insensitive part of a flight path, zone or continent name.",
+					},
+				},
+				additionalProperties: false,
+			},
+			call: async ({ known, search }) => {
+				const state = await game.get("taxi");
+				const term =
+					typeof search === "string" ? search.toLowerCase() : undefined;
+				return {
+					...state,
+					nodes: state.nodes.filter(
+						(n) =>
+							(known === undefined || n.known === known) &&
+							(!term ||
+								`${n.name} ${n.zone} ${n.continent}`
+									.toLowerCase()
+									.includes(term)),
+					),
+				};
+			},
+		},
+		{
 			name: "lookup",
 			description:
 				"What the WoW Forever client knows about any item, spell or quest by ID, also ones the player does not have: the name in the game's language, the tooltip as the game shows it (stats, effects, requirements, sell price), and for a quest its level, whether it is in the quest log and whether this character has completed it. Use it to explain an item or spell, to check whether the character did a quest, or to make sure of an ID before writing [item:ID], [spell:ID] or [quest:ID]. For an item or spell, found=false means no such ID exists in Forever; for a quest, unsure=true means the client may only have failed to load it. An error that the game is still loading means: ask again once. It cannot search by name and knows nothing about drop locations, vendors or NPC positions.",

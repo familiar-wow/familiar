@@ -15,7 +15,8 @@ export type Slice =
 	| "spells"
 	| "bank"
 	| "merchant"
-	| "trainer";
+	| "trainer"
+	| "taxi";
 
 export interface EquipmentItem {
 	slot: string;
@@ -230,6 +231,26 @@ export interface TrainerState {
 	truncated?: boolean;
 }
 
+/** A flight path of the player's faction or a neutral one (FAM-61). */
+export interface FlightPath {
+	id: number;
+	name: string;
+	/** Whether this character has found it at a flight master. */
+	known: boolean;
+	continent: string;
+	mapId: number;
+	/** The zone it lies in, or the continent if the client could not tell. */
+	zone: string;
+	/** Percent of that map. */
+	x: number;
+	y: number;
+}
+
+export interface TaxiState {
+	nodes: FlightPath[];
+	truncated?: boolean;
+}
+
 export type LookupKind = "item" | "spell" | "quest";
 
 /** What the game client knows about one item, spell or quest by ID (FAM-61). */
@@ -272,6 +293,7 @@ export interface SliceMap {
 	bank: BankState;
 	merchant: MerchantState;
 	trainer: TrainerState;
+	taxi: TaxiState;
 }
 
 export type SliceResult<K extends Slice> = SliceMap[K] & {
@@ -552,6 +574,8 @@ export function parseSlice<K extends Slice>(
 			return parseMerchant(payload) as SliceMap[K];
 		case "trainer":
 			return parseTrainer(payload) as SliceMap[K];
+		case "taxi":
+			return parseTaxi(payload) as SliceMap[K];
 	}
 }
 
@@ -1020,4 +1044,40 @@ export function parseLookup(
 		}
 	}
 	return result;
+}
+
+export function parseTaxi(payload: string): TaxiState {
+	const nodes: FlightPath[] = [];
+	let truncated = false;
+	for (const line of linesOf(payload)) {
+		if (line === "truncated") {
+			truncated = true;
+			continue;
+		}
+		const [kind, id, known, name, continent, mapId, zone, x, y] =
+			line.split("\t");
+		const nodeId = optInt(id);
+		const map = optInt(mapId);
+		const px = optNum(x);
+		const py = optNum(y);
+		if (
+			kind !== "f" ||
+			nodeId === undefined ||
+			map === undefined ||
+			px === undefined ||
+			py === undefined
+		)
+			continue;
+		nodes.push({
+			id: nodeId,
+			name: name ?? "",
+			known: known === "1",
+			continent: continent ?? "",
+			mapId: map,
+			zone: zone ?? "",
+			x: px,
+			y: py,
+		});
+	}
+	return truncated ? { nodes, truncated: true } : { nodes };
 }

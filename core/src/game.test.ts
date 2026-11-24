@@ -9,6 +9,7 @@ import {
 	parseMerchant,
 	parseQuests,
 	parseTalents,
+	parseTaxi,
 	parseTrainer,
 } from "./game.ts";
 
@@ -448,4 +449,41 @@ test("a lookup still loading is an error, not an answer, and quests are never ke
 	expect(await game.lookup("item", 4306)).toMatchObject({ name: "Silk Cloth" });
 	expect(await game.lookup("quest", 783)).toMatchObject({ completed: false });
 	expect(await game.lookup("quest", 783)).toMatchObject({ completed: true });
+});
+
+test("parses flight paths and skips broken lines", () => {
+	expect(
+		parseTaxi(
+			[
+				"f\t23\t1\tOrgrimmar, Durotar\tKalimdor\t1454\tOrgrimmar\t45.2\t63.9",
+				"f\t80\t0\tRatchet, The Barrens\tKalimdor\t1414\tKalimdor\t60.0\t55.0",
+				"f\tx\t1\tbroken",
+				"truncated",
+			].join("\n"),
+		),
+	).toEqual({
+		nodes: [
+			{
+				id: 23,
+				name: "Orgrimmar, Durotar",
+				known: true,
+				continent: "Kalimdor",
+				mapId: 1454,
+				zone: "Orgrimmar",
+				x: 45.2,
+				y: 63.9,
+			},
+			{
+				id: 80,
+				name: "Ratchet, The Barrens",
+				known: false,
+				continent: "Kalimdor",
+				mapId: 1414,
+				zone: "Kalimdor",
+				x: 60,
+				y: 55,
+			},
+		],
+		truncated: true,
+	});
 });

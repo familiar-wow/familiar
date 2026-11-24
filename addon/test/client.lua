@@ -638,11 +638,46 @@ local function api()
 		-- Not in the log, but done before.
 		[7] = { title = "Kobold Camp Cleanup", level = 3, done = true },
 	}
+	-- mapType: 1 world, 2 continent, 3 zone (Enum.UIMapType).
 	local maps = {
-		[1454] = { name = "Orgrimmar", parentMapID = 1411 },
-		[1411] = { name = "Durotar", parentMapID = 1414 },
-		[1429] = { name = "Elwynn Forest", parentMapID = 1415 },
+		[947] = { name = "Azeroth", parentMapID = 0, mapType = 1 },
+		[1414] = { name = "Kalimdor", parentMapID = 947, mapType = 2 },
+		[1415] = { name = "Eastern Kingdoms", parentMapID = 947, mapType = 2 },
+		[1411] = { name = "Durotar", parentMapID = 1414, mapType = 3 },
+		[1454] = { name = "Orgrimmar", parentMapID = 1411, mapType = 3 },
+		[1413] = { name = "The Barrens", parentMapID = 1414, mapType = 3 },
+		[1443] = { name = "Desolace", parentMapID = 1414, mapType = 3 },
+		[1429] = { name = "Elwynn Forest", parentMapID = 1415, mapType = 3 },
+		[1434] = { name = "Stranglethorn Vale", parentMapID = 1415, mapType = 3 },
 	}
+	-- Flight paths on a continent map, with the zone and zone position each lies at.
+	local taxi = {
+		[1414] = {
+			{ nodeID = 23, name = "Orgrimmar, Durotar", x = 0.58, y = 0.41, faction = 1, zone = 1454, zx = 0.452, zy = 0.639 },
+			{ nodeID = 25, name = "Crossroads, The Barrens", x = 0.52, y = 0.52, faction = 1, zone = 1413, zx = 0.514, zy = 0.303 },
+			{ nodeID = 80, name = "Ratchet, The Barrens", x = 0.6, y = 0.55, faction = 0, zone = 1413, zx = 0.63, zy = 0.37, undiscovered = true },
+			{ nodeID = 27, name = "Rut'theran Village, Teldrassil", x = 0.43, y = 0.1, faction = 2, zone = 1438, zx = 0.58, zy = 0.94 },
+		},
+		[1415] = {
+			{ nodeID = 18, name = "Booty Bay, Stranglethorn", x = 0.43, y = 0.92, faction = 0, zone = 1434, zx = 0.268, zy = 0.774 },
+		},
+	}
+	local function vector(x, y)
+		return {
+			x = x,
+			y = y,
+			GetXY = function(self)
+				return self.x, self.y
+			end,
+		}
+	end
+	local function nodeAt(continent, x, y)
+		for _, node in ipairs(taxi[continent] or {}) do
+			if math.abs(node.x - x) < 1e-6 and math.abs(node.y - y) < 1e-6 then
+				return node
+			end
+		end
+	end
 	local tooltips = {
 		["item:19019"] = { "Thunderfury, Blessed Blade of the Windseeker", "Binds when picked up", { "One-Hand", "Sword" } },
 		["item:13262"] = { "Ashbringer", "Binds when picked up" },
@@ -767,7 +802,39 @@ local function api()
 		end,
 		GetMapInfo = function(map)
 			local info = maps[map]
-			return info and { mapID = map, name = info.name, parentMapID = info.parentMapID } or nil
+			return info and { mapID = map, name = info.name, parentMapID = info.parentMapID, mapType = info.mapType } or nil
+		end,
+		GetMapChildrenInfo = function(map, mapType, all)
+			local list = {}
+			for id, info in pairs(maps) do
+				local parent = info.parentMapID
+				local under = parent == map
+				while all and not under and maps[parent] do
+					parent = maps[parent].parentMapID
+					under = parent == map
+				end
+				if under and (not mapType or info.mapType == mapType) then
+					list[#list + 1] = { mapID = id, name = info.name, mapType = info.mapType, parentMapID = info.parentMapID }
+				end
+			end
+			table.sort(list, function(a, b)
+				return a.mapID < b.mapID
+			end)
+			return list
+		end,
+		GetMapInfoAtPosition = function(continent, x, y)
+			local node = nodeAt(continent, x, y)
+			local info = node and maps[node.zone]
+			return info and { mapID = node.zone, name = info.name, mapType = info.mapType } or nil
+		end,
+		GetWorldPosFromMapPos = function(continent, pos)
+			return continent, vector(pos.x, pos.y)
+		end,
+		GetMapPosFromWorldPos = function(continent, pos, zone)
+			local node = nodeAt(continent, pos.x, pos.y)
+			if node and node.zone == zone then
+				return zone, vector(node.zx, node.zy)
+			end
 		end,
 		GetPlayerMapPosition = function()
 			return {
@@ -775,6 +842,22 @@ local function api()
 					return 0.512, 0.624
 				end,
 			}
+		end,
+	}
+	e.CreateVector2D = vector
+	e.C_TaxiMap = {
+		GetTaxiNodesForMap = function(continent)
+			local list = {}
+			for _, node in ipairs(taxi[continent] or {}) do
+				list[#list + 1] = {
+					nodeID = node.nodeID,
+					name = node.name,
+					position = vector(node.x, node.y),
+					faction = node.faction,
+					isUndiscovered = node.undiscovered == true,
+				}
+			end
+			return list
 		end,
 	}
 	e.GetMoney = function()
