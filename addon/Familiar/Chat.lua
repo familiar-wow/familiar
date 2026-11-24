@@ -236,6 +236,24 @@ local function apply()
 	focus(input:HasFocus())
 end
 
+-- A left click on a quest the player has in the log opens the quest log at it, with its map,
+-- as the game's quest tracker does. Anything else, a modified click or a click in combat, when
+-- the game keeps windows from opening, goes to the game's usual handling. Returns whether it
+-- opened the log.
+local function openQuest(link, button)
+	local id = tonumber(link:match("^quest:(%d+)"))
+	if not id or button ~= "LeftButton" or IsModifiedClick() or InCombatLockdown() then
+		return false
+	end
+	if not (QuestMapFrame_OpenToQuestDetails and C_QuestLog.GetLogIndexForQuestID) then
+		return false
+	end
+	if not C_QuestLog.GetLogIndexForQuestID(id) then
+		return false
+	end
+	return (pcall(QuestMapFrame_OpenToQuestDetails, id))
+end
+
 local function create()
 	frame = CreateFrame("Frame", "FamiliarChatFrame", UIParent)
 	frame:SetFrameStrata("MEDIUM")
@@ -317,11 +335,14 @@ local function create()
 	history:SetJustifyH("LEFT")
 	history:SetFading(false)
 	history:SetMaxLines(HISTORY * 2)
-	-- Links show their tooltip on hover and open like in the chat on click.
+	-- Links show their tooltip on hover and open like in the chat on click. A quest in the log
+	-- opens the quest log with its map instead, as quest trackers do.
 	history:SetHyperlinksEnabled(true)
 	history:EnableMouse(true)
 	history:SetScript("OnHyperlinkClick", function(self, link, text, button)
-		SetItemRef(link, text, button, self)
+		if not openQuest(link, button) then
+			SetItemRef(link, text, button, self)
+		end
 	end)
 	history:SetScript("OnHyperlinkEnter", function(self, link)
 		GameTooltip:SetOwner(self, "ANCHOR_CURSOR")

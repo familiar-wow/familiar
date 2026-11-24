@@ -66,6 +66,8 @@ const fonts: string[] = [];
 /** What the window's font strings showed, each time a test asked. */
 const texts: string[] = [];
 const errors: string[] = [];
+/** What clicks on links in the window opened: "itemref <link>" or "questlog <id>". */
+const clicks: string[] = [];
 let game: Bun.Subprocess<"pipe", "pipe", "pipe">;
 let ticker: ReturnType<typeof setTimeout> | undefined;
 let nextFrame = () => {};
@@ -179,6 +181,8 @@ beforeAll(async () => {
 				if (line.startsWith("font ")) fonts.push(line.slice(5));
 				if (line.startsWith("texts ")) texts.push(line.slice(6));
 				if (line.startsWith("error ")) errors.push(line.slice(6));
+				if (line.startsWith("itemref ") || line.startsWith("questlog "))
+					clicks.push(line);
 			}
 		}
 	})();
@@ -945,3 +949,37 @@ test("quests show where they lead, and any item, spell or quest can be looked up
 	reset();
 	expect(errors).toEqual([]);
 }, 90_000);
+
+test("a click on a quest in the log opens the quest log, other links their tooltip", async () => {
+	await waitFor(CONNECTED, 0);
+	const click = async (what: string) => {
+		const from = clicks.length;
+		command(`linkclick ${what}`);
+		const until = Date.now() + 5000;
+		while (clicks.length === from && Date.now() < until) await Bun.sleep(20);
+		return clicks.slice(from);
+	};
+	// In the log: the quest log with its map.
+	expect(await click("LeftButton quest:783:1")).toEqual(["questlog 783"]);
+	// Not in the log, another button, a modifier or combat: the game's usual handling.
+	expect(await click("LeftButton quest:7:3")).toEqual(["itemref quest:7:3"]);
+	expect(await click("RightButton quest:783:1")).toEqual([
+		"itemref quest:783:1",
+	]);
+	expect(await click("shift quest:783:1")).toEqual(["itemref quest:783:1"]);
+	command("set combat 1");
+	expect(await click("LeftButton quest:783:1")).toEqual([
+		"itemref quest:783:1",
+	]);
+	command("set combat 0");
+	// If the quest log cannot open, the click still shows the tooltip.
+	command("set questMapFails 1");
+	expect(await click("LeftButton quest:783:1")).toEqual([
+		"itemref quest:783:1",
+	]);
+	command("set questMapFails 0");
+	expect(await click("LeftButton item:19019::::::::60")).toEqual([
+		"itemref item:19019::::::::60",
+	]);
+	expect(errors).toEqual([]);
+}, 30_000);
