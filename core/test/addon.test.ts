@@ -232,6 +232,8 @@ test("messages go up and replies come down, across /reload, a character switch a
 		bank: 0,
 		merchant: 0,
 		trainer: 0,
+		// Entering the world bumps it once.
+		taxi: 2,
 	});
 	// The window: a question typed into its input line, the tool the agent calls, and a
 	// permission request the player answers in game.
@@ -565,6 +567,14 @@ test("pulls equipment, bags, quests and talents on demand, caches by revision an
 			watched: true,
 			category: "Elwynn Forest",
 			title: "A Threat Within",
+			location: {
+				source: "waypoint",
+				mapId: 1429,
+				map: "Elwynn Forest",
+				x: 48.1,
+				y: 42,
+				note: "Marshal McBride",
+			},
 			objectives: [
 				{ finished: false, text: "Speak with Marshal McBride: 0/1" },
 			],
@@ -742,6 +752,203 @@ test("collector revisions follow late events and restart with the interface", as
 		command(`set ${key} ${value}`);
 	expect(errors).toEqual([]);
 }, 60_000);
+
+test("quests show where they lead, and any item, spell or quest can be looked up by ID", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	const call = async (name: string, args: Record<string, unknown> = {}) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return await tool.call(args);
+	};
+	const reset = () => {
+		for (const [key, value] of Object.entries({
+			waypoint: "1",
+			poiMap: "1454",
+			slowLoads: "0",
+			done783: "0",
+			noMap: "0",
+			ratchet: "0",
+		}))
+			command(`set ${key} ${value}`);
+	};
+
+	// Without a waypoint, the quest's area on the player's map: here Orgrimmar.
+	command("set waypoint 0");
+	command("fire QUEST_POI_UPDATE");
+	at = await roundTrip("no waypoint", /heard: no waypoint$/, at);
+	expect(await call("quests")).toMatchObject({
+		cached: false,
+		quests: [
+			{
+				id: 783,
+				location: {
+					source: "map",
+					mapId: 1454,
+					map: "Orgrimmar",
+					x: 50,
+					y: 62.5,
+				},
+			},
+		],
+	});
+	// Marked only on the parent zone, the area is found there.
+	command("set poiMap 1411");
+	command("fire ZONE_CHANGED_NEW_AREA");
+	at = await roundTrip("parent zone", /heard: parent zone$/, at);
+	expect(await call("quests")).toMatchObject({
+		cached: false,
+		quests: [
+			{ id: 783, location: { source: "map", mapId: 1411, map: "Durotar" } },
+		],
+	});
+	// Marked only in a zone far away on the same continent, it is found there too.
+	command("set poiMap 1443");
+	command("fire QUEST_POI_UPDATE");
+	at = await roundTrip("far zone", /heard: far zone$/, at);
+	expect(await call("quests")).toMatchObject({
+		cached: false,
+		quests: [
+			{ id: 783, location: { source: "map", mapId: 1443, map: "Desolace" } },
+		],
+	});
+
+	// Flight paths of the Horde and neutral ones, on both continents, in zone coordinates.
+	expect(await call("flightpaths")).toMatchObject({
+		cached: false,
+		nodes: [
+			{
+				id: 23,
+				name: "Orgrimmar, Durotar",
+				known: true,
+				continent: "Kalimdor",
+				mapId: 1454,
+				zone: "Orgrimmar",
+				x: 45.2,
+				y: 63.9,
+			},
+			{
+				id: 25,
+				name: "Crossroads, The Barrens",
+				known: true,
+				zone: "The Barrens",
+				x: 51.4,
+				y: 30.3,
+			},
+			{ id: 80, name: "Ratchet, The Barrens", known: false },
+			{
+				id: 18,
+				name: "Booty Bay, Stranglethorn",
+				known: true,
+				continent: "Eastern Kingdoms",
+				zone: "Stranglethorn Vale",
+			},
+		],
+	});
+	expect(
+		(
+			(await call("flightpaths", { known: true })) as {
+				nodes: { id: number }[];
+			}
+		).nodes.map((n) => n.id),
+	).toEqual([23, 25, 18]);
+	expect(
+		(
+			(await call("flightpaths", { search: "barrens" })) as {
+				nodes: { id: number }[];
+			}
+		).nodes.map((n) => n.id),
+	).toEqual([25, 80]);
+	expect(await call("flightpaths")).toMatchObject({ cached: true });
+	// A flight path found at a flight master shows at once.
+	command("set ratchet 1");
+	command("fire TAXI_NODE_STATUS_CHANGED");
+	at = await roundTrip("found ratchet", /heard: found ratchet$/, at);
+	expect(
+		(await call("flightpaths", { known: true })) as {
+			cached: boolean;
+			nodes: { id: number }[];
+		},
+	).toMatchObject({
+		cached: false,
+		nodes: [{ id: 23 }, { id: 25 }, { id: 80 }, { id: 18 }],
+	});
+	// Without a map, as during a loading screen, it is an error to retry, not an empty list.
+	command("set noMap 1");
+	command("fire TAXIMAP_CLOSED");
+	at = await roundTrip("no map", /heard: no map$/, at);
+	await expect(call("flightpaths")).rejects.toThrow("no map for the character");
+	command("set noMap 0");
+	expect(await call("flightpaths")).toMatchObject({ cached: false });
+	command("set ratchet 0");
+
+	expect(await call("lookup", { kind: "item", id: 2589 })).toMatchObject({
+		found: true,
+		name: "Linen Cloth",
+		quality: 1,
+		itemLevel: 5,
+		itemType: "Trade Goods",
+		itemSubType: "Cloth",
+		sellPrice: { copper: 13, formatted: "13c" },
+		tooltip: ["Max Stack: 200", "Sell Price: 13 copper"],
+	});
+	expect(await call("lookup", { kind: "spell", id: 133 })).toMatchObject({
+		found: true,
+		name: "Fireball",
+		description: "Hurls a fiery ball that causes 14 to 22 Fire damage.",
+		tooltip: [
+			"30 Mana  35 yd range",
+			"Hurls a fiery ball that causes 14 to 22 Fire damage.",
+		],
+	});
+
+	// An item the client loads too slowly is an error to retry, not an answer to keep.
+	command("set slowLoads 20");
+	await expect(call("lookup", { kind: "item", id: 4306 })).rejects.toThrow(
+		"still loading item 4306",
+	);
+	expect(await call("lookup", { kind: "item", id: 4306 })).toMatchObject({
+		found: true,
+		name: "Silk Cloth",
+		sellPrice: { copper: 150 },
+	});
+
+	// A quest's status is asked anew every time: it changes while playing.
+	expect(await call("lookup", { kind: "quest", id: 783 })).toMatchObject({
+		found: true,
+		completed: false,
+		inQuestLog: true,
+	});
+	command("set done783 1");
+	expect(await call("lookup", { kind: "quest", id: 783 })).toMatchObject({
+		completed: true,
+	});
+	expect(await call("lookup", { kind: "quest", id: 7 })).toMatchObject({
+		found: true,
+		name: "Kobold Camp Cleanup",
+		questLevel: 3,
+		completed: true,
+		inQuestLog: false,
+	});
+
+	expect(await call("lookup", { kind: "item", id: 999999 })).toEqual({
+		kind: "item",
+		id: 999999,
+		found: false,
+		tooltip: [],
+	});
+	// The client cannot tell an unknown quest from a loading one, so it waits and says so.
+	const started = performance.now();
+	expect(await call("lookup", { kind: "quest", id: 424242 })).toEqual({
+		kind: "quest",
+		id: 424242,
+		found: false,
+		unsure: true,
+		tooltip: [],
+	});
+	expect(performance.now() - started).toBeGreaterThan(2500);
+	reset();
+	expect(errors).toEqual([]);
+}, 90_000);
 
 test("a click on a quest in the log opens the quest log, other links their tooltip", async () => {
 	await waitFor(CONNECTED, 0);

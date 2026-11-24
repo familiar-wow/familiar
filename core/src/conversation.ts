@@ -32,8 +32,8 @@ export class Conversation {
 		/** Learns the character from each question's header, and caches pulled slices for `wow`. */
 		private readonly game: Game,
 	) {
-		this.game.setFetcher((id, slice) =>
-			this.down({ kind: "fetch", id, slice }),
+		this.game.setFetcher((id, slice, arg) =>
+			this.down({ kind: "fetch", id, slice, ...(arg ? { arg } : {}) }),
 		);
 	}
 

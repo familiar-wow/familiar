@@ -457,7 +457,23 @@ local stub = {
 	trainerType = "0", -- Enum.TrainerType; 3 is a pet trainer
 	combat = "0", -- 1: the player is in combat (InCombatLockdown)
 	questMapFails = "0", -- 1: opening the quest log raises an error
+	waypoint = "1", -- 0: the quest log has no waypoint, only an area on the map
+	poiMap = "1454", -- the map whose quest areas include quest 783
+	slowLoads = "0", -- load requests that go unanswered before uncached data arrives
+	done783 = "0", -- 1: quest 783 counts as completed
+	noMap = "0", -- 1: the game has no map for the player, as during a loading screen
+	ratchet = "0", -- 1: the character has found the flight path at Ratchet
 }
+
+-- Whether a load request for uncached data is answered: only once `slowLoads` requests are spent.
+local function loadNow()
+	local left = tonumber(stub.slowLoads) or 0
+	if left > 0 then
+		stub.slowLoads = tostring(left - 1)
+		return false
+	end
+	return true
+end
 
 local function fire(event, ...)
 	for _, frame in ipairs(frames) do
@@ -593,7 +609,30 @@ local function api()
 			ilvl = 88,
 			quality = 5,
 		},
-		[2589] = { link = itemLink(2589, 1, "Linen Cloth"), equip = "", ilvl = 5, quality = 1, loads = true },
+		[2589] = {
+			link = itemLink(2589, 1, "Linen Cloth"),
+			equip = "",
+			ilvl = 5,
+			quality = 1,
+			loads = true,
+			minLevel = 0,
+			type = "Trade Goods",
+			subType = "Cloth",
+			stack = 200,
+			sell = 13,
+		},
+		[4306] = {
+			link = itemLink(4306, 1, "Silk Cloth"),
+			equip = "",
+			ilvl = 26,
+			quality = 1,
+			loads = true,
+			minLevel = 0,
+			type = "Trade Goods",
+			subType = "Cloth",
+			stack = 200,
+			sell = 150,
+		},
 		[6948] = { link = itemLink(6948, 1, "Hearthstone"), equip = "", ilvl = 1, quality = 1 },
 	}
 	local worn = character == "Alt" and { [16] = 19019 } or { [16] = 13262 }
@@ -605,10 +644,54 @@ local function api()
 			category = "Elwynn Forest",
 			loads = true,
 		},
+		-- Not in the log, but done before.
+		[7] = { title = "Kobold Camp Cleanup", level = 3, done = true },
 	}
+	-- mapType: 1 world, 2 continent, 3 zone (Enum.UIMapType).
+	local maps = {
+		[947] = { name = "Azeroth", parentMapID = 0, mapType = 1 },
+		[1414] = { name = "Kalimdor", parentMapID = 947, mapType = 2 },
+		[1415] = { name = "Eastern Kingdoms", parentMapID = 947, mapType = 2 },
+		[1411] = { name = "Durotar", parentMapID = 1414, mapType = 3 },
+		[1454] = { name = "Orgrimmar", parentMapID = 1411, mapType = 3 },
+		[1413] = { name = "The Barrens", parentMapID = 1414, mapType = 3 },
+		[1443] = { name = "Desolace", parentMapID = 1414, mapType = 3 },
+		[1429] = { name = "Elwynn Forest", parentMapID = 1415, mapType = 3 },
+		[1434] = { name = "Stranglethorn Vale", parentMapID = 1415, mapType = 3 },
+	}
+	-- Flight paths on a continent map, with the zone and zone position each lies at.
+	local taxi = {
+		[1414] = {
+			{ nodeID = 23, name = "Orgrimmar, Durotar", x = 0.58, y = 0.41, faction = 1, zone = 1454, zx = 0.452, zy = 0.639 },
+			{ nodeID = 25, name = "Crossroads, The Barrens", x = 0.52, y = 0.52, faction = 1, zone = 1413, zx = 0.514, zy = 0.303 },
+			{ nodeID = 80, name = "Ratchet, The Barrens", x = 0.6, y = 0.55, faction = 0, zone = 1413, zx = 0.63, zy = 0.37, undiscovered = true },
+			{ nodeID = 27, name = "Rut'theran Village, Teldrassil", x = 0.43, y = 0.1, faction = 2, zone = 1438, zx = 0.58, zy = 0.94 },
+		},
+		[1415] = {
+			{ nodeID = 18, name = "Booty Bay, Stranglethorn", x = 0.43, y = 0.92, faction = 0, zone = 1434, zx = 0.268, zy = 0.774 },
+		},
+	}
+	local function vector(x, y)
+		return {
+			x = x,
+			y = y,
+			GetXY = function(self)
+				return self.x, self.y
+			end,
+		}
+	end
+	local function nodeAt(continent, x, y)
+		for _, node in ipairs(taxi[continent] or {}) do
+			if math.abs(node.x - x) < 1e-6 and math.abs(node.y - y) < 1e-6 then
+				return node
+			end
+		end
+	end
 	local tooltips = {
 		["item:19019"] = { "Thunderfury, Blessed Blade of the Windseeker", "Binds when picked up", { "One-Hand", "Sword" } },
 		["item:13262"] = { "Ashbringer", "Binds when picked up" },
+		["item:2589"] = { "Linen Cloth", "Max Stack: 200", "Sell Price: 13 copper" },
+		["spell:133"] = { "Fireball", { "30 Mana", "35 yd range" }, "Hurls a fiery ball that causes 14 to 22 Fire damage." },
 	}
 	local function itemID(info)
 		return tonumber(info) or tonumber(tostring(info):match("item:(%d+)"))
@@ -620,7 +703,10 @@ local function api()
 		GetItemInfo = function(info)
 			local item = items[itemID(info)]
 			if item and not item.loads then
-				return item.link:match("%[(.-)%]"), item.link
+				-- name, link, quality, item level, required level, type, subtype, stack, equip
+				-- location, icon, sell price
+				return item.link:match("%[(.-)%]"), item.link, item.quality, item.ilvl, item.minLevel,
+					item.type, item.subType, item.stack, item.equip, nil, item.sell
 			end
 		end,
 		GetItemInfoInstant = function(info)
@@ -632,7 +718,7 @@ local function api()
 			return item and item.ilvl or nil
 		end,
 		RequestLoadItemDataByID = function(id)
-			if items[id] then
+			if items[id] and loadNow() then
 				items[id].loads = nil
 			end
 		end,
@@ -652,19 +738,49 @@ local function api()
 		GetSpellName = function(id)
 			return spellNames[id]
 		end,
+		GetSpellDescription = function(id)
+			return id == 133 and "Hurls a fiery ball that causes 14 to 22 Fire damage." or ""
+		end,
 	}
 	e.GetQuestLink = function(id)
 		local quest = quests[id]
 		return quest and not quest.loads and quest.link or nil
 	end
 	e.C_QuestLog = {
+		RequestLoadQuestByID = function(id)
+			if quests[id] and loadNow() then
+				quests[id].loads = nil
+			end
+		end,
+		GetTitleForQuestID = function(id)
+			local quest = quests[id]
+			return quest and not quest.loads and quest.title or nil
+		end,
+		GetQuestDifficultyLevel = function(id)
+			return quests[id] and quests[id].level or 0
+		end,
+		IsQuestFlaggedCompleted = function(id)
+			if id == 783 then
+				return stub.done783 == "1"
+			end
+			return quests[id] ~= nil and quests[id].done == true
+		end,
 		GetLogIndexForQuestID = function(id)
 			return id == 783 and 2 or nil
 		end,
-		RequestLoadQuestByID = function(id)
-			if quests[id] then
-				quests[id].loads = nil
+		GetNextWaypoint = function(id)
+			if id == 783 and stub.waypoint == "1" then
+				return 1429, 0.481, 0.42
 			end
+		end,
+		GetNextWaypointText = function(id)
+			return id == 783 and "Marshal McBride" or ""
+		end,
+		GetQuestsOnMap = function(map)
+			if tostring(map) == stub.poiMap then
+				return { { questID = 783, mapID = map, x = 0.5, y = 0.625 } }
+			end
+			return {}
 		end,
 		GetNumQuestLogEntries = function()
 			return 2
@@ -691,7 +807,47 @@ local function api()
 	}
 	e.C_Map = {
 		GetBestMapForUnit = function()
+			if stub.noMap == "1" then
+				return nil
+			end
 			return 1454
+		end,
+		GetMapInfo = function(map)
+			local info = maps[map]
+			return info and { mapID = map, name = info.name, parentMapID = info.parentMapID, mapType = info.mapType } or nil
+		end,
+		GetMapChildrenInfo = function(map, mapType, all)
+			local list = {}
+			for id, info in pairs(maps) do
+				local parent = info.parentMapID
+				local under = parent == map
+				while all and not under and maps[parent] do
+					parent = maps[parent].parentMapID
+					under = parent == map
+				end
+				if under and (not mapType or info.mapType == mapType) then
+					list[#list + 1] = { mapID = id, name = info.name, mapType = info.mapType, parentMapID = info.parentMapID }
+				end
+			end
+			table.sort(list, function(a, b)
+				return a.mapID < b.mapID
+			end)
+			return list
+		end,
+		GetMapInfoAtPosition = function(continent, x, y)
+			local node = nodeAt(continent, x, y)
+			local info = node and maps[node.zone]
+			return info and { mapID = node.zone, name = info.name, mapType = info.mapType } or nil
+		end,
+		-- World coordinates use their own continent IDs and units, as in the client.
+		GetWorldPosFromMapPos = function(continent, pos)
+			return continent + 10000, vector(pos.x * 1000, pos.y * 1000)
+		end,
+		GetMapPosFromWorldPos = function(instance, pos, zone)
+			local node = nodeAt(instance - 10000, pos.x / 1000, pos.y / 1000)
+			if node and node.zone == zone then
+				return zone, vector(node.zx, node.zy)
+			end
 		end,
 		GetPlayerMapPosition = function()
 			return {
@@ -699,6 +855,22 @@ local function api()
 					return 0.512, 0.624
 				end,
 			}
+		end,
+	}
+	e.CreateVector2D = vector
+	e.C_TaxiMap = {
+		GetTaxiNodesForMap = function(continent)
+			local list = {}
+			for _, node in ipairs(taxi[continent] or {}) do
+				list[#list + 1] = {
+					nodeID = node.nodeID,
+					name = node.name,
+					position = vector(node.x, node.y),
+					faction = node.faction,
+					isUndiscovered = node.undiscovered == true and not (node.nodeID == 80 and stub.ratchet == "1"),
+				}
+			end
+			return list
 		end,
 	}
 	e.GetMoney = function()

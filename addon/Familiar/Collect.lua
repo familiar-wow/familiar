@@ -4,6 +4,7 @@
 -- travels over the lane until the player's agent actually calls a tool (ADR 0001, ADR 0007).
 local _, ns = ...
 local Transport = ns.Transport
+local Tasks = ns.Tasks
 
 local format, concat, sort = string.format, table.concat, table.sort
 
@@ -28,6 +29,7 @@ local revs = {
 	bank = 0,
 	merchant = 0,
 	trainer = 0,
+	taxi = 1,
 }
 
 local REV_ORDER = {
@@ -42,6 +44,7 @@ local REV_ORDER = {
 	"bank",
 	"merchant",
 	"trainer",
+	"taxi",
 }
 
 -- Cached last-seen payloads captured while the player has the bank, a merchant or a trainer open.
@@ -261,6 +264,151 @@ local function collectBags()
 	return pack(lines)
 end
 
+local function mapName(mapID)
+	if C_Map and C_Map.GetMapInfo then
+		local ok, info = pcall(C_Map.GetMapInfo, mapID)
+		if ok and type(info) == "table" and info.name then
+			return clean(info.name)
+		end
+	end
+	return ""
+end
+
+local function percent(v)
+	return format("%.1f", (tonumber(v) or 0) * 100)
+end
+
+local MAP_CONTINENT, MAP_ZONE = 2, 3
+
+local function mapInfo(mapID)
+	if mapID and C_Map and C_Map.GetMapInfo then
+		local ok, info = pcall(C_Map.GetMapInfo, mapID)
+		if ok and type(info) == "table" then
+			return info
+		end
+	end
+end
+
+local function playerMap()
+	if C_Map and C_Map.GetBestMapForUnit then
+		local ok, map = pcall(C_Map.GetBestMapForUnit, "player")
+		if ok then
+			return map
+		end
+	end
+end
+
+-- The player's continent first, then the other continents of the world.
+local function continents()
+	local list, seen = {}, {}
+	local world
+	local map = playerMap()
+	for _ = 1, 10 do
+		local info = mapInfo(map)
+		if not info then
+			break
+		end
+		if info.mapType == MAP_CONTINENT and not seen[map] then
+			list[#list + 1], seen[map] = map, true
+		end
+		if (info.mapType or 9) <= 1 then
+			world = map
+			break
+		end
+		map = info.parentMapID
+	end
+	if world and C_Map.GetMapChildrenInfo then
+		local ok, children = pcall(C_Map.GetMapChildrenInfo, world, MAP_CONTINENT)
+		if ok and type(children) == "table" then
+			for _, child in ipairs(children) do
+				if child.mapID and not seen[child.mapID] then
+					list[#list + 1], seen[child.mapID] = child.mapID, true
+				end
+			end
+		end
+	end
+	return list
+end
+
+-- Finds the quests the world map marks (FAM-61): first on the player's map and its parent,
+-- then zone by zone over every continent, until a quest is found. Coordinates are those of the
+-- map it was found on.
+local function areaFinder()
+	local maps, seen = {}, {}
+	local function add(map)
+		if map and not seen[map] then
+			maps[#maps + 1], seen[map] = map, true
+		end
+	end
+	local here = playerMap()
+	add(here)
+	local info = mapInfo(here)
+	if info and (info.parentMapID or 0) > 0 then
+		add(info.parentMapID)
+	end
+	local zonesAdded = false
+	local found, nextMap = {}, 1
+	local function scan(map)
+		local ok, list = pcall(C_QuestLog.GetQuestsOnMap, map)
+		if ok and type(list) == "table" then
+			for _, poi in ipairs(list) do
+				if type(poi) == "table" and poi.questID and poi.x and poi.y and not found[poi.questID] then
+					found[poi.questID] = { map = poi.mapID or map, x = poi.x, y = poi.y }
+				end
+			end
+		end
+	end
+	return function(id)
+		if not (C_QuestLog.GetQuestsOnMap and C_Map) then
+			return
+		end
+		while not found[id] do
+			if nextMap > #maps then
+				if zonesAdded or not C_Map.GetMapChildrenInfo then
+					return
+				end
+				zonesAdded = true
+				for _, continent in ipairs(continents()) do
+					local ok, zones = pcall(C_Map.GetMapChildrenInfo, continent, MAP_ZONE, true)
+					if ok and type(zones) == "table" then
+						for _, zone in ipairs(zones) do
+							add(zone.mapID)
+						end
+					end
+				end
+				if nextMap > #maps then
+					return
+				end
+			end
+			scan(maps[nextMap])
+			nextMap = nextMap + 1
+		end
+		return found[id]
+	end
+end
+
+-- Where a quest leads, as the world map shows it: its next waypoint, else its area on the map.
+-- Coordinates are in percent of the map, as players and guides write them.
+local function questLocation(id, findArea)
+	if C_QuestLog.GetNextWaypoint then
+		local ok, map, x, y = pcall(C_QuestLog.GetNextWaypoint, id)
+		if ok and map and x and y and (x > 0 or y > 0) then
+			local text = ""
+			if C_QuestLog.GetNextWaypointText then
+				local tok, t = pcall(C_QuestLog.GetNextWaypointText, id)
+				if tok and t then
+					text = clean(t)
+				end
+			end
+			return concat({ "w", "waypoint", tostring(map), mapName(map), percent(x), percent(y), text }, "\t")
+		end
+	end
+	local area = findArea(id)
+	if area then
+		return concat({ "w", "map", tostring(area.map), mapName(area.map), percent(area.x), percent(area.y), "" }, "\t")
+	end
+end
+
 local function collectQuests()
 	local lines = {}
 	if not (C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo) then
@@ -270,6 +418,7 @@ local function collectQuests()
 	if not ok or not count then
 		return ""
 	end
+	local findArea = areaFinder()
 	local category = ""
 	for i = 1, count do
 		local iok, info = pcall(C_QuestLog.GetInfo, i)
@@ -301,6 +450,10 @@ local function collectQuests()
 					category,
 					clean(info.title or ""),
 				}, "\t")
+				local where = questLocation(id, findArea)
+				if where then
+					lines[#lines + 1] = where
+				end
 				if C_QuestLog.GetQuestObjectives then
 					local ook, objs = pcall(C_QuestLog.GetQuestObjectives, id)
 					if ook and type(objs) == "table" then
@@ -866,6 +1019,84 @@ local function snapshotTrainer()
 	revs.trainer = (revs.trainer or 0) + 1
 end
 
+-- The flight paths of the player's faction on every continent, and which ones the character
+-- has found (FAM-61). The client knows them without a flight master; positions are given in the
+-- zone each one lies in, when the client can convert them.
+local FACTION = { Horde = 1, Alliance = 2 }
+
+local function vec(v)
+	if type(v) ~= "table" then
+		return
+	end
+	if v.x and v.y then
+		return v.x, v.y
+	end
+	if v.GetXY then
+		return v:GetXY()
+	end
+end
+
+local function inZone(continent, x, y)
+	if not (C_Map.GetMapInfoAtPosition and C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D) then
+		return
+	end
+	local ok, zone = pcall(C_Map.GetMapInfoAtPosition, continent, x, y)
+	if not ok or type(zone) ~= "table" or zone.mapType ~= MAP_ZONE then
+		return
+	end
+	local wok, instance, world = pcall(C_Map.GetWorldPosFromMapPos, continent, CreateVector2D(x, y))
+	if not wok or not world then
+		return
+	end
+	local mok, _, pos = pcall(C_Map.GetMapPosFromWorldPos, instance, world, zone.mapID)
+	local zx, zy = vec(mok and pos)
+	if zx and zy then
+		return zone.mapID, clean(zone.name or ""), zx, zy
+	end
+end
+
+local function collectTaxi()
+	if not (C_TaxiMap and C_TaxiMap.GetTaxiNodesForMap and C_Map) then
+		return "error\tthe client offers no flight path data"
+	end
+	local mine = FACTION[UnitFactionGroup and UnitFactionGroup("player") or ""]
+	local lines, seen = {}, {}
+	local list = continents()
+	if #list == 0 then
+		-- No map yet, as during a loading screen: an error is asked again, an empty list is kept.
+		return "error\tthe game has no map for the character right now; ask again in a moment"
+	end
+	for _, continent in ipairs(list) do
+		local ok, nodes = pcall(C_TaxiMap.GetTaxiNodesForMap, continent)
+		if ok and type(nodes) == "table" then
+			local cname = mapName(continent)
+			for _, node in ipairs(nodes) do
+				local faction = node.faction or 0
+				if node.nodeID and not seen[node.nodeID] and (faction == 0 or faction == mine) then
+					seen[node.nodeID] = true
+					local x, y = vec(node.position)
+					local map, zone, zx, zy
+					if x and y then
+						map, zone, zx, zy = inZone(continent, x, y)
+					end
+					lines[#lines + 1] = concat({
+						"f",
+						tostring(node.nodeID),
+						node.isUndiscovered and "0" or "1",
+						clean(node.name or ""),
+						cname,
+						tostring(map or continent),
+						zone or cname,
+						percent(zx or x or 0),
+						percent(zy or y or 0),
+					}, "\t")
+				end
+			end
+		end
+	end
+	return pack(lines)
+end
+
 local function collectSeen(key)
 	return function()
 		return seen[key] or "empty"
@@ -884,12 +1115,139 @@ local COLLECTORS = {
 	bank = collectSeen("bank"),
 	merchant = collectSeen("merchant"),
 	trainer = collectSeen("trainer"),
+	taxi = collectTaxi,
 }
 
--- Responds to pull requests from the app: "fetch\n<id>\n<slice>".
+-- Any item, spell or quest by ID, also ones the player never saw (FAM-61): what the client knows
+-- about it. Data the client has not loaded yet is asked for and waited on, a few seconds at most.
+local LOOKUP_WAIT = 3
+
+-- Whether the thing exists, and whether its data is there; asks the client to load it if not.
+local function loaded(kind, id)
+	if kind == "item" then
+		if C_Item.DoesItemExistByID and not C_Item.DoesItemExistByID(id) then
+			return false, true
+		end
+		if C_Item.GetItemInfo(id) then
+			return true, true
+		end
+		C_Item.RequestLoadItemDataByID(id)
+		return true, false
+	elseif kind == "spell" then
+		if not C_Spell.DoesSpellExist(id) then
+			return false, true
+		end
+		if C_Spell.IsSpellDataCached and not C_Spell.IsSpellDataCached(id) then
+			C_Spell.RequestLoadSpellData(id)
+			return true, false
+		end
+		return true, true
+	elseif kind == "quest" then
+		local title = C_QuestLog.GetTitleForQuestID(id)
+		if title and title ~= "" then
+			return true, true
+		end
+		-- The client cannot tell an unknown quest from one still loading.
+		C_QuestLog.RequestLoadQuestByID(id)
+		return false, false
+	end
+	return false, true
+end
+
+local function describeLookup(kind, id)
+	local lines = {}
+	if kind == "item" then
+		local name, _, quality, ilvl, minLevel, itemType, subType, _, equip, _, sell = C_Item.GetItemInfo(id)
+		lines[1] = concat({ "l", kind, tostring(id), clean(name or "") }, "\t")
+		lines[2] = concat({
+			"i",
+			tostring(quality or ""),
+			tostring(ilvl or ""),
+			tostring(minLevel or ""),
+			clean(itemType or ""),
+			clean(subType or ""),
+			clean(equip or ""),
+			tostring(sell or ""),
+		}, "\t")
+	elseif kind == "spell" then
+		lines[1] = concat({ "l", kind, tostring(id), clean(C_Spell.GetSpellName(id) or "") }, "\t")
+		if C_Spell.GetSpellDescription then
+			local ok, text = pcall(C_Spell.GetSpellDescription, id)
+			if ok and text and text ~= "" then
+				lines[#lines + 1] = "d\t" .. clean(text)
+			end
+		end
+	else
+		lines[1] = concat({ "l", kind, tostring(id), clean(C_QuestLog.GetTitleForQuestID(id) or "") }, "\t")
+		local level, done, inLog = "", "", ""
+		if C_QuestLog.GetQuestDifficultyLevel then
+			local ok, v = pcall(C_QuestLog.GetQuestDifficultyLevel, id)
+			level = ok and v and tostring(v) or ""
+		end
+		if C_QuestLog.IsQuestFlaggedCompleted then
+			local ok, v = pcall(C_QuestLog.IsQuestFlaggedCompleted, id)
+			done = ok and (v and "1" or "0") or ""
+		end
+		if C_QuestLog.GetLogIndexForQuestID then
+			local ok, v = pcall(C_QuestLog.GetLogIndexForQuestID, id)
+			inLog = ok and (v and "1" or "0") or ""
+		end
+		lines[2] = concat({ "qd", level, done, inLog }, "\t")
+	end
+	for _, line in ipairs(ns.Links.Tooltip(kind .. ":" .. id)) do
+		lines[#lines + 1] = "t\t" .. line
+	end
+	return pack(lines)
+end
+
+local function lookup(id, arg)
+	local kind, number = arg:match("^(%a+):(%d+)$")
+	number = tonumber(number)
+	if not (kind == "item" or kind == "spell" or kind == "quest") or not number then
+		Transport.Send(format("state\n%s\nlookup\n0\nerror\tunknown lookup", id))
+		return
+	end
+	Tasks.Spawn("lookup", function()
+		local waited, exists, ready = 0, false, false
+		while true do
+			local ok, e, r = pcall(loaded, kind, number)
+			if not ok then
+				Transport.Send(format("state\n%s\nlookup\n0\nerror\t%s", id, clean(e)))
+				return
+			end
+			exists, ready = e, r
+			if ready or waited >= LOOKUP_WAIT then
+				break
+			end
+			Tasks.Sleep(0.2)
+			waited = waited + 0.2
+		end
+		local payload
+		if exists and not ready then
+			-- It exists, but the client did not load it in time: worth asking again.
+			payload = "loading"
+		elseif exists then
+			local ok, described = pcall(describeLookup, kind, number)
+			payload = ok and described or ("error\t" .. clean(described))
+		elseif kind == "quest" then
+			-- No title even after waiting: unknown, or the client could not load it.
+			payload = "none\tunsure"
+		else
+			payload = "none"
+		end
+		Transport.Send(format("state\n%s\nlookup\n0\n%s", id, payload))
+	end)
+end
+
+-- Responds to pull requests from the app: "fetch\n<id>\n<slice>", and for a lookup
+-- "fetch\n<id>\nlookup\n<kind>:<id>".
 Transport.OnMessage(function(body)
-	local id, slice = body:match("^fetch\n(%d+)\n([a-z]+)$")
+	local id, slice, arg = body:match("^fetch\n(%d+)\n([a-z]+)\n?([a-z]*:?%d*)$")
 	if not id then
+		return
+	end
+	if slice == "lookup" then
+		lookup(id, arg)
 		return
 	end
 	local fn = COLLECTORS[slice]
@@ -927,6 +1285,15 @@ local BUMP_EVENTS = {
 	PLAYER_MONEY = { "bags" },
 	QUEST_LOG_UPDATE = { "quests" },
 	QUEST_WATCH_LIST_CHANGED = { "quests" },
+	-- Quest areas depend on the map the player is on.
+	QUEST_POI_UPDATE = { "quests" },
+	ZONE_CHANGED_NEW_AREA = { "quests" },
+	-- New flight paths are found at a flight master.
+	TAXIMAP_OPENED = { "taxi" },
+	TAXIMAP_CLOSED = { "taxi" },
+	TAXI_NODE_STATUS_CHANGED = { "taxi" },
+	-- A new world (log in, instance, ship) can change the continents the list covers.
+	PLAYER_ENTERING_WORLD = { "taxi" },
 	TRAIT_CONFIG_UPDATED = { "talents" },
 	ACTIVE_COMBAT_CONFIG_CHANGED = { "talents" },
 	PLAYER_SPECIALIZATION_CHANGED = { "talents", "stats" },

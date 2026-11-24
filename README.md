@@ -36,7 +36,7 @@ Familiar only advises. It never moves, casts or targets for you. The design is d
 | ------------------------- | ---------------------------------------------------------------------- | --------------------------- |
 | 0 Foundation              | repository, tooling and the first architecture decisions               | done                        |
 | 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | done                        |
-| 2 Game context and links  | the full character as context, links in both directions                | in progress: 12 game tools  |
+| 2 Game context and links  | the full character as context, links in both directions                | in progress: 14 game tools  |
 | 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    | in progress: built-in agent |
 | 4 Memory                  | a memory that survives a change of brain                               |                             |
 | 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    |                             |
