@@ -499,14 +499,28 @@ function forKey(
 		(key) =>
 			key !== "" &&
 			shown ===
-				form(Buffer.from(atHome(key, home)).subarray(0, 100).toString()),
+				form(
+					Buffer.from(atHome(key, home, "ssh"))
+						.subarray(0, 100)
+						.toString(),
+				),
 	);
 }
 
-/** A path with a leading `~` replaced by the home folder, as ssh does it, in this system's form. */
-function atHome(path: string, home: string): string {
+/**
+ * A path with a leading `~` replaced by the home folder, as ssh does it: in this system's form
+ * for opening the file, or as ssh writes it, `home/rest`, for comparing with what ssh prints.
+ */
+function atHome(
+	path: string,
+	home: string,
+	as: "file" | "ssh" = "file",
+): string {
 	if (path === "~") return home;
-	return /^~[\\/]/.test(path) ? join(home, path.slice(2)) : path;
+	if (!/^~[\\/]/.test(path)) return path;
+	return as === "file"
+		? join(home, path.slice(2))
+		: `${home.replace(/[\\/]+$/, "")}/${path.slice(2)}`;
 }
 
 type Settings = Map<string, string[]>;
