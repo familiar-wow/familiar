@@ -503,12 +503,10 @@ function forKey(
 	);
 }
 
-/** A path with a leading `~` replaced by the home folder, as ssh does it. */
+/** A path with a leading `~` replaced by the home folder, as ssh does it, in this system's form. */
 function atHome(path: string, home: string): string {
 	if (path === "~") return home;
-	return path.startsWith("~/")
-		? `${home.replace(/[\\/]+$/, "")}/${path.slice(2)}`
-		: path;
+	return /^~[\\/]/.test(path) ? join(home, path.slice(2)) : path;
 }
 
 type Settings = Map<string, string[]>;
