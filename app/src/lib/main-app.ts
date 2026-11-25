@@ -99,9 +99,13 @@ export class MainApp {
 		this.changed();
 	}
 
-	/** A request to the current core, for the pages. */
-	call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-		return this.client.request<T>(method, params);
+	/** A request to the current core, for the pages; `timeoutMs` for the slow ones. */
+	call<T>(
+		method: string,
+		params?: Record<string, unknown>,
+		timeoutMs?: number,
+	): Promise<T> {
+		return this.client.request<T>(method, params, timeoutMs);
 	}
 
 	/** Asks the core for its status again, after a page changed something. */
@@ -153,6 +157,8 @@ export class MainApp {
 			);
 			if (gen !== this.view.gen) return;
 			this.view.status = status;
+			// It runs now: what kept it from starting before is no longer the news.
+			if (status?.running) this.view.failure = undefined;
 		} catch (error) {
 			if (gen !== this.view.gen) return;
 			this.view.failure = messageOf(error);

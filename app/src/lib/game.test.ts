@@ -6,6 +6,7 @@ import {
 	GameController,
 	type GameDeps,
 	type GameState,
+	INSTALL_TIMEOUT_MS,
 	outcomeText,
 	presentGame,
 	samePath,
@@ -267,9 +268,15 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 	};
 	let refreshed = 0;
 	let started = 0;
+	const timeouts: Record<string, number> = {};
 	const deps: GameDeps = {
-		call: async <T>(method: string, params?: Record<string, unknown>) => {
+		call: async <T>(
+			method: string,
+			params?: Record<string, unknown>,
+			timeoutMs?: number,
+		) => {
 			calls.push(params ? { method, params } : { method });
+			if (timeoutMs !== undefined) timeouts[method] = timeoutMs;
 			await tick();
 			const reply = replies[method];
 			if (!reply) throw new Error(`Unknown ${method}`);
@@ -293,6 +300,7 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 		saved: () => saved,
 		refreshed: () => refreshed,
 		started: () => started,
+		timeouts,
 	};
 }
 
@@ -406,6 +414,9 @@ test("installing the addon again after an uninstall starts Familiar again", asyn
 	const g = new GameController(f.deps);
 	await g.repair();
 	expect(f.started()).toBe(1);
+	// Thousands of files: far longer than an ordinary request may take.
+	expect(f.timeouts["addon.install"]).toBe(INSTALL_TIMEOUT_MS);
+	expect(INSTALL_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
 	// While it runs, a repair leaves it alone, and a failed install starts nothing.
 	running = true;
 	await g.repair();

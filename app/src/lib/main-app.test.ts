@@ -155,6 +155,28 @@ test("a failed step shows its message and stops the bootstrap", async () => {
 	expect(f.snapshots.at(-1)?.gameLine).toBe("The settings file is broken.");
 });
 
+test("once Familiar runs again, the error that kept it from starting goes", async () => {
+	const f = fakeHost();
+	f.replies.start = {
+		error: "WoW Forever was not found. Choose its _forever_ folder.",
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.failure).toBe(
+		"WoW Forever was not found. Choose its _forever_ folder.",
+	);
+	// The player chose the client and installed the addon; the Game page starts Familiar.
+	f.replies.start = { result: status({ running: true }) };
+	await app.startFamiliar();
+	expect(app.view.failure).toBeUndefined();
+	expect(f.trays.at(-1)?.state).not.toBe("error");
+	// A start that answers but does not run keeps the error where it was.
+	f.replies.start = { error: "Still no client." };
+	await app.startFamiliar();
+	expect(app.view.failure).toBe("Still no client.");
+});
+
 test("the core exiting fails what is pending and shows the last stderr line", async () => {
 	const f = fakeHost();
 	f.replies.start = "never";

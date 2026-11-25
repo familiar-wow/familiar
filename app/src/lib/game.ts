@@ -187,8 +187,15 @@ export function presentGame(
 	return page;
 }
 
+/** Installing writes thousands of small files: about 15 s on a Windows runner, more on a slow disk. */
+export const INSTALL_TIMEOUT_MS = 120_000;
+
 export interface GameDeps {
-	call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+	call<T>(
+		method: string,
+		params?: Record<string, unknown>,
+		timeoutMs?: number,
+	): Promise<T>;
 	/** The folder dialog; null when the player cancels. */
 	pickFolder(): Promise<string | null>;
 	/** Asks the core for its status again, which the overview and this page share. */
@@ -255,6 +262,7 @@ export class GameController {
 				const r = await this.deps.call<Record<string, unknown>>(
 					"addon.install",
 					this.target(),
+					INSTALL_TIMEOUT_MS,
 				);
 				const count = (v: unknown) => (typeof v === "number" ? v : 0);
 				this.set({
@@ -291,7 +299,11 @@ export class GameController {
 		return this.run("uninstall", async () => {
 			this.set({ confirming: false, outcome: undefined });
 			try {
-				await this.deps.call("addon.uninstall", this.target());
+				await this.deps.call(
+					"addon.uninstall",
+					this.target(),
+					INSTALL_TIMEOUT_MS,
+				);
 				this.set({ outcome: { kind: "removed" } });
 			} catch (error) {
 				this.set({ outcome: { kind: "failed", message: messageOf(error) } });

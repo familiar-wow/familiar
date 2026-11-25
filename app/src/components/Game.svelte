@@ -21,7 +21,7 @@ let {
 } = $props();
 
 const game = new GameController({
-	call: (method, params) => app.call(method, params),
+	call: (method, params, timeoutMs) => app.call(method, params, timeoutMs),
 	pickFolder: () => app.pickFolder(),
 	refreshStatus: () => app.refreshStatus(),
 	statusClient: () => app.view.status?.client,
