@@ -7,11 +7,12 @@ import { dirname, join } from "node:path";
 import { AcpBrain } from "../brain/acp.ts";
 import type { Brain, Question, Turn } from "../brain/chat.ts";
 import { ChatGpt, ChatGptError, USAGE_URL } from "../brain/chatgpt.ts";
-import { apiKey, ModelBrain } from "../brain/model.ts";
+import { ModelBrain } from "../brain/model.ts";
 import {
 	describeBrain,
 	prepareBrain,
 	type Running,
+	resolveKey,
 	startFamiliar,
 } from "../familiar.ts";
 import { Game } from "../game.ts";
@@ -40,6 +41,7 @@ import {
 	parseRequest,
 	type Reply,
 } from "./protocol.ts";
+import { launchable, windowsVerbatim } from "./run.ts";
 import { keychain, names, SecretError, type SecretStore } from "./secrets.ts";
 import {
 	hostKey,
@@ -79,6 +81,8 @@ export interface Status {
 	last?: { at: number; ms: number; tools: string[] };
 	/** Warnings for the player, newest last; cleared at each start. */
 	problems: string[];
+	/** The settings changed while Familiar ran: they apply after a restart. */
+	restartNeeded?: boolean;
 }
 
 export interface SidecarOptions {
@@ -107,6 +111,7 @@ export interface Deps {
 	testConnection: typeof testConnection;
 	openUrl: (url: string) => void;
 	now: () => number;
+	env: Record<string, string | undefined>;
 }
 
 type Handler = (params: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -117,11 +122,23 @@ export class Sidecar {
 	private readonly write: (line: string) => void;
 	private readonly recent: Record<string, unknown>[] = [];
 	private running?: Running;
+	/** Start, stop and restart run one after another. */
+	private lifecycle: Promise<unknown> = Promise.resolve();
+	/** Which run the log belongs to; lines of an earlier run change nothing. */
+	private run = 0;
 	private logFile?: string;
 	private readonly handlers: Record<string, Handler>;
 
 	constructor(private readonly o: SidecarOptions) {
-		this.write = o.write ?? ((line) => process.stdout.write(`${line}\n`));
+		this.write =
+			o.write ??
+			((line) => {
+				try {
+					process.stdout.write(`${line}\n`);
+				} catch {
+					// The app has gone; stdin closing ends the sidecar.
+				}
+			});
 		this.deps = {
 			secrets: keychain(),
 			findClients,
@@ -136,6 +153,7 @@ export class Sidecar {
 			testConnection,
 			openUrl,
 			now: Date.now,
+			env: process.env,
 			...o.deps,
 		};
 		this.status = {
@@ -175,11 +193,19 @@ export class Sidecar {
 		this.write(JSON.stringify(reply));
 	}
 
-	/** Stops whatever runs. */
+	/** Stops whatever runs, now. */
 	stop(): void {
+		this.run++;
 		this.running?.stop();
 		this.running = undefined;
 		this.status.running = false;
+	}
+
+	/** Runs a start, stop or restart after the ones before it. */
+	private serial<T>(work: () => Promise<T>): Promise<T> {
+		const next = this.lifecycle.then(work, work);
+		this.lifecycle = next.catch(() => {});
+		return next;
 	}
 
 	private emit(e: Event): void {
@@ -222,12 +248,14 @@ export class Sidecar {
 	}
 
 	/** The log for a run: to its file, to the app as it happens, and into the status. */
-	private log(file: string): Log {
+	private log(file: string, run: number): Log {
 		const sidecar = this;
 		return {
 			event(name, data = {}) {
 				const line = { at: sidecar.deps.now(), event: name, ...data };
 				appendFileSync(file, `${JSON.stringify(line)}\n`);
+				// A run that was stopped may still finish something; the app no longer hears it.
+				if (run !== sidecar.run) return;
 				sidecar.recent.push(line);
 				if (sidecar.recent.length > KEEP) sidecar.recent.shift();
 				sidecar.emit({ event: "log", data: line });
@@ -306,12 +334,14 @@ export class Sidecar {
 					throw new PlayerError(
 						"Close WoW first, so it does not write the helpers' rows back.",
 					);
-				if (this.running) this.stop();
-				const client = await this.client(p.client);
-				const removed = uninstall(wowPaths(client));
-				this.status.addon.installed = false;
-				this.changed();
-				return removed;
+				return this.serial(async () => {
+					this.stop();
+					const client = await this.client(p.client);
+					const removed = uninstall(wowPaths(client));
+					this.status.addon.installed = false;
+					this.changed();
+					return removed;
+				});
 			},
 
 			"agents.find": () => this.deps.findAgents(),
@@ -321,7 +351,9 @@ export class Sidecar {
 				const server = servers.find((s) => s.kind === p.kind);
 				if (!server?.start)
 					throw new PlayerError("Familiar cannot start this server itself.");
-				Bun.spawn(server.start, {
+				const launch = launchable(server.start);
+				Bun.spawn(launch, {
+					windowsVerbatimArguments: windowsVerbatim(launch),
 					stdin: "ignore",
 					stdout: "ignore",
 					stderr: "ignore",
@@ -386,16 +418,18 @@ export class Sidecar {
 
 			"brain.test": (p) => this.testBrain(p.settings),
 
-			start: () => this.start(),
-			stop: () => {
-				this.stop();
-				this.changed();
-				return null;
-			},
-			restart: async () => {
-				this.stop();
-				return this.start();
-			},
+			start: () => this.serial(() => this.start()),
+			stop: () =>
+				this.serial(async () => {
+					this.stop();
+					this.changed();
+					return null;
+				}),
+			restart: () =>
+				this.serial(async () => {
+					this.stop();
+					return this.start();
+				}),
 			shutdown: () => {
 				this.stop();
 				setTimeout(() => process.exit(0), 50);
@@ -420,33 +454,40 @@ export class Sidecar {
 			? this.settings()
 			: undefined;
 		const model = next.brain.model;
-		if (model?.apiKey) {
-			// A key the app sends goes into the keychain, not into the file.
-			await this.deps.secrets.set(names.apiKey(model.provider), model.apiKey);
-			delete model.apiKey;
-		} else if (
+		// The app never sees a key that is in the file, so it cannot send it back: keep it.
+		if (
 			model &&
+			!model.apiKey &&
 			before?.brain.model?.apiKey &&
 			before.brain.model.provider === model.provider
 		)
-			// The app never sees a key that is in the file, so it cannot send it back: keep it.
 			model.apiKey = before.brain.model.apiKey;
+		if (model?.apiKey) {
+			// A key goes into the keychain, not into the file: one the app sends, and one that
+			// was in the file. Without a keychain it stays in the file, readable by its owner only.
+			try {
+				await this.deps.secrets.set(names.apiKey(model.provider), model.apiKey);
+				delete model.apiKey;
+			} catch (error) {
+				if (before?.brain.model?.apiKey !== model.apiKey) throw error;
+			}
+		}
 		saveSettings(this.o.settingsFile, next);
-		this.status.brain = describeBrain(next);
+		// While Familiar runs, the overview shows the brain that answers, not the new one.
+		if (this.status.running) this.status.restartNeeded = true;
+		else this.status.brain = describeBrain(next);
 		this.changed();
 		return this.shownSettings(next);
 	}
 
-	/** The key for a provider: keychain, then settings file, then the provider's variable. */
-	private async keyFor(provider: string): Promise<string | undefined> {
-		const stored = await this.deps.secrets
-			.get(names.apiKey(provider))
-			.catch(() => null);
-		if (stored) return stored;
-		const model = this.settings().brain.model;
-		if (model?.provider === provider && model.apiKey) return model.apiKey;
-		if (!(PROVIDERS as readonly string[]).includes(provider)) return undefined;
-		return apiKey({ provider: provider as Provider, name: "-" });
+	/** The key for a provider, found the same way as when Familiar starts. */
+	private keyFor(provider: string): Promise<string | undefined> {
+		return resolveKey(
+			provider,
+			this.settings(),
+			this.deps.secrets,
+			this.deps.env,
+		);
 	}
 
 	private chatgpt(): ChatGpt {
@@ -491,10 +532,12 @@ export class Sidecar {
 			`familiar-${stamp(this.deps.now())}.jsonl`,
 		);
 		this.status.problems = [];
+		this.status.restartNeeded = false;
 		this.status.client = client;
 		this.status.brain = describeBrain(settings);
-		const log = this.log(this.logFile);
-		this.running = await this.deps.startFamiliar({
+		const run = ++this.run;
+		const log = this.log(this.logFile, run);
+		const started = await this.deps.startFamiliar({
 			paths: wowPaths(client),
 			settings,
 			settingsFile: this.o.settingsFile,
@@ -507,10 +550,16 @@ export class Sidecar {
 				info: (text) => log.event("note", { level: "info", text }),
 				warn: (text) => {
 					log.event("note", { level: "warn", text });
-					this.status.problems.push(text);
+					if (run === this.run) this.status.problems.push(text);
 				},
 			},
 		});
+		// Shut down while starting: this run is no longer wanted.
+		if (run !== this.run) {
+			started.stop();
+			return this.status;
+		}
+		this.running = started;
 		this.status.running = true;
 		this.status.addon.installed = true;
 		this.status.game.running = (await this.deps.clientProcesses()).length > 0;
@@ -581,11 +630,14 @@ export async function serveSidecar(o: SidecarOptions): Promise<void> {
 		const lines = (rest + decoder.decode(chunk, { stream: true })).split("\n");
 		rest = lines.pop() ?? "";
 		// Requests run side by side: a sign-in that waits for the browser blocks nothing.
-		for (const line of lines) pending.push(sidecar.handle(line));
+		for (const line of lines)
+			pending.push(sidecar.handle(line).catch(() => {}));
 	}
-	if (rest) pending.push(sidecar.handle(rest));
-	await Promise.allSettled(pending);
+	if (rest) pending.push(sidecar.handle(rest).catch(() => {}));
+	// The app is gone: stop at once, give replies a moment to finish, then leave. A sign-in
+	// waiting for the browser does not keep Familiar running.
 	sidecar.stop();
+	await Promise.race([Promise.allSettled(pending), Bun.sleep(2000)]);
 	process.exit(0);
 }
 

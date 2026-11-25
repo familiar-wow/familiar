@@ -20,6 +20,7 @@ import {
 import type { Log } from "../log.ts";
 import type { McpServer } from "../mcp/server.ts";
 import type { Settings } from "../settings.ts";
+import { launchable, windowsVerbatim } from "../sidecar/run.ts";
 import { type Brain, prompt, type Question, type Turn } from "./chat.ts";
 
 /** How long an agent may take to stop after a cancelled question before it is killed. */
@@ -174,8 +175,11 @@ export class AcpBrain implements Brain {
 		const { command, permissions } = this.settings;
 		const { folder, log, version, env } = this.options;
 		const started = performance.now();
-		const child = Bun.spawn(command, {
+		// On Windows an npm script such as npx.cmd cannot start without cmd.exe (sidecar/run.ts).
+		const launch = launchable(command);
+		const child = Bun.spawn(launch, {
 			cwd: folder,
+			windowsVerbatimArguments: windowsVerbatim(launch),
 			...(env ? { env: { ...process.env, ...env } } : {}),
 			stdin: "pipe",
 			stdout: "pipe",

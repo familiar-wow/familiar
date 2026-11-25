@@ -5,7 +5,7 @@
 // anywhere.
 import { existsSync } from "node:fs";
 import { posix, win32 } from "node:path";
-import { run as defaultRun, type Runner } from "./run.ts";
+import { run as defaultRun, launchable, type Runner } from "./run.ts";
 
 type Env = Record<string, string | undefined>;
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -228,6 +228,15 @@ export async function findAgents(
 			} else {
 				command = [commandFor(program, spec.program), ...(spec.args ?? [])];
 			}
+			// The command stays readable for settings; launchable turns it into what Bun can
+			// start when it is spawned. A Windows script it cannot start safely is not ready.
+			try {
+				launchable(command, c);
+			} catch {
+				needs.push(
+					"an install folder without %, !, ^, &, |, <, > in its path (Windows cannot start the script from there)",
+				);
+			}
 			if (spec.key && !envVar(c, spec.key.env)) needs.push(spec.key.needs);
 			const version = await versionOf(c, program.path);
 			return {
@@ -311,6 +320,30 @@ function expand(c: Context, value: string): string {
 	);
 }
 
+const UNINSTALL = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+const ROOTS = [
+	{ short: "HKCU", long: "HKEY_CURRENT_USER" },
+	{ short: "HKLM", long: "HKEY_LOCAL_MACHINE" },
+];
+/** Uninstall keys whose data mentions the product, read per root; real matches are one or two. */
+const MAX_KEYS = 5;
+
+/** A string value of one key, from `reg query <key> /v <name>`; undefined if it is not there. */
+async function regValue(
+	c: Context,
+	key: string,
+	name: "DisplayName" | "InstallLocation" | "DisplayIcon",
+): Promise<string | undefined> {
+	const r = await c.run(["reg", "query", key, "/v", name], { timeoutMs: 5000 });
+	if (r.code !== 0) return undefined;
+	const m = r.stdout.match(
+		new RegExp(`^\\s+${name}\\s+REG_(?:EXPAND_)?SZ\\s+(.+?)\\s*$`, "im"),
+	);
+	return m?.[1] ? expand(c, m[1]) : undefined;
+}
+
+const unquote = (value: string) => value.trim().replace(/^"|"$/g, "").trim();
+
 /**
  * The last resort on Windows: the uninstall entries installers write, which name the install
  * folder (InstallLocation) or a file inside it (DisplayIcon). Only a program that exists counts.
@@ -320,12 +353,14 @@ async function fromUninstallKeys(
 	product: string,
 	exe: string,
 ): Promise<string | undefined> {
-	for (const root of ["HKCU", "HKLM"]) {
+	for (const root of ROOTS) {
+		// `/f <product> /d` prints only the values whose data matches, so it finds the keys; their
+		// InstallLocation and DisplayIcon need not contain the product name and are read below.
 		const r = await c.run(
 			[
 				"reg",
 				"query",
-				`${root}\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall`,
+				`${root.short}\\${UNINSTALL}`,
 				"/s",
 				"/f",
 				product,
@@ -333,23 +368,32 @@ async function fromUninstallKeys(
 			],
 			{ timeoutMs: 5000 },
 		);
-		const candidates: string[] = [];
-		for (const m of r.stdout.matchAll(
-			/^\s+(InstallLocation|DisplayIcon)\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/gim,
-		)) {
-			const value = expand(c, m[2] ?? "")
-				.replace(/,\s*-?\d+$/, "") // DisplayIcon may end in an icon index
-				.replace(/^"|"$/g, "")
-				.trim();
-			if (!value) continue;
-			const dir =
-				m[1]?.toLowerCase() === "installlocation"
-					? value
-					: win32.dirname(value);
-			candidates.push(win32.join(dir, exe));
+		const keys = [
+			...new Set(
+				r.stdout
+					.split(/\r?\n/)
+					.map((line) => line.trimEnd())
+					.filter((line) => line.startsWith(`${root.long}\\`))
+					// The short root is the documented spelling for a key name (reg query docs).
+					.map((line) => root.short + line.slice(root.long.length)),
+			),
+		].slice(0, MAX_KEYS);
+		for (const key of keys) {
+			const [name, location, icon] = await Promise.all([
+				regValue(c, key, "DisplayName"),
+				regValue(c, key, "InstallLocation"),
+				regValue(c, key, "DisplayIcon"),
+			]);
+			// A match in a publisher or a comment is another program.
+			if (!name?.toLowerCase().includes(product.toLowerCase())) continue;
+			const dir = location && unquote(location);
+			const file = icon && unquote(icon.replace(/,\s*-?\d+$/, "")); // may end in an icon index
+			const found = firstExisting(c, [
+				dir ? win32.join(dir, exe) : undefined,
+				file ? win32.join(win32.dirname(file), exe) : undefined,
+			]);
+			if (found) return found;
 		}
-		const found = firstExisting(c, candidates);
-		if (found) return found;
 	}
 	return undefined;
 }

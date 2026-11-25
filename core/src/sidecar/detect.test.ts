@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { findAgents, findLocalServers, type LocalServer } from "./detect.ts";
-import type { Runner, RunResult } from "./run.ts";
+import { launchable, type Runner, type RunResult } from "./run.ts";
 
 const ok = (stdout: string): RunResult => ({
 	code: 0,
@@ -195,6 +195,67 @@ test("finds programs off PATH in ~/.local/bin and ~/.npm-global/bin on Linux", a
 	expect(agents.map((a) => [a.id, a.command[0], a.ready])).toEqual([
 		["hermes", "/home/p/.local/bin/hermes", true],
 		["codex", "npx", false],
+	]);
+});
+
+test("Windows npm scripts come back with a command launchable can start", async () => {
+	const nodejs = "C:\\Program Files\\nodejs";
+	const npx = `${nodejs}\\npx.cmd`;
+	const node = `${nodejs}\\node.exe`;
+	const cli = `${nodejs}\\node_modules\\npm\\bin\\npx-cli.js`;
+	const codex = "C:\\Users\\P Q\\AppData\\Roaming\\npm\\codex.cmd";
+	const gemini = "C:\\Users\\P Q\\AppData\\Roaming\\npm\\gemini.cmd";
+	const opts = {
+		env: {
+			USERPROFILE: "C:\\Users\\P Q",
+			APPDATA: "C:\\Users\\P Q\\AppData\\Roaming",
+			ProgramFiles: "C:\\Program Files",
+		},
+		platform: "win32" as const,
+		which: onPath({ npx }),
+		exists: files(codex, gemini, node, cli),
+	};
+	const { runner, calls } = fakeRun();
+	const agents = await findAgents({ ...opts, run: runner });
+	// Settings keep the readable command ...
+	expect(agents.map((a) => [a.id, a.command, a.ready])).toEqual([
+		["codex", ["npx", "-y", "@agentclientprotocol/codex-acp"], true],
+		["gemini", [gemini, "--experimental-acp"], true],
+	]);
+	// ... which the spawning side turns into one Bun can start.
+	expect(agents.map((a) => launchable(a.command, opts))).toEqual([
+		[node, cli, "-y", "@agentclientprotocol/codex-acp"],
+		["cmd.exe", "/d", "/s", "/c", `""${gemini}" "--experimental-acp""`],
+	]);
+	// The version probe goes through run(), which applies launchable itself.
+	expect(calls.map((c) => c.cmd)).toEqual([
+		[codex, "--version"],
+		[gemini, "--version"],
+	]);
+});
+
+test("a Windows script cmd cannot start safely is not ready", async () => {
+	const gemini = "C:\\Users\\Tom & Jerry\\AppData\\Roaming\\npm\\gemini.cmd";
+	const agents = await findAgents({
+		env: {
+			USERPROFILE: "C:\\Users\\Tom & Jerry",
+			APPDATA: "C:\\Users\\Tom & Jerry\\AppData\\Roaming",
+		},
+		platform: "win32",
+		run: fakeRun().runner,
+		which: onPath({}),
+		exists: files(gemini),
+	});
+	expect(agents).toEqual([
+		{
+			id: "gemini",
+			name: "Gemini CLI",
+			command: [gemini, "--experimental-acp"],
+			path: gemini,
+			ready: false,
+			needs:
+				"an install folder without %, !, ^, &, |, <, > in its path (Windows cannot start the script from there)",
+		},
 	]);
 });
 
@@ -407,47 +468,94 @@ test("finds the Windows default install folders", async () => {
 });
 
 // The shape of `reg query <key> /s /f <name> /d`: CRLF lines, four-space indents, a key line
-// per match. Values are made up; the layout follows reg.exe.
-const REG_HKCU_LMSTUDIO = [
-	"",
-	"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\0a1b2c3d-lm-studio",
-	"    DisplayName    REG_SZ    LM Studio 0.3.30",
-	'    UninstallString    REG_SZ    "D:\\Apps\\LM Studio\\Uninstall LM Studio.exe" /currentuser',
-	'    DisplayIcon    REG_SZ    "D:\\Apps\\LM Studio\\LM Studio.exe",0',
-	"",
-	"End of search: 3 match(es) found.",
-	"",
-].join("\r\n");
-const REG_HKLM_OLLAMA = [
-	"",
-	"HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{44E83376-CE68-45EB-8FC1-393500EB558C}_is1",
-	"    Inno Setup: App Path    REG_SZ    %ProgramFiles%\\Ollama",
-	"    InstallLocation    REG_EXPAND_SZ    %ProgramFiles%\\Ollama\\",
-	"    DisplayName    REG_SZ    Ollama version 0.12.6",
-	"    DisplayIcon    REG_SZ    %ProgramFiles%\\Ollama\\app.ico",
-	"    Publisher    REG_SZ    Ollama",
-	"",
-	"HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OllamaGui",
-	"    InstallLocation    REG_SZ    C:\\Tools\\OllamaGui",
-	"",
-	"End of search: 6 match(es) found.",
-	"",
-].join("\r\n");
+// per match, followed by only the values whose data matched. `/v <name>` prints the key line
+// and that one value. Layout as in Microsoft's examples (see detect.ts); values are made up.
+const UNINSTALL = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+const HKCU_KEY = (id: string) => `HKCU\\${UNINSTALL}\\${id}`;
+const HKLM_KEY = (id: string) => `HKLM\\${UNINSTALL}\\${id}`;
+const long = (key: string) =>
+	key
+		.replace(/^HKCU\\/, "HKEY_CURRENT_USER\\")
+		.replace(/^HKLM\\/, "HKEY_LOCAL_MACHINE\\");
+
+/** `reg query <root>\...\Uninstall /s /f <product> /d` with these keys and matching values. */
+function search(keys: Record<string, string[]>): RunResult {
+	const blocks = Object.entries(keys).map(([key, values]) =>
+		[long(key), ...values.map((v) => `    ${v}`), ""].join("\r\n"),
+	);
+	const count = Object.values(keys).flat().length;
+	return ok(
+		["", ...blocks, `End of search: ${count} match(es) found.`, ""].join(
+			"\r\n",
+		),
+	);
+}
+
+/** `reg query <key> /v <name>` answers for every value of a key. */
+function values(
+	key: string,
+	vals: Record<string, [type: string, data: string]>,
+): Record<string, RunResult> {
+	return Object.fromEntries(
+		Object.entries(vals).map(([name, [type, data]]) => [
+			`reg query ${key} /v ${name}`,
+			ok(
+				["", long(key), `    ${name}    ${type}    ${data}`, "", ""].join(
+					"\r\n",
+				),
+			),
+		]),
+	);
+}
+
 const NO_MATCH: RunResult = {
 	code: 1,
 	stdout: "\r\nEnd of search: 0 match(es) found.\r\n",
 	stderr: "",
 	timedOut: false,
 };
-const UNINSTALL = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+
+const LMSTUDIO_KEY = HKCU_KEY("0a1b2c3d-lm-studio");
+const OLLAMA_KEY = HKLM_KEY("{44E83376-CE68-45EB-8FC1-393500EB558C}_is1");
+const OLLAMA_GUI_KEY = HKLM_KEY("OllamaGui");
+
+const searchFor = (root: "HKCU" | "HKLM", product: string) =>
+	`reg query ${root}\\${UNINSTALL} /s /f ${product} /d`;
 
 test("falls back to the uninstall keys in the Windows registry", async () => {
 	const ollama = "C:\\Program Files\\Ollama\\ollama.exe";
 	const app = "D:\\Apps\\LM Studio\\LM Studio.exe";
 	const { runner, calls } = fakeRun({
-		[`reg query HKCU\\${UNINSTALL} /s /f Ollama /d`]: NO_MATCH,
-		[`reg query HKLM\\${UNINSTALL} /s /f Ollama /d`]: ok(REG_HKLM_OLLAMA),
-		[`reg query HKCU\\${UNINSTALL} /s /f LM Studio /d`]: ok(REG_HKCU_LMSTUDIO),
+		[searchFor("HKCU", "Ollama")]: NO_MATCH,
+		[searchFor("HKLM", "Ollama")]: search({
+			[OLLAMA_KEY]: [
+				"Inno Setup: App Path    REG_SZ    %ProgramFiles%\\Ollama",
+				"InstallLocation    REG_EXPAND_SZ    %ProgramFiles%\\Ollama\\",
+				"DisplayName    REG_SZ    Ollama version 0.12.6",
+				"Publisher    REG_SZ    Ollama",
+			],
+			[OLLAMA_GUI_KEY]: ["InstallLocation    REG_SZ    C:\\Tools\\OllamaGui"],
+		}),
+		...values(OLLAMA_KEY, {
+			DisplayName: ["REG_SZ", "Ollama version 0.12.6"],
+			InstallLocation: ["REG_EXPAND_SZ", "%ProgramFiles%\\Ollama\\"],
+			DisplayIcon: ["REG_SZ", "%ProgramFiles%\\Ollama\\app.ico"],
+		}),
+		...values(OLLAMA_GUI_KEY, {
+			DisplayName: ["REG_SZ", "Ollama GUI"],
+			InstallLocation: ["REG_SZ", "C:\\Tools\\OllamaGui"],
+		}),
+		[searchFor("HKCU", "LM Studio")]: search({
+			[LMSTUDIO_KEY]: [
+				"DisplayName    REG_SZ    LM Studio 0.3.30",
+				'UninstallString    REG_SZ    "D:\\Apps\\LM Studio\\Uninstall LM Studio.exe" /currentuser',
+				'DisplayIcon    REG_SZ    "D:\\Apps\\LM Studio\\LM Studio.exe",0',
+			],
+		}),
+		...values(LMSTUDIO_KEY, {
+			DisplayName: ["REG_SZ", "LM Studio 0.3.30"],
+			DisplayIcon: ["REG_SZ", '"D:\\Apps\\LM Studio\\LM Studio.exe",0'],
+		}),
 	});
 	const servers = await findLocalServers({
 		env: {
@@ -470,17 +578,117 @@ test("falls back to the uninstall keys in the Windows registry", async () => {
 	});
 	expect(servers[1]).toMatchObject({ installed: true, path: app });
 	// Both servers are looked up at the same time, so only the order per product is fixed.
-	const queries = (product: string) =>
+	const searches = (product: string) =>
 		calls.map((c) => c.cmd).filter((cmd) => cmd[5] === product);
-	expect(queries("Ollama")).toEqual([
+	expect(searches("Ollama")).toEqual([
 		["reg", "query", `HKCU\\${UNINSTALL}`, "/s", "/f", "Ollama", "/d"],
 		["reg", "query", `HKLM\\${UNINSTALL}`, "/s", "/f", "Ollama", "/d"],
 	]);
 	// Found under HKCU, so HKLM is not asked.
-	expect(queries("LM Studio")).toEqual([
+	expect(searches("LM Studio")).toEqual([
 		["reg", "query", `HKCU\\${UNINSTALL}`, "/s", "/f", "LM Studio", "/d"],
 	]);
+	// The keys are read by name, without the data filter; the first key already has it.
+	const reads = calls.map((c) => c.cmd).filter((cmd) => cmd[3] === "/v");
+	expect(reads.map((cmd) => `${cmd[2]} ${cmd[4]}`).sort()).toEqual(
+		[
+			`${LMSTUDIO_KEY} DisplayIcon`,
+			`${LMSTUDIO_KEY} DisplayName`,
+			`${LMSTUDIO_KEY} InstallLocation`,
+			`${OLLAMA_KEY} DisplayIcon`,
+			`${OLLAMA_KEY} DisplayName`,
+			`${OLLAMA_KEY} InstallLocation`,
+		].sort(),
+	);
 	expect(calls.every((c) => c.timeoutMs === 5000)).toBe(true);
+});
+
+test("finds an install whose folder and icon do not name the product", async () => {
+	// Only DisplayName and Publisher contain "Ollama", so the search prints only those two.
+	const key = HKCU_KEY("{0F3A}_is1");
+	const ollama = "D:\\AI\\server\\ollama.exe";
+	const lmKey = HKCU_KEY("lmstudio");
+	const app = "E:\\x\\LM Studio.exe";
+	const { runner } = fakeRun({
+		[searchFor("HKCU", "Ollama")]: search({
+			[key]: [
+				"DisplayName    REG_SZ    Ollama version 0.12.6",
+				"Publisher    REG_SZ    Ollama",
+			],
+		}),
+		...values(key, {
+			DisplayName: ["REG_SZ", "Ollama version 0.12.6"],
+			InstallLocation: ["REG_SZ", "D:\\AI\\server\\"],
+			DisplayIcon: ["REG_SZ", "D:\\AI\\server\\app.ico"],
+		}),
+		// No InstallLocation at all; the icon is the program, in a folder without the name.
+		[searchFor("HKCU", "LM Studio")]: search({
+			[lmKey]: ["DisplayName    REG_SZ    LM Studio"],
+		}),
+		...values(lmKey, {
+			DisplayName: ["REG_SZ", "LM Studio"],
+			DisplayIcon: ["REG_SZ", "E:\\x\\LM Studio.exe,0"],
+		}),
+	});
+	const servers = await findLocalServers({
+		env: {},
+		platform: "win32",
+		fetch: fakeFetch(() => undefined).fetch,
+		run: runner,
+		which: onPath({}),
+		exists: files(ollama, app),
+	});
+	expect(servers[0]).toMatchObject({ installed: true, path: ollama });
+	expect(servers[1]).toMatchObject({ installed: true, path: app });
+});
+
+test("a key that names the product only in other values is another program", async () => {
+	const key = HKCU_KEY("OpenWebUI");
+	const bundled = "C:\\WebUI\\ollama.exe";
+	const servers = await findLocalServers({
+		env: {},
+		platform: "win32",
+		fetch: fakeFetch(() => undefined).fetch,
+		run: fakeRun({
+			[searchFor("HKCU", "Ollama")]: search({
+				[key]: ["Comments    REG_SZ    A web front end for Ollama"],
+			}),
+			...values(key, {
+				DisplayName: ["REG_SZ", "Open WebUI"],
+				InstallLocation: ["REG_SZ", "C:\\WebUI"],
+			}),
+		}).runner,
+		which: onPath({}),
+		exists: files(bundled),
+	});
+	expect(servers).toEqual([NOTHING, NO_LMSTUDIO]);
+});
+
+test("reads at most 5 matching keys per registry root", async () => {
+	const keys = Array.from({ length: 7 }, (_, i) => HKCU_KEY(`Ollama-${i}`));
+	const { runner, calls } = fakeRun({
+		[searchFor("HKCU", "Ollama")]: search(
+			Object.fromEntries(
+				keys.map((k) => [k, ["DisplayName    REG_SZ    Ollama"]]),
+			),
+		),
+		...Object.assign(
+			{},
+			...keys.map((k) => values(k, { DisplayName: ["REG_SZ", "Ollama"] })),
+		),
+	});
+	await findLocalServers({
+		env: {},
+		platform: "win32",
+		fetch: fakeFetch(() => undefined).fetch,
+		run: runner,
+		which: onPath({}),
+		exists: none,
+	});
+	const read = new Set(
+		calls.filter((c) => c.cmd[3] === "/v").map((c) => c.cmd[2]),
+	);
+	expect([...read]).toEqual(keys.slice(0, 5));
 });
 
 test("ignores uninstall entries whose program is gone", async () => {
@@ -488,7 +696,15 @@ test("ignores uninstall entries whose program is gone", async () => {
 		env: { ProgramFiles: "C:\\Program Files" },
 		platform: "win32",
 		fetch: fakeFetch(() => undefined).fetch,
-		run: async () => ok(REG_HKLM_OLLAMA),
+		run: fakeRun({
+			[searchFor("HKLM", "Ollama")]: search({
+				[OLLAMA_KEY]: ["DisplayName    REG_SZ    Ollama version 0.12.6"],
+			}),
+			...values(OLLAMA_KEY, {
+				DisplayName: ["REG_SZ", "Ollama version 0.12.6"],
+				InstallLocation: ["REG_EXPAND_SZ", "%ProgramFiles%\\Ollama\\"],
+			}),
+		}).runner,
 		which: onPath({}),
 		exists: none,
 	});

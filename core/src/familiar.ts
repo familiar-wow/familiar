@@ -5,16 +5,16 @@ import { dirname } from "node:path";
 import { AcpBrain } from "./brain/acp.ts";
 import type { Brain } from "./brain/chat.ts";
 import { ChatGpt, USAGE_URL } from "./brain/chatgpt.ts";
-import { ModelBrain, missing } from "./brain/model.ts";
+import { apiKey, ModelBrain, missing } from "./brain/model.ts";
 import { Conversation } from "./conversation.ts";
 import { echoBrain } from "./echo.ts";
 import { Game } from "./game.ts";
 import type { Log } from "./log.ts";
 import { type McpServer, serveMcp } from "./mcp/server.ts";
 import { wowTools } from "./mcp/tools.ts";
-import type { Settings } from "./settings.ts";
+import { PROVIDERS, type Provider, type Settings } from "./settings.ts";
 import { names, type SecretStore } from "./sidecar/secrets.ts";
-import { sshCommand } from "./sidecar/ssh.ts";
+import { checkAuth, sshCommand } from "./sidecar/ssh.ts";
 import { Transport } from "./transport/transport.ts";
 import { clientProcesses, clientVersion, type WowPaths } from "./wow/client.ts";
 import { type InstallResult, install, isInstalled } from "./wow/install.ts";
@@ -65,39 +65,52 @@ export function describeBrain(
 }
 
 /**
- * The brain's settings as they run: the API key from the keychain when neither the settings nor
- * the environment have one, and the `ssh` command for an agent on another computer. Nothing of
- * this is written back to the settings file.
+ * The API key for a provider, the same everywhere (start, test, model list): the system
+ * keychain, where the desktop app saves keys; then `apiKey` in the settings; then the provider's
+ * environment variable. Every provider may have one, also a local or compatible server.
+ */
+export async function resolveKey(
+	provider: string,
+	settings: Settings,
+	secrets?: SecretStore,
+	env: Record<string, string | undefined> = process.env,
+): Promise<string | undefined> {
+	const stored = await secrets?.get(names.apiKey(provider)).catch(() => null);
+	if (stored) return stored;
+	const model = settings.brain.model;
+	if (model?.provider === provider && model.apiKey) return model.apiKey;
+	if (!(PROVIDERS as readonly string[]).includes(provider)) return undefined;
+	return apiKey({ provider: provider as Provider, name: "-" }, env);
+}
+
+/**
+ * The brain's settings as they run: the API key as resolveKey() finds it, and the `ssh` command
+ * for an agent on another computer. Nothing of this is written back to the settings file.
  */
 export async function prepareBrain(
 	settings: Settings,
 	o: { secrets?: SecretStore; askpass?: string },
 ): Promise<{ brain: Settings["brain"]; env?: Record<string, string> }> {
 	const brain = structuredClone(settings.brain);
-	if (
-		brain.use === "model" &&
-		brain.model &&
-		missing(brain.model) &&
-		o.secrets
-	) {
-		const key = await o.secrets
-			.get(names.apiKey(brain.model.provider))
-			.catch(() => null);
+	if (brain.use === "model" && brain.model) {
+		const key = await resolveKey(brain.model.provider, settings, o.secrets);
 		if (key) brain.model.apiKey = key;
 	}
 	if (brain.use === "agent" && brain.ssh) {
-		const built = sshCommand(
-			{
-				host: brain.ssh.host,
-				user: brain.ssh.user,
-				identityFile: brain.ssh.identityFile,
-				auth: brain.ssh.auth,
-				command: brain.ssh.command,
-				cwd: brain.cwd,
-				port: settings.mcp.port,
-			},
-			{ askpass: [o.askpass ?? process.execPath] },
-		);
+		// With a saved password or passphrase, ssh -G first says where this very command goes;
+		// askpass answers that computer only, and a computer in between is refused (ssh.ts).
+		const checked = await checkAuth({
+			host: brain.ssh.host,
+			user: brain.ssh.user,
+			identityFile: brain.ssh.identityFile,
+			auth: brain.ssh.auth,
+			command: brain.ssh.command,
+			cwd: brain.cwd,
+			port: settings.mcp.port,
+		});
+		const built = sshCommand(checked, {
+			askpass: [o.askpass ?? process.execPath],
+		});
 		brain.command = built.command;
 		return { brain, env: built.env };
 	}
@@ -158,72 +171,86 @@ export async function startFamiliar(o: StartOptions): Promise<Running> {
 			);
 	}
 
-	// The game's state as tools for the agent (ADR 0007). The echo has no use for them, and the
-	// built-in agent calls them in this process (ADR 0008).
-	const game = new Game();
+	// Nothing may outlive a start that failed, or a stop: no server on the port, no answer that
+	// reaches a later run's transport.
+	let live = true;
+	let transport: Transport | undefined;
+	let brain: (Brain & { stop?: () => void }) | undefined;
 	let wow: McpServer | undefined;
-	if (!o.echo && use === "agent") {
-		const { port } = settings.mcp;
-		try {
-			wow = serveMcp({ port, tools: wowTools(game), version, log });
-			notes.info(`Tools:  ${wow.url}, handed to the agent with each session`);
-		} catch (error) {
-			const taken = (error as { code?: string }).code === "EADDRINUSE";
-			log.event("mcp-error", { port, error: String(error) });
-			notes.warn(
-				taken
-					? `Port ${port} is in use, so the agent gets no game tools. If another Familiar is running, close it: two of them both answer the game. Otherwise set mcp.port in ${settingsFile}.`
-					: `The game tools could not start on port ${port}, so the agent gets none: ${error instanceof Error ? error.message : error}`,
-			);
-		}
-	}
-	if (fresh) notes.info("Addon installed.");
-	else if (result.added + result.updated > 0) notes.info("Addon updated.");
-	if (running && result.added > 0)
-		notes.warn(
-			"WoW is running and new files were added. Quit WoW completely and start it again; /reload does not find new files.",
-		);
-	else if (running && result.updated > 0)
-		notes.info("WoW is running: type /reload in game.");
-
-	// Starts nothing until the first question.
-	const brain: Brain & { stop?: () => void } =
-		use === "model"
-			? new ModelBrain(prepared.brain, {
-					log,
-					tools: wowTools(game),
-					chatgpt: new ChatGpt({ folder: dirname(settingsFile) }),
-				})
-			: new AcpBrain(prepared.brain, {
-					folder: dirname(settingsFile),
-					log,
-					version,
-					wow,
-					env: prepared.env,
-				});
-	const transport = new Transport({
-		paths,
-		log,
-		// The brain answers every question within its timeout, if only to say that there is no
-		// answer. PATIENCE_S on top covers starting the agent and the way back; after that the
-		// window stops waiting (addon/Familiar/Chat.lua).
-		welcome: `Familiar app ${version}\npatience: ${Math.ceil(settings.brain.timeout) + PATIENCE_S}`,
-	});
-	const conversation = new Conversation(
-		o.echo ? echoBrain : brain,
-		(body) => transport.send(body),
-		log,
-		game,
-	);
-	transport.onMessage((body, info) => conversation.receive(body, info));
-	await transport.start();
-	return {
-		install: result,
-		fresh,
-		stop() {
-			transport.stop();
-			brain.stop?.();
-			wow?.stop();
-		},
+	const stop = () => {
+		live = false;
+		transport?.stop();
+		brain?.stop?.();
+		wow?.stop();
 	};
+	try {
+		// The game's state as tools for the agent (ADR 0007). The echo has no use for them, and the
+		// built-in agent calls them in this process (ADR 0008).
+		const game = new Game();
+		if (!o.echo && use === "agent") {
+			const { port } = settings.mcp;
+			try {
+				wow = serveMcp({ port, tools: wowTools(game), version, log });
+				notes.info(`Tools:  ${wow.url}, handed to the agent with each session`);
+			} catch (error) {
+				const taken = (error as { code?: string }).code === "EADDRINUSE";
+				log.event("mcp-error", { port, error: String(error) });
+				notes.warn(
+					taken
+						? `Port ${port} is in use, so the agent gets no game tools. If another Familiar is running, close it: two of them both answer the game. Otherwise set mcp.port in ${settingsFile}.`
+						: `The game tools could not start on port ${port}, so the agent gets none: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		}
+		if (fresh) notes.info("Addon installed.");
+		else if (result.added + result.updated > 0) notes.info("Addon updated.");
+		if (running && result.added > 0)
+			notes.warn(
+				"WoW is running and new files were added. Quit WoW completely and start it again; /reload does not find new files.",
+			);
+		else if (running && result.updated > 0)
+			notes.info("WoW is running: type /reload in game.");
+
+		// Starts nothing until the first question.
+		brain =
+			use === "model"
+				? new ModelBrain(prepared.brain, {
+						log,
+						tools: wowTools(game),
+						chatgpt: new ChatGpt({ folder: dirname(settingsFile) }),
+					})
+				: new AcpBrain(prepared.brain, {
+						folder: dirname(settingsFile),
+						log,
+						version,
+						wow,
+						env: prepared.env,
+					});
+		const lane = new Transport({
+			paths,
+			log,
+			// The brain answers every question within its timeout, if only to say that there is no
+			// answer. PATIENCE_S on top covers starting the agent and the way back; after that the
+			// window stops waiting (addon/Familiar/Chat.lua).
+			welcome: `Familiar app ${version}\npatience: ${Math.ceil(settings.brain.timeout) + PATIENCE_S}`,
+		});
+		transport = lane;
+		const conversation = new Conversation(
+			o.echo ? echoBrain : brain,
+			(body) => {
+				if (!live) throw new Error("Familiar has stopped");
+				lane.send(body);
+			},
+			log,
+			game,
+		);
+		lane.onMessage((body, info) => {
+			if (live) conversation.receive(body, info);
+		});
+		await lane.start();
+	} catch (error) {
+		stop();
+		throw error;
+	}
+	return { install: result, fresh, stop };
 }

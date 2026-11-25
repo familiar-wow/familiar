@@ -205,9 +205,22 @@ async function main(): Promise<void> {
 	if (values.help) return void console.log(USAGE);
 	if (values.version) return void console.log(VERSION);
 	const command = positionals[0] ?? "run";
-	if (command === "check") return check(await resolveClient(values.wow));
+	const settingsFile = resolve(
+		values.settings ?? join(settingsFolder(), "settings.json"),
+	);
+	// The client the player chose in the app, unless --wow names another: the same for every
+	// command, so `check` and `uninstall` look at the client Familiar runs with.
+	const chosen = (): string | undefined => {
+		if (values.wow) return values.wow;
+		try {
+			return loadSettings(settingsFile).game.client;
+		} catch {
+			return undefined;
+		}
+	};
+	if (command === "check") return check(await resolveClient(chosen()));
 	if (command === "uninstall") {
-		const paths = await resolveClient(values.wow);
+		const paths = await resolveClient(chosen());
 		if ((await clientProcesses()).length > 0)
 			exitWith("Close WoW first, so it does not write the helpers' rows back.");
 		const removed = uninstall(paths);
@@ -224,9 +237,6 @@ async function main(): Promise<void> {
 			? login(folder)
 			: logout(folder, values.forget ?? false);
 	}
-	const settingsFile = resolve(
-		values.settings ?? join(settingsFolder(), "settings.json"),
-	);
 	if (command === "sidecar")
 		return serveSidecar({
 			settingsFile,
@@ -241,7 +251,7 @@ async function main(): Promise<void> {
 	} catch (error) {
 		exitWith(error instanceof Error ? error.message : String(error));
 	}
-	await run(await resolveClient(values.wow ?? settings.game.client), {
+	await run(await resolveClient(chosen()), {
 		logs: resolve(values.logs ?? "familiar-logs"),
 		settingsFile,
 		settings,

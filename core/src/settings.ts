@@ -3,11 +3,13 @@
 // is set up in the agent (ADR 0006). For the built-in agent it names the model and its provider
 // (ADR 0008); the key belongs in the system keychain, not here.
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -26,6 +28,9 @@ export const PROVIDERS = [
 	"openai-compatible",
 	"chatgpt",
 ] as const;
+
+/** A provider the built-in agent can ask. */
+export type Provider = (typeof PROVIDERS)[number];
 
 const Model = z
 	.strictObject({
@@ -130,14 +135,24 @@ export function parseSettings(json: unknown, where = "The settings"): Settings {
 
 /**
  * Writes the settings: to a new file next to the old one, then renamed over it, so a crash
- * never leaves half a file.
+ * never leaves half a file. The new file is no more open than the old one, and only its owner
+ * may read it while it holds an API key.
  */
 export function saveSettings(file: string, settings: Settings): void {
 	const clean = parseSettings(settings);
 	mkdirSync(dirname(file), { recursive: true });
 	const tmp = `${file}.${process.pid}.tmp`;
+	let mode = 0o644;
 	try {
-		writeFileSync(tmp, `${JSON.stringify(clean, null, "\t")}\n`);
+		mode = statSync(file).mode & 0o777;
+	} catch {
+		// A new file.
+	}
+	if (clean.brain.model?.apiKey) mode &= 0o700;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(clean, null, "\t")}\n`, { mode });
+		// The umask may have taken away less than we want gone.
+		if (process.platform !== "win32") chmodSync(tmp, mode);
 		renameSync(tmp, file);
 	} catch (error) {
 		rmSync(tmp, { force: true });

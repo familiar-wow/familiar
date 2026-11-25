@@ -1,17 +1,19 @@
 // The sidecar against fake programs and a fake keychain: requests in, replies and events out.
 import { afterAll, expect, test } from "bun:test";
 import {
+	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Log } from "../log.ts";
 import { ListError } from "./models.ts";
-import { memoryStore, names } from "./secrets.ts";
+import { memoryStore, names, SecretError } from "./secrets.ts";
 import { clientFolder, type Deps, Sidecar } from "./sidecar.ts";
 
 const folders: string[] = [];
@@ -106,11 +108,13 @@ test("settings: the app never sees a key, and a key it sends goes to the keychai
 	expect(got.settings.brain.model.apiKey).toBeUndefined();
 	expect(got.keys.openrouter).toBe(true);
 
-	// Sent back without the key (the app never had it): the key in the file stays.
+	// Sent back without the key (the app never had it): the key from the file is kept, and moves
+	// into the keychain.
 	await call("settings.set", { settings: got.settings });
 	expect(
 		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
-	).toBe("sk-in-file");
+	).toBeUndefined();
+	expect(await store.get(names.apiKey("openrouter"))).toBe("sk-in-file");
 
 	// A new key from the app: into the keychain, out of the file.
 	const next = structuredClone(got.settings);
@@ -276,4 +280,152 @@ test("start runs Familiar and the status follows what the log says", async () =>
 	).toBe(2);
 	await call("stop");
 	expect(stopped).toBe(true);
+});
+
+test("two starts at once start Familiar once, and a stop during the start wins", async () => {
+	const { client } = wow();
+	let starts = 0;
+	const stopped: number[] = [];
+	let release: () => void = () => {};
+	const { call } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async () => {
+				const me = ++starts;
+				await new Promise<void>((r) => {
+					release = r;
+				});
+				return {
+					install: { added: 0, updated: 0, removed: 0 } as never,
+					fresh: false,
+					stop: () => void stopped.push(me),
+				};
+			},
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	const a = call("start");
+	const b = call("start");
+	await Bun.sleep(20);
+	release();
+	await a;
+	await Bun.sleep(20);
+	expect((await b).result).toMatchObject({ running: true });
+	expect(starts).toBe(1);
+
+	// A stop sent while a restart is still starting: the new run is stopped as soon as it is up.
+	const restart = call("restart");
+	await Bun.sleep(20);
+	const stop = call("stop");
+	release();
+	await restart;
+	await stop;
+	expect(starts).toBe(2);
+	expect(stopped).toEqual([1, 2]);
+	expect(((await call("status")).result as { running: boolean }).running).toBe(
+		false,
+	);
+});
+
+test("what a stopped run still logs no longer reaches the app", async () => {
+	const { client } = wow();
+	let log: Log | undefined;
+	const { call, out } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async (o) => {
+				log = o.log;
+				return { install: {} as never, fresh: false, stop: () => {} };
+			},
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	await call("start");
+	await call("stop");
+	const before = out.length;
+	log?.event("answered", { ms: 1, bytes: 1, tools: [] });
+	expect(out.length).toBe(before);
+	expect(
+		((await call("status")).result as { last?: unknown }).last,
+	).toBeUndefined();
+});
+
+test("settings changed while running wait for a restart", async () => {
+	const { client } = wow();
+	const { call } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async () => ({
+				install: {} as never,
+				fresh: false,
+				stop: () => {},
+			}),
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	await call("start");
+	const got = (await call("settings.get")).result as {
+		settings: Record<string, unknown>;
+	};
+	const next = structuredClone(got.settings) as {
+		brain: { command: string[] };
+	};
+	next.brain.command = ["codex-acp"];
+	await call("settings.set", { settings: next });
+	expect((await call("status")).result).toMatchObject({
+		restartNeeded: true,
+		brain: { command: ["hermes", "acp"] },
+	});
+});
+
+test("a key in the file moves into the keychain when the settings are saved", async () => {
+	const { call, store, settingsFile } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: {
+					provider: "openai-compatible",
+					name: "m",
+					baseUrl: "http://x/v1",
+					apiKey: "sk-file",
+				},
+			},
+		},
+	);
+	const got = (await call("settings.get")).result as { settings: unknown };
+	await call("settings.set", { settings: got.settings });
+	expect(
+		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
+	).toBeUndefined();
+	expect(await store.get(names.apiKey("openai-compatible"))).toBe("sk-file");
+});
+
+test("without a keychain the key stays in the file, readable only by its owner", async () => {
+	if (process.platform === "win32") return;
+	const broken = {
+		get: async () => null,
+		set: async () => {
+			throw new SecretError("The system keychain is not available.");
+		},
+		delete: async () => false,
+	};
+	const { call, settingsFile } = sidecar(
+		{ secrets: broken },
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	chmodSync(settingsFile, 0o644);
+	const got = (await call("settings.get")).result as { settings: unknown };
+	expect(
+		(await call("settings.set", { settings: got.settings })).error,
+	).toBeUndefined();
+	expect(
+		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
+	).toBe("sk-file");
+	expect(statSync(settingsFile).mode & 0o777).toBe(0o600);
 });
