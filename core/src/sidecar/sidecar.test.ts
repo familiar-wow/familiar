@@ -159,7 +159,12 @@ test("finds the game, and takes a folder, its parent or the game's program", asy
 	expect((await call("game.check", { path: temp() })).error?.message).toContain(
 		"not a WoW Forever folder",
 	);
-	// Installed, the addon's own version shows.
+});
+
+// Installing writes thousands of helper files: about 15 s on a Windows runner.
+test("an installed addon shows its own version", async () => {
+	const { client } = wow();
+	const { call } = sidecar({ findClients: async () => [client] });
 	expect((await call("addon.install", { client })).error).toBeUndefined();
 	expect((await call("game.find")).result).toEqual([
 		{
@@ -170,7 +175,7 @@ test("finds the game, and takes a folder, its parent or the game's program", asy
 			addonVersion: "0.0.0-test",
 		},
 	]);
-});
+}, 60_000);
 
 test("refuses a test realm, also one that would pass as a client folder", async () => {
 	const root = temp();
