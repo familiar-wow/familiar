@@ -222,6 +222,23 @@ test("reports provider errors and the timeout in words for the player", async ()
 		{ log, tools: [], model: slow },
 	);
 	expect(await late.ask(hero, turn().t)).toBe("No answer within 0.2 s.");
+
+	// Stopped while it works, the brain gives up at once instead of when its time is up.
+	const stopped = new ModelBrain(
+		{ ...settings, timeout: 30 },
+		{ log, tools: [], model: slow },
+	);
+	const started = performance.now();
+	const answer = stopped.ask(hero, turn().t);
+	await Bun.sleep(50);
+	const waiting = stopped.ask(hero, turn().t);
+	stopped.stop();
+	await answer;
+	expect(performance.now() - started).toBeLessThan(5000);
+	// The question that waited behind it never reaches the model.
+	const calls = slow.doGenerateCalls.length;
+	expect(await waiting).toBe("Familiar has stopped.");
+	expect(slow.doGenerateCalls.length).toBe(calls);
 });
 
 test("finds the API key in the settings or the provider's environment variable", () => {

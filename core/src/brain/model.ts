@@ -115,6 +115,9 @@ export class ModelBrain implements Brain {
 	private model?: LanguageModel;
 	/** Checks the model's arguments against each tool's schema before the tool runs. */
 	private readonly validators = new Map<string, z.ZodType>();
+	/** Aborts the answer in progress, so a stopped Familiar does not keep a model working. */
+	private current?: AbortController;
+	private stopped = false;
 
 	constructor(
 		private readonly settings: Settings["brain"],
@@ -132,7 +135,14 @@ export class ModelBrain implements Brain {
 	ask(question: Question, turn: Turn): Promise<string> {
 		return new Promise((reply) => {
 			this.queue = this.queue
-				.then(async () => reply(await this.answer(question, turn)))
+				.then(async () =>
+					// A stopped brain asks the model nothing more: that would cost the player.
+					reply(
+						this.stopped
+							? "Familiar has stopped."
+							: await this.answer(question, turn),
+					),
+				)
 				// answer() does not throw. Should it ever, the player still hears, and the next
 				// question still runs.
 				.catch((error) =>
@@ -146,6 +156,12 @@ export class ModelBrain implements Brain {
 		this.history.clear();
 	}
 
+	/** Stops the answer in progress, as if its time were up, and every question still waiting. */
+	stop(): void {
+		this.stopped = true;
+		this.current?.abort();
+	}
+
 	private async answer(question: Question, turn: Turn): Promise<string> {
 		const settings = this.settings.model;
 		if (!settings)
@@ -155,6 +171,7 @@ export class ModelBrain implements Brain {
 		let key = this.options.model ? undefined : apiKey(settings);
 		const timeout = this.settings.timeout;
 		const abort = new AbortController();
+		this.current = abort;
 		const timer = setTimeout(() => abort.abort(), timeout * 1000);
 		// The deadline holds even if a provider, a tool or the sign-in ignores the abort.
 		const deadline = new Promise<never>((_, reject) =>

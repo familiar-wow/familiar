@@ -32,6 +32,8 @@ bun run start uninstall   # remove the addon and its helpers; close WoW first
 bun run build             # single executables for Windows and Linux in core/dist/
 ```
 
+The desktop app starts the same program as `familiar sidecar` and drives it over stdin and stdout; see [the sidecar protocol](../docs/sidecar.md).
+
 `--wow <folder>` names the `_forever_` client folder if `familiar` does not find it. The game sees new files only after a full restart, not after `/reload`, so restart WoW after the first install. `--echo` answers with an echo instead of the brain, to test the transport. Asked `tools`, the echo reports two tools first; asked `permission`, it asks the player.
 
 ## Brain
@@ -126,7 +128,7 @@ For players without an agent of their own ([ADR 0008](../docs/adr/0008-built-in-
 | `openai-compatible` | none, or `apiKey`                 | any OpenAI-compatible server; needs `baseUrl` |
 | `chatgpt`           | none: `familiar login chatgpt`    | your ChatGPT plan instead of a key, see below |
 
-`name` is the model's name at the provider. `baseUrl` overrides the provider's address, for example for Ollama on another PC. `apiKey` in the settings works too, but the environment variable keeps the key out of the file; the desktop app will keep it in the system keychain. Familiar sends the key only to the provider and never logs it. Without a key, the game window says which variable to set.
+`name` is the model's name at the provider. `baseUrl` overrides the provider's address, for example for Ollama on another PC. `apiKey` in the settings works too, but the environment variable keeps the key out of the file. A key the desktop app saves goes into the system keychain (Windows Credential Manager, macOS Keychain, Secret Service), which Familiar reads when the settings and the environment have none. Familiar sends the key only to the provider and never logs it. Without a key, the game window says which variable to set.
 
 Pick a fast model that can call tools. A small model answers questions about your character in a few seconds; a large model with long reasoning takes much longer and costs more. What you pay is between you and the provider. Tested through OpenRouter on 2026-11-23, each answering in 2 to 8 s: `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `google/gemini-3.5-flash` and `deepseek/deepseek-v4.1-flash`.
 
