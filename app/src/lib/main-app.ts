@@ -531,13 +531,8 @@ export class MainApp {
 					}
 					this.changed();
 					await this.host.setCloseMode(app?.close === "quit" ? "quit" : "tray");
-					// The system's entry follows the setting, also after a reinstall removed it. A
-					// failure here keeps Familiar going: the Settings page shows the real state.
-					const want = app?.autostart === true;
-					try {
-						if ((await this.host.autostart()) !== want)
-							await this.host.setAutostart(want);
-					} catch {}
+					// The autostart entry is left as it is: the player may have switched it off in
+					// the system (Windows' Startup apps). The Settings page shows a difference.
 				},
 			},
 			{

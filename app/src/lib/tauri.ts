@@ -3,11 +3,6 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import {
-	isEnabled as autostartEnabled,
-	disable as disableAutostart,
-	enable as enableAutostart,
-} from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Host, SidecarState } from "./types.ts";
 
@@ -38,8 +33,8 @@ export function tauriHost(): Host {
 			await invoke("quit");
 		},
 		version: () => getVersion(),
-		autostart: () => autostartEnabled(),
-		setAutostart: (on) => (on ? enableAutostart() : disableAutostart()),
+		autostart: () => invoke<boolean>("autostart_enabled"),
+		setAutostart: (on) => invoke<void>("set_autostart", { on }),
 		pickFolder: async (title) => {
 			const chosen = await open({ directory: true, multiple: false, title });
 			return typeof chosen === "string" ? chosen : null;

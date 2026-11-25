@@ -211,6 +211,8 @@ export interface SettingsPage {
 		folder?: string;
 		folderError?: string;
 		open: Field;
+		/** Providers whose API key is still in the settings file, not in the keychain. */
+		keysInFile: string[];
 	};
 	addon: { text: string; tone: AddonTone; client?: string };
 	about: { version?: string; core?: string };
@@ -251,7 +253,12 @@ export function presentSettings(
 					platform: platformName(state.platform),
 				})
 			: state.coreVersion;
-	const files: SettingsPage["files"] = { open: field("openLogs") };
+	const files: SettingsPage["files"] = {
+		open: field("openLogs"),
+		keysInFile: Object.entries(view.keySources)
+			.filter(([, source]) => source === "file")
+			.map(([provider]) => provider),
+	};
 	if (state.file) files.file = state.file;
 	if (state.fileError) files.fileError = oneLine(state.fileError);
 	if (state.folder) files.folder = state.folder;

@@ -236,6 +236,25 @@ test("the autostart switch shows what the system does, and says when the setting
 	expect(p.autostart.differs).toBe(false);
 });
 
+test("a key still in the settings file is named, so the player does not share the file", () => {
+	const p = presentSettings(
+		{ busy: [], errors: {} },
+		view({
+			keySources: {
+				openrouter: "file",
+				openai: "keychain",
+				deepseek: "environment",
+			},
+		}),
+		t,
+		"en",
+	);
+	expect(p.files.keysInFile).toEqual(["openrouter"]);
+	expect(
+		presentSettings({ busy: [], errors: {} }, view(), t, "en").files.keysInFile,
+	).toEqual([]);
+});
+
 test("an app version that cannot be read says so, instead of waiting forever", async () => {
 	const f = fakes();
 	f.deps.appVersion = async () => {
@@ -291,6 +310,7 @@ test("presents the page: saved values, the banner, files and versions", () => {
 		file: "/f/settings.json",
 		folder: "/f/logs",
 		open: { busy: false },
+		keysInFile: [],
 	});
 	expect(p.about).toEqual({ version: "0.16.0", core: "0.16.0 on Linux" });
 });

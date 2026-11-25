@@ -779,7 +779,8 @@ test("autostart: the system's entry first, then the setting; a failure saves not
 	expect(f.params.length).toBe(before);
 });
 
-test("at start the system's autostart entry follows the setting", async () => {
+test("at start the system's autostart entry is left alone, also when it differs", async () => {
+	// Switched off in Windows' Startup apps: Familiar must not switch it back on.
 	const f = fakeHost();
 	f.replies["settings.get"] = {
 		result: {
@@ -790,16 +791,7 @@ test("at start the system's autostart entry follows the setting", async () => {
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
 	await settle();
-	expect(f.autostartCalls).toEqual([true]);
-	// Already as the setting says: nothing is touched.
-	const g = fakeHost();
-	g.replies["settings.get"] = {
-		result: { settings: { app: { setupDone: true } }, keys: {} },
-	};
-	const other = new MainApp(g.host, { systemLanguage: "en-US" });
-	await other.start();
-	await settle();
-	expect(g.autostartCalls).toEqual([]);
+	expect(f.autostartCalls).toEqual([]);
 });
 
 test("openBrain opens a kind's tab once; the next visit follows the brain that answers", async () => {

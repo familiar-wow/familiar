@@ -33,22 +33,28 @@ first install, quit WoW completely and start it again.
 
 ## What Familiar keeps, and where
 
-| What                                    | Windows                                                                                    | Linux                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| Settings (`settings.json`)              | `%APPDATA%\Familiar`                                                                       | `~/.config/familiar` (or `$XDG_CONFIG_HOME/familiar`) |
-| Logs (`logs/familiar-<time>.jsonl`)     | `logs` next to the settings                                                                | `logs` next to the settings                           |
-| ChatGPT sign-in (`chatgpt.json`)        | next to the settings                                                                       | next to the settings                                  |
-| API keys, SSH passwords and passphrases | Windows Credential Manager                                                                 | the Secret Service (GNOME Keyring, KWallet)           |
-| Start with the system, when on          | a `Familiar` value under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` | `~/.config/autostart/Familiar.desktop`                |
-| The addon                               | `Interface\AddOns` of your WoW Forever client                                              | `Interface/AddOns` of your WoW Forever client         |
+| What                                    | Windows                                                                                    | Linux                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| Settings (`settings.json`)              | `%APPDATA%\Familiar`                                                                       | `~/.config/familiar` (or `$XDG_CONFIG_HOME/familiar`)                |
+| Logs (`logs/familiar-<time>.jsonl`)     | `logs` next to the settings                                                                | `logs` next to the settings                                          |
+| ChatGPT sign-in (`chatgpt.json`)        | next to the settings                                                                       | next to the settings                                                 |
+| API keys, SSH passwords and passphrases | Windows Credential Manager                                                                 | the Secret Service (GNOME Keyring, KWallet)                          |
+| Start with the system, when on          | a `Familiar` value under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` | `~/.config/autostart/Familiar.desktop` (or under `$XDG_CONFIG_HOME`) |
+| The addon                               | `Interface\AddOns` of your WoW Forever client                                              | `Interface/AddOns` of your WoW Forever client                        |
 
-- **Settings:** the file holds no keys. The app shows its path on the Settings page.
+- **Settings:** keys you enter in the app never go into this file. An API key written into it by hand, or by
+  an older version, stays there until the settings are next saved; then it moves into the keychain, if the
+  system has one. The Settings page names such a key, and the app shows the file's path.
 - **Logs:** they hold what Familiar did, including the text of your questions, the tools the brain used and how
   long it took. They never leave your PC. The Logs page shows them, and the Settings page opens their folder.
-- **ChatGPT sign-in:** only your user can read the file. Signing out in the app removes it.
+- **ChatGPT sign-in:** only your user can read the file. Signing out in the app removes the saved sign-in
+  tokens; the file itself stays, with the account it was, until you delete the settings folder.
 - **Keychain:** entries of the service `Familiar`, named `api-key/<provider>`, `ssh-password/<computer>` and
-  `ssh-passphrase/<computer>`. A key that is still in an old `settings.json` moves into the keychain the next time
-  the settings are saved.
+  `ssh-passphrase/<computer>`.
+- **Start with the system:** off unless you turn it on, on the Settings page. On Windows, Familiar then starts in
+  the tray without its window, and turning it off in Windows' "Startup apps" is respected: Familiar never turns
+  it back on by itself. On Linux it starts with its window, because whether a tray icon can be shown is not
+  known at login.
 - **Addon:** the `Familiar` folder plus 256 small helper addons `Familiar_L000` to `Familiar_L255`, which carry
   the messages from the game to the core ([ADR 0005](adr/0005-transport-addons-txt-lane-and-font-bank.md)).
 

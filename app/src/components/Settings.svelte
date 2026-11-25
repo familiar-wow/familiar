@@ -221,6 +221,11 @@ function timeoutKey(event: KeyboardEvent) {
 			</dd>
 		</dl>
 		<p class="line">{t("settings.files.keychain")}</p>
+		{#if p.files.keysInFile.length > 0}
+			<p class="line error-text">
+				{t("settings.files.keysInFile", { providers: p.files.keysInFile.join(", ") })}
+			</p>
+		{/if}
 	</section>
 
 	<h2>{t("settings.addon.title")}</h2>
