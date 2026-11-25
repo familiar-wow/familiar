@@ -206,6 +206,10 @@ export interface GameDeps {
 	running(): boolean;
 	/** Starts Familiar with the saved settings, as when the app starts. */
 	start(): Promise<void>;
+	/** Reads, changes and saves the settings, after any change under way (MainApp). */
+	updateSettings(
+		change: (settings: Record<string, unknown>) => Record<string, unknown>,
+	): Promise<unknown>;
 }
 
 export class GameController {
@@ -324,12 +328,10 @@ export class GameController {
 	/** The settings round trip: only `game.client` changes. */
 	private async save(client: string): Promise<void> {
 		try {
-			const got = await this.deps.call<{ settings?: Record<string, unknown> }>(
-				"settings.get",
+			// Through the app's one queue of settings changes, so no other page's save is lost.
+			await this.deps.updateSettings((settings) =>
+				withClient(settings as Record<string, unknown>, client),
 			);
-			await this.deps.call("settings.set", {
-				settings: withClient(got?.settings ?? {}, client),
-			});
 		} catch (error) {
 			this.set({ findError: messageOf(error) });
 		}

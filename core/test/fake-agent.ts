@@ -32,7 +32,10 @@ const output = new WritableStream<Uint8Array>({
 });
 
 agent({ name: "fake-agent" })
-	.onRequest(methods.agent.initialize, () => {
+	// --hang-init: never answers initialize, as an agent stuck at start.
+	.onRequest(methods.agent.initialize, async () => {
+		if (process.argv.includes("--hang-init"))
+			await new Promise<never>(() => {});
 		log("ready");
 		return {
 			protocolVersion: PROTOCOL_VERSION,
@@ -64,7 +67,10 @@ agent({ name: "fake-agent" })
 		const text = params.prompt
 			.map((b) => (b.type === "text" ? b.text : ""))
 			.join("");
-		const question = text.slice(text.lastIndexOf("Question: ") + 10);
+		// --ask: every question is "permission", such as the app's test question.
+		const question = process.argv.includes("--ask")
+			? "permission"
+			: text.slice(text.lastIndexOf("Question: ") + 10);
 		log(`question: ${question}`);
 		const say = (answer: string) =>
 			client.notify(methods.client.session.update, {

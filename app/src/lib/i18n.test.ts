@@ -1,13 +1,31 @@
 import { expect, test } from "bun:test";
-import de from "../locales/de.json" with { type: "json" };
-import en from "../locales/en.json" with { type: "json" };
-import { resolveLanguage, seconds, translator } from "./i18n.ts";
+import {
+	locales,
+	parts,
+	resolveLanguage,
+	seconds,
+	translator,
+} from "./i18n.ts";
 
+const { en, de } = locales;
 const placeholders = (text: string) =>
 	[...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
 
-test("English and German have the same keys", () => {
-	expect(Object.keys(de).sort()).toEqual(Object.keys(en).sort());
+test("English and German have the same keys, in every part", () => {
+	for (const [name, part] of Object.entries(parts))
+		expect([name, Object.keys(part.de).sort()]).toEqual([
+			name,
+			Object.keys(part.en).sort(),
+		]);
+});
+
+test("no key is in two parts: a later part would hide the earlier text", () => {
+	const seen = new Map<string, string>();
+	for (const [name, part] of Object.entries(parts))
+		for (const key of Object.keys(part.en)) {
+			expect([key, seen.get(key)]).toEqual([key, undefined]);
+			seen.set(key, name);
+		}
 });
 
 test("each German text has the same placeholders as the English one", () => {

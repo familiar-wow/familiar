@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { AcpBrain } from "../brain/acp.ts";
 import type { Brain, Question, Turn } from "../brain/chat.ts";
 import { ChatGpt, ChatGptError, USAGE_URL } from "../brain/chatgpt.ts";
-import { ModelBrain } from "../brain/model.ts";
+import { apiKey, ModelBrain } from "../brain/model.ts";
 import {
 	describeBrain,
 	prepareBrain,
@@ -38,7 +38,7 @@ import {
 	isInstalled,
 	uninstall,
 } from "../wow/install.ts";
-import { findAgents, findLocalServers } from "./detect.ts";
+import { findAgents, findLocalServers, serverModels } from "./detect.ts";
 import { ListError, listModels, type Provider } from "./models.ts";
 import {
 	type Event,
@@ -52,6 +52,7 @@ import {
 	hostKey,
 	resolveHost,
 	type SshAgentConfig,
+	SshError,
 	testConnection,
 	trustHost,
 } from "./ssh.ts";
@@ -64,6 +65,23 @@ const KEYED: readonly Provider[] = [
 	"openrouter",
 	"deepseek",
 ];
+type KeySource = "keychain" | "file" | "environment";
+
+/** What the app's test answers. */
+type TestResult = {
+	ok: boolean;
+	ms: number;
+	answer?: string;
+	problem?: string;
+	tools: string[];
+};
+
+export const TEST_QUESTION =
+	"This is a test from the Familiar app. Answer in one short sentence, without tools.";
+
+/** The app's test: the answer's own limit, and the whole test with starting the brain. */
+export const TEST_ANSWER_S = 60;
+export const TEST_TOTAL_S = 80;
 /** Log lines the app can ask for again, such as after its window was closed. */
 const KEEP = 500;
 
@@ -100,6 +118,8 @@ export interface SidecarOptions {
 	write?: (line: string) => void;
 	/** Replaced in tests. */
 	deps?: Partial<Deps>;
+	/** The brain test's whole deadline; shorter in tests. */
+	testDeadlineMs?: number;
 }
 
 export interface Deps {
@@ -107,6 +127,7 @@ export interface Deps {
 	findClients: typeof findClients;
 	findAgents: typeof findAgents;
 	findLocalServers: typeof findLocalServers;
+	serverModels: typeof serverModels;
 	listModels: typeof listModels;
 	startFamiliar: typeof startFamiliar;
 	clientProcesses: typeof clientProcesses;
@@ -157,6 +178,7 @@ export class Sidecar {
 			findClients,
 			findAgents,
 			findLocalServers,
+			serverModels,
 			listModels,
 			startFamiliar,
 			clientProcesses,
@@ -383,6 +405,15 @@ export class Sidecar {
 
 			"agents.find": () => this.deps.findAgents(),
 			"local.find": () => this.deps.findLocalServers(),
+			"local.models": async (p) => {
+				const baseUrl = serverAddress(p.baseUrl);
+				const models = await this.deps.serverModels(baseUrl);
+				if (!models)
+					throw new PlayerError(
+						"No OpenAI-compatible server answered at this address. Check it ends in /v1 and the server runs.",
+					);
+				return models;
+			},
 			"local.start": async (p) => {
 				const servers = await this.deps.findLocalServers();
 				const server = servers.find((s) => s.kind === p.kind);
@@ -420,7 +451,10 @@ export class Sidecar {
 				return this.deps.listModels(provider, key);
 			},
 
-			"chatgpt.account": () => this.chatgpt().account() ?? null,
+			"chatgpt.account": () => {
+				const account = this.chatgpt().account();
+				return account ? { account, usage: USAGE_URL } : null;
+			},
 			"chatgpt.signIn": async () => {
 				const account = await this.chatgpt().signIn((url) => {
 					this.emit({ event: "chatgpt-url", data: { url } });
@@ -447,6 +481,15 @@ export class Sidecar {
 					value,
 				);
 				return null;
+			},
+			/** Whether a password or passphrase is stored for this computer; never the value. */
+			"ssh.hasSecret": async (p) => {
+				const host = hostOf(p.host);
+				const name =
+					p.kind === "passphrase"
+						? names.sshPassphrase(host)
+						: names.sshPassword(host);
+				return Boolean(await this.deps.secrets.get(name).catch(() => null));
 			},
 			"ssh.test": (p) =>
 				this.deps.testConnection(this.sshConfig(p), {
@@ -484,9 +527,20 @@ export class Sidecar {
 		const shown = structuredClone(settings);
 		if (shown.brain.model) delete shown.brain.model.apiKey;
 		const keys: Record<string, boolean> = {};
-		for (const provider of KEYED)
-			keys[provider] = (await this.keyFor(provider)) !== undefined;
-		return { settings: shown, keys, file: this.o.settingsFile };
+		// Where each key comes from: "Remove" deletes only the keychain's, and a key in the file
+		// or the environment stays usable after that.
+		const keySources: Record<string, KeySource> = {};
+		for (const provider of KEYED) {
+			const source = await this.keySource(provider, settings);
+			keys[provider] = source !== undefined;
+			if (source) keySources[provider] = source;
+		}
+		return {
+			settings: shown,
+			keys,
+			keySources,
+			file: this.o.settingsFile,
+		};
 	}
 
 	private async setSettings(value: unknown) {
@@ -519,12 +573,54 @@ export class Sidecar {
 				model.apiKey = inFile;
 			}
 		}
+		// A key in the file for a provider the new settings leave: the file would lose it, so it
+		// moves into the keychain first. Without a keychain nothing is saved, rather than the key
+		// being dropped where the player cannot see it.
+		const leaving = before?.brain.model;
+		if (leaving?.apiKey && !inFile && leaving.provider !== model?.provider) {
+			const name = names.apiKey(leaving.provider);
+			try {
+				if (!(await this.deps.secrets.get(name)))
+					await this.deps.secrets.set(name, leaving.apiKey);
+			} catch {
+				throw new PlayerError(
+					`The API key for ${leaving.provider} is in the settings file, and the system keychain cannot take it. Remove it from the file yourself, or keep that provider.`,
+				);
+			}
+		}
 		saveSettings(this.o.settingsFile, next);
-		// While Familiar runs, the overview shows the brain that answers, not the new one.
-		if (this.status.running || this.starting) this.status.restartNeeded = true;
-		else this.status.brain = describeBrain(next);
+		// While Familiar runs, the overview shows the brain that answers, not the new one. Only
+		// what a run uses needs a restart; the app's own settings, such as the language, do not.
+		const used = (s?: Settings) =>
+			s &&
+			JSON.stringify([
+				s.game,
+				{
+					...s.brain,
+					model: s.brain.model && { ...s.brain.model, apiKey: undefined },
+				},
+				s.mcp,
+			]);
+		if (this.status.running || this.starting) {
+			if (used(before) !== used(next)) this.status.restartNeeded = true;
+		} else this.status.brain = describeBrain(next);
 		this.changed();
 		return this.shownSettings(next);
+	}
+
+	/** Where `keyFor` would find the key, in the same order. */
+	private async keySource(
+		provider: Provider,
+		settings: Settings,
+	): Promise<KeySource | undefined> {
+		const stored = await this.deps.secrets
+			.get(names.apiKey(provider))
+			.catch(() => null);
+		if (stored) return "keychain";
+		const model = settings.brain.model;
+		if (model?.provider === provider && model.apiKey) return "file";
+		if (apiKey({ provider, name: "-" }, this.deps.env)) return "environment";
+		return undefined;
 	}
 
 	/** The key for a provider, found the same way as when Familiar starts. */
@@ -565,7 +661,8 @@ export class Sidecar {
 			auth: ssh.auth ?? "key",
 			command: ssh.command.map(String),
 			cwd: settings.brain.cwd,
-			port: settings.mcp.port,
+			// No port: the test checks the sign-in and the program, not the game tools, and the
+			// running Familiar may already hold this forward on that computer.
 		};
 	}
 
@@ -633,48 +730,103 @@ export class Sidecar {
 	private async testBrain(value: unknown) {
 		const settings =
 			value === undefined ? this.settings() : parseSettings(value);
-		const timeout = Math.min(settings.brain.timeout, 60);
-		const prepared = await prepareBrain(settings, {
-			secrets: this.deps.secrets,
-			askpass: this.o.askpass,
+		// The app never has the key in the file (settings.get leaves it out): take it from the
+		// file here, for the same provider only, as a start would.
+		const model = settings.brain.model;
+		const filed = this.settings().brain.model;
+		if (
+			model &&
+			!model.apiKey &&
+			filed?.apiKey &&
+			filed.provider === model.provider
+		)
+			model.apiKey = filed.apiKey;
+		const started = performance.now();
+		// One deadline for all of it: preparing (ssh -G, the keychain), starting the brain and
+		// its answer. The brain is stopped either way, also one still starting.
+		let brain: (Brain & { stop?: () => void }) | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const late = new Promise<TestResult>((resolve) => {
+			timer = setTimeout(
+				() =>
+					resolve({
+						ok: false,
+						ms: Math.round(performance.now() - started),
+						problem: `No answer within ${TEST_TOTAL_S} s.`,
+						tools: [],
+					}),
+				this.o.testDeadlineMs ?? TEST_TOTAL_S * 1000,
+			);
 		});
-		const brainSettings = { ...prepared.brain, timeout };
+		// Set when the test is over: a preparation that ends later starts no brain.
+		let over = false;
+		const run = async (): Promise<TestResult> => {
+			const prepared = await prepareBrain(settings, {
+				secrets: this.deps.secrets,
+				askpass: this.o.askpass,
+				forward: false,
+			});
+			if (over) return { ok: false, ms: 0, problem: "Too late.", tools: [] };
+			brain = this.testedBrain(settings, prepared);
+			return this.askTest(brain, started);
+		};
+		try {
+			return await Promise.race([run(), late]);
+		} finally {
+			over = true;
+			clearTimeout(timer);
+			brain?.stop?.();
+		}
+	}
+
+	/** The brain a test asks: the saved permissions do not count, a test never allows a tool. */
+	private testedBrain(
+		settings: Settings,
+		prepared: Awaited<ReturnType<typeof prepareBrain>>,
+	): Brain & { stop?: () => void } {
+		const timeout = Math.min(settings.brain.timeout, TEST_ANSWER_S);
+		const brainSettings = {
+			...prepared.brain,
+			timeout,
+			permissions: "deny" as const,
+		};
 		const quiet: Log = { event: () => {}, say: () => {} };
 		const game = new Game({ fetchTimeoutMs: 1000 });
-		const brain: Brain & { stop?: () => void } =
-			brainSettings.use === "model"
-				? new ModelBrain(brainSettings, {
-						log: quiet,
-						tools: wowTools(game),
-						chatgpt: this.chatgpt(),
-					})
-				: new AcpBrain(brainSettings, {
-						folder: dirname(this.o.settingsFile),
-						log: quiet,
-						version: this.o.version,
-						env: prepared.env,
-					});
+		return brainSettings.use === "model"
+			? new ModelBrain(brainSettings, {
+					log: quiet,
+					tools: wowTools(game),
+					chatgpt: this.chatgpt(),
+				})
+			: new AcpBrain(brainSettings, {
+					folder: dirname(this.o.settingsFile),
+					log: quiet,
+					version: this.o.version,
+					env: prepared.env,
+				});
+	}
+
+	private async askTest(brain: Brain, started: number): Promise<TestResult> {
 		const tools: string[] = [];
+		let answered = false;
 		const turn: Turn = {
 			onTool: (title) => void tools.push(title.split(":")[0] ?? title),
 			onNote: () => {},
+			// Nobody is in game to ask, and the permissions are "deny" anyway.
 			onPermission: async () => false,
+			onAnswered: () => {
+				answered = true;
+			},
 		};
 		const question: Question = {
-			text: "This is a test from the Familiar app. Answer in one short sentence, without tools.",
+			text: TEST_QUESTION,
 			character: {},
 		};
-		const started = performance.now();
-		try {
-			const answer = await brain.ask(question, turn);
-			return {
-				ms: Math.round(performance.now() - started),
-				answer: answer.slice(0, 300),
-				tools,
-			};
-		} finally {
-			brain.stop?.();
-		}
+		const text = await brain.ask(question, turn);
+		const ms = Math.round(performance.now() - started);
+		return answered
+			? { ok: true, ms, answer: text.slice(0, 300), tools }
+			: { ok: false, ms, problem: text.slice(0, 300), tools };
 	}
 }
 
@@ -734,6 +886,26 @@ export function clientFolder(chosen: string): string | undefined {
 	return undefined;
 }
 
+/** An http(s) address the player typed for a server; nothing else is asked. */
+function serverAddress(value: unknown): string {
+	let url: URL;
+	try {
+		url = new URL(String(value ?? "").trim());
+	} catch {
+		throw new PlayerError(
+			"Enter the server's address, such as http://192.168.1.20:11434/v1.",
+		);
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:")
+		throw new PlayerError("The address has to start with http:// or https://.");
+	// No user or password in it: they would end up in the settings file.
+	if (url.username || url.password)
+		throw new PlayerError(
+			"Leave the user name and password out of the address.",
+		);
+	return url.toString().replace(/\/+$/, "");
+}
+
 function keyedProvider(value: unknown): Provider {
 	if (typeof value === "string" && (KEYED as readonly string[]).includes(value))
 		return value as Provider;
@@ -763,7 +935,8 @@ function shown(error: unknown): string {
 		error instanceof PlayerError ||
 		error instanceof ListError ||
 		error instanceof SecretError ||
-		error instanceof ChatGptError
+		error instanceof ChatGptError ||
+		error instanceof SshError
 	)
 		return error.message;
 	if (error instanceof Error && error.message.startsWith("The settings"))

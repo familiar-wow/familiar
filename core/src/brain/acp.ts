@@ -55,6 +55,10 @@ export interface AcpBrainOptions {
 
 export class AcpBrain implements Brain {
 	private agent?: Agent;
+	/** Every agent process started and not yet gone, also one still initialising. */
+	private readonly children = new Set<{ kill(): void }>();
+	/** After `stop`, nothing starts any more: a start under way kills its process. */
+	private stopped = false;
 	private queue: Promise<void> = Promise.resolve();
 	/** The question being answered; `ended` settles once it is done or cancelled. */
 	private turn?: Turn & { ended: Promise<void>; end: () => void };
@@ -81,8 +85,10 @@ export class AcpBrain implements Brain {
 		});
 	}
 
+	/** Ends every agent process this brain started, also one still initialising. */
 	stop(): void {
-		this.agent?.child.kill();
+		this.stopped = true;
+		for (const child of this.children) child.kill();
 	}
 
 	private async answer(
@@ -146,6 +152,8 @@ export class AcpBrain implements Brain {
 				stopReason,
 				chars: text.length,
 			});
+			if (!timedOut && stopReason === "end_turn" && text)
+				this.turn?.onAnswered?.();
 			reply(answerFor(stopReason, text));
 			if (fresh) this.checkWow(session, served);
 		} catch (error) {
@@ -185,6 +193,9 @@ export class AcpBrain implements Brain {
 			stdout: "pipe",
 			stderr: "pipe",
 		});
+		this.children.add(child);
+		void child.exited.then(() => this.children.delete(child));
+		if (this.stopped) child.kill();
 		const stderr: string[] = [];
 		void keepLines(child.stderr, stderr);
 		const output = new WritableStream<Uint8Array>({
@@ -251,6 +262,10 @@ export class AcpBrain implements Brain {
 			const { reason } = await why(agent, error);
 			child.kill();
 			throw new Error(reason);
+		}
+		if (this.stopped) {
+			child.kill();
+			throw new Error("it was stopped");
 		}
 		this.agent = agent;
 		return agent;

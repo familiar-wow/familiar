@@ -26,7 +26,11 @@ const game = new GameController({
 	refreshStatus: () => app.refreshStatus(),
 	statusClient: () => app.view.status?.client,
 	running: () => app.view.status?.running === true,
-	start: () => app.startFamiliar(),
+	start: async () => void (await app.startFamiliar()),
+	updateSettings: (change) =>
+		app.updateSettings((settings) =>
+			change(settings as Record<string, unknown>),
+		),
 });
 
 let current: GameState = $state.raw(game.state);

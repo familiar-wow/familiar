@@ -281,6 +281,7 @@ export class ModelBrain implements Brain {
 					return "The model gave an empty answer.";
 				}
 				log.event("model-answer", summary);
+				turn.onAnswered?.();
 				const answer: ModelMessage = {
 					role: "assistant",
 					content: text.slice(0, KEPT),

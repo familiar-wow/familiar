@@ -16,6 +16,25 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+/**
+ * A server's address: http or https only, and no user or password in it, since the settings
+ * file is plain text and the app shows it.
+ */
+const ServerUrl = z.url().refine(
+	(value) => {
+		const url = new URL(value);
+		return (
+			(url.protocol === "http:" || url.protocol === "https:") &&
+			!url.username &&
+			!url.password
+		);
+	},
+	{
+		message:
+			"A server address must start with http:// or https:// and hold no user or password.",
+	},
+);
+
 /** Providers the built-in agent can ask (brain/model.ts). */
 export const PROVIDERS = [
 	"openai",
@@ -41,7 +60,7 @@ const Model = z
 		 */
 		name: z.string().min(1),
 		/** The API's address; needed for "openai-compatible", optional for the others. */
-		baseUrl: z.url().optional(),
+		baseUrl: ServerUrl.optional(),
 		/**
 		 * The API key. Better left out: then it comes from the provider's environment variable,
 		 * such as OPENAI_API_KEY. The desktop app will keep it in the system keychain (FAM-6).
@@ -69,6 +88,43 @@ const Ssh = z.strictObject({
 	command: z.array(z.string().min(1)).min(1),
 });
 
+/**
+ * What each kind of brain on the app's Brain page held last, so that switching to another kind
+ * and back keeps the choice. The brain that answers is in `brain`; this is only remembered.
+ */
+const Remembered = z.strictObject({
+	chatgpt: z.strictObject({ name: z.string().min(1) }).optional(),
+	key: z
+		.strictObject({
+			provider: z.enum([
+				"openai",
+				"anthropic",
+				"google",
+				"openrouter",
+				"deepseek",
+			]),
+			name: z.string().min(1),
+			/** A provider's own address, such as a proxy, set by hand. */
+			baseUrl: ServerUrl.optional(),
+		})
+		.optional(),
+	local: z
+		.strictObject({
+			provider: z.enum(["ollama", "lmstudio", "openai-compatible"]),
+			name: z.string().min(1),
+			baseUrl: ServerUrl.optional(),
+		})
+		.optional(),
+	agent: z
+		.strictObject({
+			command: z.array(z.string().min(1)).min(1),
+			cwd: z.string().min(1).optional(),
+		})
+		.optional(),
+	/** The working folder there is a folder on that computer, so it is kept apart. */
+	ssh: Ssh.extend({ cwd: z.string().min(1).optional() }).optional(),
+});
+
 const Settings = z.strictObject({
 	/** The WoW Forever client folder the player chose; found automatically when left out. */
 	game: z.strictObject({ client: z.string().min(1).optional() }).prefault({}),
@@ -80,6 +136,12 @@ const Settings = z.strictObject({
 			/** Start with Windows, in the tray. */
 			autostart: z.boolean().default(false),
 			language: z.enum(["system", "en", "de"]).default("system"),
+			/**
+			 * The setup assistant ran, or the player skipped it; false while it runs. Unset for
+			 * settings from before the app: those players set Familiar up already.
+			 */
+			setupDone: z.boolean().optional(),
+			brains: Remembered.prefault({}),
 		})
 		.prefault({}),
 	brain: z
@@ -178,7 +240,9 @@ export function settingsFolder(): string {
 /** Reads the settings. A missing file is written with the defaults, so there is one to edit. */
 export function loadSettings(file: string): Settings {
 	if (!existsSync(file)) {
-		const defaults = Settings.parse({});
+		// A new player: the desktop app's setup assistant runs once. A file from before the app
+		// has no setupDone at all, and its player is not sent through the assistant.
+		const defaults = Settings.parse({ app: { setupDone: false } });
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, `${JSON.stringify(defaults, null, "\t")}\n`);
 		return defaults;

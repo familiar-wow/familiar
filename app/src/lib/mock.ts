@@ -1,6 +1,17 @@
 // A stand-in for the Rust shell and the core, for working on the look in a plain browser
 // (`bun run dev` or `vite preview`). The entry files load it only when Tauri is missing.
-// Choose a case with `?mock=live|connected|waiting|problems|exit|fail|empty` and `&lang=de`.
+// Choose a case with `?mock=live|connected|waiting|problems|exit|fail|empty|first` and `&lang=de`.
+// `first` is a new player: a new settings file (setupDone false) and no addon yet.
+// `&brain=chatgpt|key|local|ssh` sets the brain that answers (default: the own agent `hermes acp`),
+// `&chatgpt=in` starts signed in with ChatGPT (also with `brain=chatgpt`).
+//
+// Brain page cases: API keys for OpenRouter (keychain) and Anthropic (environment); a key that
+// starts with "bad" is refused by the provider. Ollama runs, LM Studio is installed but off
+// (Start brings it up after 2.5 s); a server at 192.168.1.20 answers, others do not. SSH:
+// `homelab` comes from the SSH config through a jump host (no fingerprint), `nas` from the config
+// and already trusted, any other name is unknown with a fingerprint, `offline` cannot be reached.
+// `brain.test` fails for a key provider without a key, ChatGPT signed out, Claude Code (no key)
+// and `offline`. Secrets are kept as "there is one", never their value, and never logged.
 import type {
 	GameClient,
 	Host,
@@ -15,6 +26,120 @@ type Line = Record<string, unknown>;
 const VERSION = "0.15.0";
 const MAIN = "C:\\Program Files (x86)\\World of Warcraft\\_forever_";
 const SECOND = "D:\\Games\\World of Warcraft\\_forever_";
+const USAGE = "https://chatgpt.com/settings/usage";
+const ACCOUNT = "moonbreeze@example.com";
+const FINGERPRINT = "SHA256:q3Vx8mH2kTzN0pW7rYcB4dLs9eFgJ1uA6oQiXvR5T8k";
+const NAS_FINGERPRINT = "SHA256:Zq0vN7cX2mB5sL8dK3jH6gF9aP1oI4uY7tR0eW2qT5w";
+const HOME = "C:\\Users\\Moonbreeze";
+
+/** What `models.list` gives per provider: with and without tool support and prices. */
+const MODELS: Record<string, Line[]> = {
+	openrouter: [
+		{
+			id: "openai/gpt-6-luna",
+			name: "OpenAI: GPT-6 Luna",
+			tools: true,
+			price: { input: 0.1, output: 0.5 },
+			recommended: true,
+		},
+		{
+			id: "anthropic/claude-haiku-5.5",
+			name: "Anthropic: Claude Haiku 5.5",
+			tools: true,
+			price: { input: 1, output: 5 },
+			recommended: true,
+		},
+		{
+			id: "google/gemini-3.5-flash",
+			name: "Google: Gemini 3.5 Flash",
+			tools: true,
+			price: { input: 0.3, output: 2.5 },
+			recommended: true,
+		},
+		{
+			id: "deepseek/deepseek-v4.1-flash",
+			name: "DeepSeek: V4.1 Flash",
+			tools: true,
+			price: { input: 0.14, output: 0.28 },
+			recommended: true,
+		},
+		{
+			id: "meta-llama/llama-5-70b-instruct",
+			name: "Meta: Llama 5 70B Instruct",
+			tools: true,
+			price: { input: 0.3, output: 0.9 },
+		},
+		{
+			id: "mistralai/mistral-medium-4",
+			name: "Mistral: Medium 4",
+			tools: true,
+			price: { input: 0.4, output: 2 },
+		},
+		{
+			id: "openai/gpt-6-luna-pro",
+			name: "OpenAI: GPT-6 Luna Pro",
+			tools: true,
+			price: { input: 1.25, output: 10 },
+		},
+		{
+			id: "openrouter/auto",
+			name: "Auto Router",
+			tools: true,
+		},
+		{
+			id: "qwen/qwen3.7-235b",
+			name: "Qwen: Qwen3.7 235B",
+			tools: true,
+			price: { input: 0.2, output: 0.6 },
+		},
+	],
+	openai: [
+		{ id: "gpt-6-luna", recommended: true },
+		{ id: "gpt-6" },
+		{ id: "gpt-6-luna-mini" },
+		{ id: "o5-mini" },
+	],
+	anthropic: [
+		{
+			id: "claude-haiku-5-5",
+			name: "Claude Haiku 5.5",
+			tools: true,
+			recommended: true,
+		},
+		{ id: "claude-opus-5-5", name: "Claude Opus 5.5", tools: true },
+		{ id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", tools: true },
+	],
+	google: [
+		{ id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", recommended: true },
+		{ id: "gemini-3.5-pro", name: "Gemini 3.5 Pro" },
+		{ id: "gemma-4-27b-it", name: "Gemma 4 27B", tools: false },
+	],
+	deepseek: [
+		{ id: "deepseek-v4.1-flash", recommended: true },
+		{ id: "deepseek-chat", recommended: true },
+		{ id: "deepseek-reasoner", tools: false },
+	],
+};
+
+/** The brains `&brain=` starts with. */
+const BRAINS: Record<string, Line> = {
+	chatgpt: { use: "model", model: { provider: "chatgpt", name: "gpt-6-luna" } },
+	key: {
+		use: "model",
+		model: { provider: "openrouter", name: "openai/gpt-6-luna" },
+	},
+	local: { use: "model", model: { provider: "ollama", name: "qwen3.7:14b" } },
+	ssh: {
+		use: "agent",
+		command: ["hermes", "acp"],
+		ssh: {
+			host: "nas",
+			auth: "key",
+			command: ["/home/admin/.local/bin/hermes", "acp"],
+		},
+		cwd: "/home/admin",
+	},
+};
 
 const CHARACTER = {
 	name: "Moonbreeze",
@@ -79,12 +204,40 @@ export function mockHost(
 		],
 	]);
 	if (scenario === "empty") clients.clear();
+	const first = scenario === "first";
+	// A new player: WoW is there, the addon is not.
+	if (first)
+		for (const [id, c] of clients) {
+			clients.set(id, { ...c, installed: false });
+			delete clients.get(id)?.addonVersion;
+		}
+	const query = new URLSearchParams(globalThis.location?.search ?? "");
+	const brainCase = query.get("brain") ?? "";
 	let settings: Line = {
-		app: { language: language ?? "system", close: "tray" },
+		app: {
+			language: language ?? "system",
+			close: "tray",
+			// Only a new settings file has it: a file from before the app has none.
+			...(first ? { setupDone: false } : {}),
+		},
 		game: {},
-		brain: { use: "agent", command: ["hermes", "acp"] },
+		brain: {
+			permissions: "ask",
+			...(BRAINS[brainCase] ?? { use: "agent", command: ["hermes", "acp"] }),
+		},
 		mcp: { port: 27495 },
 	};
+	// Where each provider's API key is; the keys themselves are not kept.
+	const keychain = new Set<string>(["openrouter"]);
+	const environment = new Set<string>(["anthropic"]);
+	/** Providers whose stored key the provider refuses. */
+	const refused = new Set<string>();
+	let account: string | null =
+		query.get("chatgpt") === "in" || brainCase === "chatgpt" ? ACCOUNT : null;
+	let lmStudioRunning = false;
+	const trusted = new Set<string>(["nas"]);
+	/** Hosts with a saved password or passphrase: only that there is one. */
+	const sshSecrets = new Set<string>();
 	let status: Status = fresh();
 	let log: Line[] = [];
 	let asked = 0;
@@ -103,11 +256,229 @@ export function mockHost(
 		return {
 			running: false,
 			...(client ? { client } : {}),
-			addon: { installed: client !== undefined },
+			addon: { installed: client !== undefined && !first },
 			game: { running: false },
-			brain: { kind: "agent", command: ["hermes", "acp"] },
+			brain: describeBrain(),
 			problems: [],
 		};
+	}
+
+	/** The brain as the status shows it (core/src/familiar.ts describeBrain). */
+	function describeBrain(): Record<string, unknown> {
+		const b = settings.brain as Line;
+		const model = b.model as { provider: string; name: string } | undefined;
+		if (b.use === "model" && model)
+			return { kind: "model", provider: model.provider, model: model.name };
+		const ssh = b.ssh as { host: string; command: string[] } | undefined;
+		if (ssh) return { kind: "ssh", host: ssh.host, command: ssh.command };
+		return { kind: "agent", command: b.command };
+	}
+
+	/** The settings without any API key, and where each provider's key would be found. */
+	function shown(): Line {
+		const copy = structuredClone(settings);
+		const model = (copy.brain as Line | undefined)?.model as Line | undefined;
+		const fileKey = model?.apiKey ? String(model.provider) : undefined;
+		if (model) delete model.apiKey;
+		const keys: Record<string, boolean> = {};
+		const keySources: Record<string, string> = {};
+		for (const p of Object.keys(MODELS)) {
+			const source = keychain.has(p)
+				? "keychain"
+				: fileKey === p
+					? "file"
+					: environment.has(p)
+						? "environment"
+						: undefined;
+			keys[p] = source !== undefined;
+			if (source) keySources[p] = source;
+		}
+		return { settings: copy, keys, keySources, file: "" };
+	}
+
+	/** What a run uses: a change here needs a restart while Familiar runs. */
+	function used(s: Line): string {
+		const brain = { ...(s.brain as Line) };
+		if (brain.model) brain.model = { ...(brain.model as Line), apiKey: null };
+		return JSON.stringify([s.game, brain, s.mcp]);
+	}
+
+	function hostKeyOf(host: string): {
+		known: boolean;
+		fingerprint?: string;
+		type?: string;
+	} {
+		if (host === "nas")
+			return {
+				known: true,
+				fingerprint: NAS_FINGERPRINT,
+				type: "ecdsa-sha2-nistp256",
+			};
+		// Only reachable through the jump host, or not at all: no key to show.
+		if (host === "homelab" || host === "offline") return { known: false };
+		if (trusted.has(host))
+			return { known: true, fingerprint: FINGERPRINT, type: "ssh-ed25519" };
+		return { known: false, fingerprint: FINGERPRINT, type: "ssh-ed25519" };
+	}
+
+	function resolveHost(host: string): Line {
+		if (host === "homelab")
+			return {
+				host,
+				hostname: "192.168.1.10",
+				user: "pascal",
+				port: 22,
+				identityFiles: ["~/.ssh/id_ed25519"],
+				proxyJump: "jump.example.net",
+				fromConfig: true,
+			};
+		if (host === "nas")
+			return {
+				host,
+				hostname: "192.168.1.30",
+				user: "admin",
+				port: 2222,
+				identityFiles: ["~/.ssh/nas_ed25519"],
+				fromConfig: true,
+			};
+		return {
+			host,
+			hostname: host,
+			user: "moonbreeze",
+			port: 22,
+			identityFiles: ["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519"],
+			fromConfig: false,
+		};
+	}
+
+	/** `ssh.test`: signs in, then looks for the program (core/src/sidecar/ssh.ts problems). */
+	function sshTest(ssh: Line): Line {
+		const host = String(ssh.host ?? "");
+		const command = (ssh.command as string[] | undefined) ?? [];
+		if (host === "offline")
+			return { ok: false, problem: "The other computer could not be reached." };
+		if (host === "homelab" && ssh.auth !== "key")
+			return {
+				ok: false,
+				problem:
+					"Familiar does not sign in with a saved password or passphrase when your SSH config reaches that computer through another one (ProxyJump or ProxyCommand). Use a key without a passphrase, or one that your SSH agent holds.",
+			};
+		if (!hostKeyOf(host).known && host !== "homelab")
+			return {
+				ok: false,
+				problem: "The other computer's host key is not trusted yet.",
+			};
+		if (ssh.auth !== "key" && !sshSecrets.has(`${ssh.auth}:${host}`))
+			return {
+				ok: false,
+				problem: "The other computer refused the sign-in (permission denied).",
+			};
+		const program = command[0] ?? "";
+		if (!/hermes|codex|gemini|openclaw/.test(program))
+			return {
+				ok: false,
+				problem: "The agent program was not found on the other computer.",
+				agentFound: false,
+			};
+		const name = program.split("/").at(-1) ?? program;
+		return {
+			ok: true,
+			agentFound: true,
+			agentPath: program.startsWith("/")
+				? program
+				: `/home/${String(resolveHost(host).user)}/.local/bin/${name}`,
+		};
+	}
+
+	/** `brain.test`: an answer, or the core's words for why there was none. */
+	function brainTest(s: Line): Line {
+		const b = (s.brain ?? {}) as Line;
+		const model = b.model as { provider: string; name: string } | undefined;
+		const ssh = b.ssh as Line | undefined;
+		const ok = (ms: number, answer: string) => ({
+			ok: true,
+			ms,
+			answer,
+			tools: [],
+		});
+		const fail = (ms: number, problem: string) => ({
+			ok: false,
+			ms,
+			problem,
+			tools: [],
+		});
+		if (b.use === "model" && model) {
+			const p = model.provider;
+			if (p === "chatgpt")
+				return account
+					? ok(3100, "Greetings, Moonbreeze! I hear you loud and clear.")
+					: fail(
+							200,
+							"Sign in with ChatGPT first: Brain page, ChatGPT plan, Sign in.",
+						);
+			if (p in MODELS) {
+				if (!keychain.has(p) && !environment.has(p))
+					return fail(
+						100,
+						`There is no API key for ${p}. Enter it on the Brain page.`,
+					);
+				if (refused.has(p)) return fail(900, "The provider refused the key.");
+				return ok(
+					6400,
+					"Hello from the other side of the portal! Ready to help with your quests.",
+				);
+			}
+			return ok(
+				11_800,
+				"Hello! I am a local model and can hear you. How can I help today?",
+			);
+		}
+		if (ssh) {
+			const problem = sshTest(ssh);
+			if (!problem.ok) return fail(1200, String(problem.problem));
+			return ok(8200, "Hermes here, answering from the other computer.");
+		}
+		const command = (b.command as string[] | undefined) ?? [];
+		if (/claude/.test(command.join(" ")))
+			return fail(
+				2300,
+				"Claude Code needs an Anthropic API key (ANTHROPIC_API_KEY); a subscription cannot be used in other apps.",
+			);
+		return ok(6400, "Hermes here. Ask me anything about your adventure.");
+	}
+
+	function localServers(): Line[] {
+		const none = scenario === "empty";
+		const ollama = `${HOME}\\AppData\\Local\\Programs\\Ollama\\ollama.exe`;
+		const lms = `${HOME}\\.lmstudio\\bin\\lms.exe`;
+		return [
+			{
+				kind: "ollama",
+				name: "Ollama",
+				baseUrl: "http://127.0.0.1:11434/v1",
+				running: !none,
+				installed: !none,
+				...(none ? {} : { path: ollama, start: [ollama, "serve"] }),
+				models: none
+					? []
+					: [
+							{ id: "qwen3.7:14b", tools: true, size: 9_300_000_000 },
+							{ id: "llama4.1:8b", tools: true, size: 4_900_000_000 },
+							{ id: "gemma4:4b", tools: false, size: 3_300_000_000 },
+						],
+			},
+			{
+				kind: "lmstudio",
+				name: "LM Studio",
+				baseUrl: "http://127.0.0.1:1234/v1",
+				running: lmStudioRunning,
+				installed: !none,
+				...(none ? {} : { path: lms, start: [lms, "server", "start"] }),
+				models: lmStudioRunning
+					? [{ id: "qwen3.7-14b-instruct" }, { id: "mistral-small-4" }]
+					: [],
+			},
+		];
 	}
 
 	/** A run that started an hour ago: what the core really writes, in that order. */
@@ -404,18 +775,229 @@ export function mockHost(
 			case "hello":
 				return reply({ version: VERSION, platform: "mock", settingsFile: "" });
 			case "settings.get":
-				return reply({
-					settings: structuredClone(settings),
-					keys: {},
-					file: "",
-				});
-			case "settings.set":
-				settings = structuredClone(p.settings as Line);
-				// As the core: while Familiar runs, a change waits for the restart.
-				if (status.running) status.restartNeeded = true;
-				else status.client = inUse();
+				return reply(shown());
+			case "settings.set": {
+				const before = used(settings);
+				const next = structuredClone(p.settings as Line);
+				// As the core: a key sent here goes into the keychain, never into the file.
+				const model = (next.brain as Line | undefined)?.model as
+					| Line
+					| undefined;
+				if (model?.apiKey) {
+					keychain.add(String(model.provider));
+					delete model.apiKey;
+				}
+				settings = next;
+				// While Familiar runs, a change of what a run uses waits for the restart; the
+				// app's own settings (`app.*`) do not.
+				if (status.running) {
+					if (used(settings) !== before) status.restartNeeded = true;
+				} else {
+					status.client = inUse();
+					status.brain = describeBrain();
+				}
 				changed();
-				return reply({ settings, keys: {}, file: "" });
+				return reply(shown());
+			}
+			case "key.set": {
+				const provider = String(p.provider ?? "");
+				if (!(provider in MODELS)) return fail("Choose a provider.");
+				const key = String(p.key ?? "").trim();
+				if (!key) return fail("The key is empty.");
+				keychain.add(provider);
+				if (key.startsWith("bad")) refused.add(provider);
+				else refused.delete(provider);
+				return reply(null);
+			}
+			case "key.delete":
+				keychain.delete(String(p.provider ?? ""));
+				refused.delete(String(p.provider ?? ""));
+				return reply(null);
+			case "key.has": {
+				const provider = String(p.provider ?? "");
+				return reply(keychain.has(provider) || environment.has(provider));
+			}
+			case "models.list": {
+				const provider = String(p.provider ?? "");
+				if (!(provider in MODELS)) return fail("Choose a provider.");
+				const given = typeof p.key === "string" && p.key.trim() !== "";
+				if (!given && !keychain.has(provider) && !environment.has(provider))
+					return fail("Enter the API key first.");
+				if (
+					(given && String(p.key).trim().startsWith("bad")) ||
+					(!given && refused.has(provider))
+				)
+					return later(700, () =>
+						line({
+							id: request.id,
+							error: { message: "The provider refused the key." },
+						}),
+					);
+				return later(700, () =>
+					line({ id: request.id, result: MODELS[provider] }),
+				);
+			}
+			case "chatgpt.account":
+				return reply(
+					account
+						? { account, usage: "https://chatgpt.com/settings/usage" }
+						: null,
+				);
+			case "chatgpt.signIn":
+				// The core opens the browser and sends the address, in case it did not open.
+				later(300, () =>
+					line({
+						event: "chatgpt-url",
+						data: {
+							url: "https://auth.openai.com/oauth/authorize?client_id=app_familiar&response_type=code&state=mock",
+						},
+					}),
+				);
+				return later(3000, () => {
+					account = ACCOUNT;
+					line({ id: request.id, result: { account, usage: USAGE } });
+				});
+			case "chatgpt.signOut":
+				account = null;
+				return reply({ revoked: true });
+			case "chatgpt.models":
+				if (!account) return fail("Sign in with ChatGPT first.");
+				return later(500, () =>
+					line({
+						id: request.id,
+						result: [
+							{ slug: "gpt-6-luna", name: "GPT-6 Luna" },
+							{ slug: "gpt-6", name: "GPT-6" },
+							{ slug: "gpt-6-thinking", name: "GPT-6 Thinking" },
+						],
+					}),
+				);
+			case "local.find":
+				return later(600, () =>
+					line({ id: request.id, result: localServers() }),
+				);
+			case "local.start":
+				if (p.kind === "lmstudio") {
+					later(2500, () => {
+						lmStudioRunning = true;
+					});
+					return reply(null);
+				}
+				if (p.kind === "ollama" && scenario !== "empty") return reply(null);
+				return fail("Familiar cannot start this server itself.");
+			case "local.models": {
+				let url: URL;
+				try {
+					url = new URL(String(p.baseUrl ?? "").trim());
+				} catch {
+					return fail(
+						"Enter the server's address, such as http://192.168.1.20:11434/v1.",
+					);
+				}
+				if (url.protocol !== "http:" && url.protocol !== "https:")
+					return fail("The address has to start with http:// or https://.");
+				if (url.username || url.password)
+					return fail("Leave the user name and password out of the address.");
+				if (url.hostname !== "192.168.1.20")
+					return later(800, () =>
+						line({
+							id: request.id,
+							error: {
+								message:
+									"No OpenAI-compatible server answered at this address. Check it ends in /v1 and the server runs.",
+							},
+						}),
+					);
+				return later(800, () =>
+					line({
+						id: request.id,
+						result: [{ id: "qwen3.7:32b" }, { id: "llama4.1:70b" }],
+					}),
+				);
+			}
+			case "agents.find":
+				return later(700, () =>
+					line({
+						id: request.id,
+						result: [
+							{
+								id: "hermes",
+								name: "Hermes Agent",
+								command: ["hermes", "acp"],
+								path: `${HOME}\\AppData\\Local\\hermes\\hermes.exe`,
+								version: "hermes 0.31.0",
+								ready: true,
+							},
+							{
+								id: "codex",
+								name: "Codex",
+								command: ["npx", "-y", "@agentclientprotocol/codex-acp"],
+								path: `${HOME}\\AppData\\Roaming\\npm\\codex.cmd`,
+								version: "codex-cli 0.98.0",
+								ready: true,
+							},
+							{
+								id: "claude",
+								name: "Claude Code",
+								command: ["npx", "-y", "@agentclientprotocol/claude-agent-acp"],
+								path: `${HOME}\\.local\\bin\\claude.exe`,
+								version: "2.3.1 (Claude Code)",
+								ready: false,
+								needs: "an Anthropic API key (ANTHROPIC_API_KEY)",
+							},
+						],
+					}),
+				);
+			case "ssh.resolve": {
+				const host = String(p.host ?? "").trim();
+				if (!host || host.startsWith("-") || /\s/.test(host))
+					return fail("That computer name cannot be used.");
+				return later(300, () =>
+					line({ id: request.id, result: resolveHost(host) }),
+				);
+			}
+			case "ssh.hostKey":
+				return later(400, () =>
+					line({ id: request.id, result: hostKeyOf(String(p.host ?? "")) }),
+				);
+			case "ssh.trust": {
+				const host = String(p.host ?? "");
+				const key = hostKeyOf(host);
+				if (!key.fingerprint || key.fingerprint !== p.fingerprint)
+					return fail(
+						"The other computer showed another key than the one you confirmed. Nothing was trusted.",
+					);
+				trusted.add(host);
+				return reply(null);
+			}
+			case "ssh.hasSecret":
+				return reply(
+					sshSecrets.has(
+						`${p.kind === "passphrase" ? "passphrase" : "password"}:${String(p.host ?? "")}`,
+					),
+				);
+			case "ssh.setSecret": {
+				const value = String(p.value ?? "");
+				if (!value) return fail("The password is empty.");
+				sshSecrets.add(
+					`${p.kind === "passphrase" ? "passphrase" : "password"}:${String(p.host ?? "")}`,
+				);
+				return reply(null);
+			}
+			case "ssh.test":
+				return later(1500, () =>
+					line({
+						id: request.id,
+						result: sshTest((p.ssh ?? {}) as Line),
+					}),
+				);
+			case "brain.test":
+				return later(2500, () =>
+					line({
+						id: request.id,
+						result: brainTest((p.settings ?? settings) as Line),
+					}),
+				);
 			case "status": {
 				const client = status.client ? clients.get(status.client) : undefined;
 				status.addon.installed = client?.installed ?? false;
@@ -472,12 +1054,15 @@ export function mockHost(
 						"WoW Forever was not found. Choose its _forever_ folder.",
 					);
 				status.running = true;
+				status.brain = describeBrain();
 				reply(status);
 				return later(200, play);
 			case "restart":
+				status.running = true;
 				status.restartNeeded = false;
 				status.problems = [];
 				status.client = inUse();
+				status.brain = describeBrain();
 				return reply(status);
 			default:
 				return fail(`Unknown method ${request.method}.`);

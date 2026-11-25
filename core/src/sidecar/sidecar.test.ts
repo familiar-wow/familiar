@@ -48,7 +48,11 @@ function wow(): { root: string; client: string } {
 	return { root, client };
 }
 
-function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
+function sidecar(
+	deps: Partial<Deps> = {},
+	settings?: unknown,
+	more: { testDeadlineMs?: number } = {},
+) {
 	const dir = temp();
 	const settingsFile = join(dir, "settings.json");
 	const logs = join(dir, "logs");
@@ -61,12 +65,14 @@ function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 		version: "0.0.0-test",
 		askpass: "/opt/familiar",
 		write: (line) => void out.push(JSON.parse(line)),
+		...more,
 		deps: {
 			secrets: store,
 			findClients: async () => [],
 			clientProcesses: async () => [],
 			openUrl: () => {},
 			openFolder: () => {},
+			serverModels: async () => undefined,
 			...deps,
 		},
 	});
@@ -200,6 +206,234 @@ test("refuses a test realm, also one that would pass as a client folder", async 
 	expect(isTestRealm(join(root, "_beta_"))).toBe(true);
 	expect(isTestRealm(join(root, "ptr notes"))).toBe(false);
 });
+
+test("lists another server's models, and refuses addresses that are no server", async () => {
+	const asked: string[] = [];
+	const { call } = sidecar({
+		serverModels: async (url) => {
+			asked.push(url);
+			return url.includes("192.168.1.20") ? [{ id: "qwen3:8b" }] : undefined;
+		},
+	});
+	expect(
+		(await call("local.models", { baseUrl: " http://192.168.1.20:11434/v1/ " }))
+			.result,
+	).toEqual([{ id: "qwen3:8b" }]);
+	expect(asked).toEqual(["http://192.168.1.20:11434/v1"]);
+	expect(
+		(await call("local.models", { baseUrl: "http://10.0.0.9/v1" })).error
+			?.message,
+	).toContain("No OpenAI-compatible server answered");
+	for (const [baseUrl, words] of [
+		["", "Enter the server's address"],
+		["file:///etc/passwd", "http:// or https://"],
+		["http://user:secret@host/v1", "Leave the user name and password out"],
+	])
+		expect((await call("local.models", { baseUrl })).error?.message).toContain(
+			words,
+		);
+	// Nothing that is no server was asked.
+	expect(asked).toHaveLength(2);
+});
+
+const FAKE_AGENT = [
+	process.execPath,
+	join(import.meta.dir, "..", "..", "test", "fake-agent.ts"),
+];
+
+test("the brain test says whether a real answer came, not only what was said", async () => {
+	const { call } = sidecar();
+	const agent = (command: string[]) => ({
+		settings: { brain: { use: "agent", command, timeout: 20 } },
+	});
+	const ok = (await call("brain.test", agent(FAKE_AGENT))).result as Record<
+		string,
+		unknown
+	>;
+	expect(ok.ok).toBe(true);
+	expect(String(ok.answer)).toContain("This is a test from the Familiar app");
+	expect(ok.ms).toBeNumber();
+	// A program that is no agent: the player reads why, and it is not called an answer.
+	const bad = (await call("brain.test", agent(["no-such-agent-xyz"])))
+		.result as Record<string, unknown>;
+	expect(bad.ok).toBe(false);
+	expect(String(bad.problem)).toContain("Could not start no-such-agent-xyz");
+	expect(bad.answer).toBeUndefined();
+}, 30_000);
+
+test("says whether an SSH secret is stored, never what it is", async () => {
+	const { call } = sidecar();
+	const has = async (kind: string) =>
+		(await call("ssh.hasSecret", { host: "homelab", kind })).result;
+	expect(await has("password")).toBe(false);
+	await call("ssh.setSecret", {
+		host: "homelab",
+		kind: "password",
+		value: "hunter2",
+	});
+	expect(await has("password")).toBe(true);
+	expect(await has("passphrase")).toBe(false);
+	expect(
+		JSON.stringify(await call("ssh.hasSecret", { host: "homelab" })),
+	).not.toContain("hunter2");
+});
+
+test("a brain test never allows a tool, also when the settings say always allow", async () => {
+	const { call } = sidecar();
+	const got = (
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "agent",
+					command: [...FAKE_AGENT, "--ask"],
+					permissions: "allow",
+					timeout: 20,
+				},
+			},
+		})
+	).result as { ok: boolean; answer?: string };
+	expect(got.ok).toBe(true);
+	expect(got.answer).toBe("got reject-once");
+}, 30_000);
+
+test("a brain test's deadline also ends an agent stuck before it answered initialize", async () => {
+	const pidFile = join(temp(), "pid");
+	const { call } = sidecar({}, undefined, { testDeadlineMs: 1500 });
+	const started = performance.now();
+	const got = (
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "agent",
+					// The shell writes the agent's pid, then becomes it.
+					command: [
+						"sh",
+						"-c",
+						`echo $$ > '${pidFile}'; exec '${FAKE_AGENT[0]}' '${FAKE_AGENT[1]}' --hang-init`,
+					],
+					timeout: 20,
+				},
+			},
+		})
+	).result as { ok: boolean; problem?: string };
+	expect(got.ok).toBe(false);
+	expect(got.problem).toContain("No answer within");
+	expect(performance.now() - started).toBeLessThan(5000);
+	const pid = Number(readFileSync(pidFile, "utf8").trim());
+	// Killed: gone within a moment.
+	let alive = true;
+	for (let i = 0; i < 20 && alive; i++) {
+		try {
+			process.kill(pid, 0);
+			await Bun.sleep(100);
+		} catch {
+			alive = false;
+		}
+	}
+	expect(alive).toBe(false);
+}, 15_000);
+
+test("a preparation that ends after the deadline starts no brain", async () => {
+	let asked = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch() {
+			asked++;
+			return Response.json(
+				{ error: { message: "stop here" } },
+				{ status: 400 },
+			);
+		},
+	});
+	// The keychain answers only after the test gave up.
+	const slow = {
+		...memoryStore(),
+		get: async () => {
+			await Bun.sleep(1200);
+			return "sk-late";
+		},
+	};
+	const { call } = sidecar({ secrets: slow }, undefined, {
+		testDeadlineMs: 300,
+	});
+	try {
+		const got = (
+			await call("brain.test", {
+				settings: {
+					brain: {
+						use: "model",
+						model: {
+							provider: "openrouter",
+							name: "m",
+							baseUrl: `http://127.0.0.1:${server.port}/v1`,
+						},
+					},
+				},
+			})
+		).result as { ok: boolean; problem?: string };
+		expect(got.ok).toBe(false);
+		expect(got.problem).toContain("No answer within");
+		await Bun.sleep(1500);
+		expect(asked).toBe(0);
+	} finally {
+		server.stop(true);
+	}
+}, 15_000);
+
+test("a brain test finds a key that is only in the settings file, for its provider only", async () => {
+	let used: string | undefined;
+	const { call } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	// The app's settings never hold the key; the test still reaches the provider with it.
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			used = request.headers.get("authorization") ?? undefined;
+			return Response.json(
+				{ error: { message: "stop here" } },
+				{ status: 400 },
+			);
+		},
+	});
+	try {
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "model",
+					model: {
+						provider: "openrouter",
+						name: "m",
+						baseUrl: `http://127.0.0.1:${server.port}/v1`,
+					},
+				},
+			},
+		});
+		expect(used).toBe("Bearer sk-file");
+		used = undefined;
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "model",
+					model: {
+						provider: "deepseek",
+						name: "m",
+						baseUrl: `http://127.0.0.1:${server.port}/v1`,
+					},
+				},
+			},
+		});
+		expect(used).not.toBe("Bearer sk-file");
+	} finally {
+		server.stop(true);
+	}
+}, 30_000);
 
 test("opens the log folder, and makes it first when nothing was logged yet", async () => {
 	let opened = "";
@@ -589,6 +823,101 @@ test("settings saved while a start is under way also wait for a restart", async 
 		restartNeeded: true,
 		brain: { command: ["hermes", "acp"] },
 	});
+});
+
+test("the app's own settings change nothing a run uses, so they need no restart", async () => {
+	const { client } = wow();
+	const { call } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async () => ({
+				install: {} as never,
+				fresh: false,
+				stop: () => {},
+			}),
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	await call("start");
+	const got = (await call("settings.get")).result as {
+		settings: { app: Record<string, unknown> };
+	};
+	got.settings.app.language = "de";
+	got.settings.app.setupDone = true;
+	got.settings.app.brains = { agent: { command: ["codex-acp"] } };
+	await call("settings.set", { settings: got.settings });
+	expect((await call("status")).result).toMatchObject({
+		running: true,
+		restartNeeded: false,
+	});
+});
+
+test("a key in the file moves into the keychain when the settings leave its provider", async () => {
+	const { call, store, settingsFile } = sidecar(
+		{ env: { DEEPSEEK_API_KEY: "sk-env" } },
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	const got = (await call("settings.get")).result as {
+		settings: Record<string, unknown>;
+		keySources: Record<string, string>;
+	};
+	expect(got.keySources).toEqual({
+		openrouter: "file",
+		deepseek: "environment",
+	});
+	// To the player's agent: the model and its key leave the settings file.
+	const next = structuredClone(got.settings) as {
+		brain: Record<string, unknown>;
+	};
+	next.brain.use = "agent";
+	delete next.brain.model;
+	expect(
+		(await call("settings.set", { settings: next })).error,
+	).toBeUndefined();
+	expect(await store.get(names.apiKey("openrouter"))).toBe("sk-file");
+	expect(readFileSync(settingsFile, "utf8")).not.toContain("sk-file");
+	const after = (await call("settings.get")).result as {
+		keySources: Record<string, string>;
+	};
+	expect(after.keySources.openrouter).toBe("keychain");
+});
+
+test("without a keychain, leaving a provider with a key in the file is refused, not lost", async () => {
+	const broken = {
+		...memoryStore(),
+		get: async () => null,
+		set: async () => {
+			throw new SecretError("No keychain.");
+		},
+	};
+	const { call, settingsFile } = sidecar(
+		{ secrets: broken },
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	const reply = await call("settings.set", {
+		settings: { brain: { use: "agent" } },
+	});
+	expect(reply.error?.message).toContain("cannot take it");
+	expect(reply.error?.message).not.toContain("sk-file");
+	expect(readFileSync(settingsFile, "utf8")).toContain("sk-file");
+});
+
+test("a new settings file says the setup assistant has not run yet", async () => {
+	const { call } = sidecar();
+	const got = (await call("settings.get")).result as {
+		settings: { app: { setupDone?: boolean } };
+	};
+	expect(got.settings.app.setupDone).toBe(false);
 });
 
 test("an old key from the file does not replace a newer one in the keychain", async () => {

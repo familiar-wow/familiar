@@ -6,7 +6,7 @@
 	"nav.settings": "Einstellungen",
 	"nav.later": "Kommt in einer späteren Version",
 	"foot.version": "Familiar {version}",
-	"foot.private": "Deine Daten bleiben auf diesem PC.",
+	"foot.private": "Einstellungen und Logs bleiben auf diesem PC.",
 	"heading.plain": "Familiar",
 	"heading.morning": "Guten Morgen, {name}",
 	"heading.afternoon": "Guten Tag, {name}",
