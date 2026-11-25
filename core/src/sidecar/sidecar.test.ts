@@ -305,12 +305,8 @@ test("a brain test's deadline also ends an agent stuck before it answered initia
 			settings: {
 				brain: {
 					use: "agent",
-					// The shell writes the agent's pid, then becomes it.
-					command: [
-						"sh",
-						"-c",
-						`echo $$ > '${pidFile}'; exec '${FAKE_AGENT[0]}' '${FAKE_AGENT[1]}' --hang-init`,
-					],
+					// The agent writes its own pid: a shell's `$$` is no Windows pid under MSYS.
+					command: [...FAKE_AGENT, "--hang-init", "--pid-file", pidFile],
 					timeout: 20,
 				},
 			},
@@ -320,6 +316,7 @@ test("a brain test's deadline also ends an agent stuck before it answered initia
 	expect(got.problem).toContain("No answer within");
 	expect(performance.now() - started).toBeLessThan(5000);
 	const pid = Number(readFileSync(pidFile, "utf8").trim());
+	expect(pid).toBeGreaterThan(0);
 	// Killed: gone within a moment.
 	let alive = true;
 	for (let i = 0; i < 20 && alive; i++) {

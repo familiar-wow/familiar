@@ -18,6 +18,12 @@ import {
 	RequestError,
 } from "@agentclientprotocol/sdk";
 
+// --pid-file <file>: writes its own process id there, so a test can check it was ended. Its own
+// pid, not a shell's `$$`, which under MSYS on Windows is no Windows process id.
+const pidAt = process.argv.indexOf("--pid-file");
+if (pidAt >= 0)
+	await Bun.write(process.argv[pidAt + 1] ?? "", String(process.pid));
+
 const folders = new Map<string, string>();
 /** The MCP server over HTTP that each session got: its URL and headers. */
 const servers = new Map<string, { url: string; headers: [string, string][] }>();
