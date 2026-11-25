@@ -511,3 +511,38 @@ test("an old key from the file does not replace a newer one in the keychain", as
 		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
 	).toBeUndefined();
 });
+
+test("settings saved while the start still looks for the game wait for a restart", async () => {
+	const { client } = wow();
+	let release: (() => void) | undefined;
+	const { call } = sidecar(
+		{
+			findClients: () =>
+				release === undefined
+					? new Promise((resolve) => {
+							release = () => resolve([client]);
+						})
+					: Promise.resolve([client]),
+			startFamiliar: async () => ({
+				install: {} as never,
+				fresh: false,
+				stop: () => {},
+			}),
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	const start = call("start");
+	await Bun.sleep(20);
+	const got = (await call("settings.get")).result as {
+		settings: { brain: { command: string[] } };
+	};
+	got.settings.brain.command = ["codex-acp"];
+	await call("settings.set", { settings: got.settings });
+	release?.();
+	await start;
+	expect((await call("status")).result).toMatchObject({
+		running: true,
+		restartNeeded: true,
+		brain: { command: ["hermes", "acp"] },
+	});
+});

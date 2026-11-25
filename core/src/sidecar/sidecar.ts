@@ -555,6 +555,8 @@ export class Sidecar {
 	}
 
 	private async startRun(run: number) {
+		// Cleared before the settings are read: settings saved from here on set it again.
+		this.status.restartNeeded = false;
 		const settings = this.settings();
 		const client = await this.client(undefined);
 		if (run !== this.run) return this.status;
@@ -564,7 +566,6 @@ export class Sidecar {
 			`familiar-${stamp(this.deps.now())}.jsonl`,
 		);
 		this.status.problems = [];
-		this.status.restartNeeded = false;
 		this.status.client = client;
 		this.status.brain = describeBrain(settings);
 		const log = this.log(this.logFile, run);
