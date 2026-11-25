@@ -1,0 +1,191 @@
+/* The "Azeroth Night" look (sketches 001 and 004): dark panels, one gold accent, Cinzel for
+   names and headings, Inter for everything else. Shared by the main window and the tray panel. */
+:root {
+	--bg: #0d0f14;
+	--panel: #151922;
+	--panel2: #1b202b;
+	--line: #2a3140;
+	--gold: #d9b26a;
+	--gold-dim: #8a7140;
+	--text: #e8e2d4;
+	--muted: #9a958a;
+	--ok: #7fc28a;
+	--warn: #e0a44e;
+	--bad: #d46a5f;
+	--blue: #7aa2e8;
+	--serif: "Cinzel", serif;
+	--sans: "Inter Variable", "Inter", system-ui, sans-serif;
+	--mono: "JetBrains Mono", ui-monospace, monospace;
+	color-scheme: dark;
+}
+
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	font-family: var(--sans);
+	background: var(--bg);
+	color: var(--text);
+	overflow: hidden;
+	-webkit-font-smoothing: antialiased;
+	user-select: none;
+}
+
+#app {
+	height: 100%;
+}
+
+button {
+	font: inherit;
+}
+
+.card {
+	background: linear-gradient(180deg, var(--panel2), var(--panel));
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	padding: 18px 20px;
+	position: relative;
+}
+
+.card::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: 12px;
+	pointer-events: none;
+	border-top: 1px solid rgba(217, 178, 106, 0.18);
+}
+
+.label {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	color: var(--gold-dim);
+	margin-bottom: 10px;
+}
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 8px 14px;
+	border-radius: 8px;
+	border: 1px solid var(--gold-dim);
+	color: var(--gold);
+	font-size: 13px;
+	background: rgba(217, 178, 106, 0.06);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+	border-color: var(--gold);
+}
+
+.btn.primary {
+	background: var(--gold);
+	border-color: var(--gold);
+	color: #1a1408;
+	font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+	background: #e4c07c;
+}
+
+.btn.ghost {
+	border-color: var(--line);
+	color: var(--muted);
+	background: transparent;
+}
+
+.btn:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.btn:focus-visible,
+.nav-item:focus-visible {
+	outline: 2px solid var(--gold);
+	outline-offset: 2px;
+}
+
+.sigil {
+	width: 34px;
+	height: 34px;
+	flex: none;
+	border-radius: 50%;
+	border: 1px solid var(--gold);
+	display: grid;
+	place-items: center;
+	font-family: var(--serif);
+	color: var(--gold);
+	font-weight: 700;
+	box-shadow: 0 0 18px rgba(217, 178, 106, 0.25);
+}
+
+.dot {
+	width: 10px;
+	height: 10px;
+	flex: none;
+	border-radius: 50%;
+	display: inline-block;
+}
+
+.dot.connected {
+	background: var(--ok);
+	box-shadow: 0 0 10px var(--ok);
+}
+
+.dot.waiting {
+	background: var(--warn);
+	box-shadow: 0 0 8px rgba(224, 164, 78, 0.6);
+}
+
+.dot.error {
+	background: var(--bad);
+	box-shadow: 0 0 8px rgba(212, 106, 95, 0.6);
+}
+
+.connected-text {
+	color: var(--ok);
+}
+
+.waiting-text {
+	color: var(--warn);
+}
+
+.error-text {
+	color: var(--bad);
+}
+
+.chip {
+	display: inline-block;
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 99px;
+	border: 1px solid var(--gold-dim);
+	color: var(--gold);
+}
+
+.mono {
+	font-family: var(--mono);
+	font-size: 12px;
+}
+
+/* One line, cut with an ellipsis; game text can be long. */
+.one-line {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}

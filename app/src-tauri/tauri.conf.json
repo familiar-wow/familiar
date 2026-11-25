@@ -8,7 +8,7 @@
 		"devUrl": "http://localhost:1420",
 		"frontendDist": "../dist",
 		"beforeDevCommand": "bun run sidecar && bun run dev",
-		"beforeBuildCommand": "bun run sidecar && bun run build"
+		"beforeBuildCommand": "bun run sidecar && bun scripts/licenses.ts && bun run build"
 	},
 	"app": {
 		"windows": [
@@ -56,6 +56,7 @@
 			"icons/icon.ico"
 		],
 		"externalBin": ["binaries/familiar-core"],
+		"resources": ["THIRD-PARTY-LICENSES.txt"],
 		"windows": {
 			"nsis": {
 				"installMode": "currentUser",

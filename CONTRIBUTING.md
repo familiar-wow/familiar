@@ -28,9 +28,11 @@ Most of Familiar is written by an agent, and yours is welcome too. Many agents, 
 bun install
 bun run check   # lint and format check
 bun run fix     # apply safe fixes and formatting
+bun run typecheck
+bun test
 ```
 
-Checks for Lua and Rust will arrive with the first addon and app code.
+The addon test needs Lua 5.1 ([addon/README.md](addon/README.md)), the desktop app needs Rust ([app/README.md](app/README.md)).
 
 ## Security
 
