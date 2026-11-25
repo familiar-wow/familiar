@@ -33,4 +33,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test     # the process tests read /proc, so they run on Linux only
 ```
 
-CI builds the Windows installer and the Linux packages. On both systems it starts the built app against an empty client folder and checks that the addon arrives and that the core goes away with the app. The Windows installer is first installed silently. It is not signed yet (FAM-18), so Windows SmartScreen warns before it runs.
+[docs/install.md](../docs/install.md) covers installing, what the app keeps where, and removing it. CI builds the Windows installer and the Linux packages. On both systems it starts the built app against an empty client folder and checks that the addon arrives and that the core goes away with the app. The Windows installer is first installed silently. It is not signed yet (FAM-18), so Windows SmartScreen warns before it runs.

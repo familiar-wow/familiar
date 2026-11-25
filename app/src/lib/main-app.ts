@@ -324,6 +324,16 @@ export class MainApp {
 		await this.host.setCloseMode(saved.app?.close === "quit" ? "quit" : "tray");
 	}
 
+	/** The desktop app's own version, from its build (the core's comes with hello). */
+	appVersion(): Promise<string> {
+		return this.host.version();
+	}
+
+	/** Whether the system starts Familiar now: its own entry, which may differ from the setting. */
+	systemAutostart(): Promise<boolean> {
+		return this.host.autostart();
+	}
+
 	/**
 	 * Starting with the system: the system's entry first, then the setting, so the setting never
 	 * says on while the system does not start Familiar. Rejects with the reason.

@@ -1,0 +1,7 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "app-version",
+	"description": "The main window may read the app's own version, for the Settings page.",
+	"windows": ["main"],
+	"permissions": ["core:app:allow-version"]
+}

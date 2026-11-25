@@ -85,6 +85,7 @@ function fakeHost(
 		setCloseMode: async (m) => void closeModes.push(m),
 		showMain: async () => {},
 		quit: async () => {},
+		version: async () => "0.16.0",
 		autostart: async () => autostartOn,
 		setAutostart: async (on) => {
 			autostartCalls.push(on);

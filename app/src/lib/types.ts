@@ -97,6 +97,8 @@ export interface Host {
 	quit(): Promise<void>;
 	/** Asks the player for a folder; null when they cancel. Only the main window may. */
 	pickFolder(title: string): Promise<string | null>;
+	/** The desktop app's own version, from its build. */
+	version(): Promise<string>;
 	/** Whether Familiar starts with the system (the system's own entry, not the settings). */
 	autostart(): Promise<boolean>;
 	/** Turns starting with the system on or off; it then starts in the tray. */
