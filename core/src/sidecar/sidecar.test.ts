@@ -24,9 +24,14 @@ import {
 } from "./sidecar.ts";
 
 const folders: string[] = [];
-afterAll(() => {
-	for (const f of folders) rmSync(f, { recursive: true, force: true });
-});
+// Some folders hold a whole addon install (about 16,000 files); deleting them takes longer than
+// the 5 s hook default on Windows runners.
+afterAll(
+	() => {
+		for (const f of folders) rmSync(f, { recursive: true, force: true });
+	},
+	{ timeout: 60_000 },
+);
 
 function temp(): string {
 	const dir = mkdtempSync(join(tmpdir(), "familiar-sidecar-"));
