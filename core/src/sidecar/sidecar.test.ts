@@ -305,12 +305,8 @@ test("a brain test's deadline also ends an agent stuck before it answered initia
 			settings: {
 				brain: {
 					use: "agent",
-					// The shell writes the agent's pid, then becomes it.
-					command: [
-						"sh",
-						"-c",
-						`echo $$ > '${pidFile}'; exec '${FAKE_AGENT[0]}' '${FAKE_AGENT[1]}' --hang-init`,
-					],
+					// The agent writes its own pid: a shell's `$$` is no Windows pid under MSYS.
+					command: [...FAKE_AGENT, "--hang-init", "--pid-file", pidFile],
 					timeout: 20,
 				},
 			},
@@ -320,6 +316,7 @@ test("a brain test's deadline also ends an agent stuck before it answered initia
 	expect(got.problem).toContain("No answer within");
 	expect(performance.now() - started).toBeLessThan(5000);
 	const pid = Number(readFileSync(pidFile, "utf8").trim());
+	expect(pid).toBeGreaterThan(0);
 	// Killed: gone within a moment.
 	let alive = true;
 	for (let i = 0; i < 20 && alive; i++) {
@@ -850,6 +847,26 @@ test("the app's own settings change nothing a run uses, so they need no restart"
 		running: true,
 		restartNeeded: false,
 	});
+});
+
+test("a key in the file is named although a keychain key is the one used", async () => {
+	const { call } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	await call("key.set", { provider: "openrouter", key: "sk-new" });
+	const got = (await call("settings.get")).result as {
+		keySources: Record<string, string>;
+		keysInFile: string[];
+	};
+	expect(got.keySources.openrouter).toBe("keychain");
+	expect(got.keysInFile).toEqual(["openrouter"]);
+	expect(JSON.stringify(got)).not.toContain("sk-file");
 });
 
 test("a key in the file moves into the keychain when the settings leave its provider", async () => {

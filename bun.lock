@@ -10,7 +10,7 @@
     },
     "app": {
       "name": "@familiar/app",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "dependencies": {
         "@fontsource-variable/inter": "5.3.0",
         "@fontsource/cinzel": "5.3.0",
@@ -30,7 +30,7 @@
     },
     "core": {
       "name": "@familiar/core",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "dependencies": {
         "@agentclientprotocol/sdk": "2.7.0",
         "@ai-sdk/anthropic": "4.0.107",

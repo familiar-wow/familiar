@@ -4,6 +4,7 @@ import Brain from "./components/Brain.svelte";
 import Game from "./components/Game.svelte";
 import Logs from "./components/Logs.svelte";
 import Overview from "./components/Overview.svelte";
+import Settings from "./components/Settings.svelte";
 import Setup from "./components/Setup.svelte";
 import Sidebar from "./components/Sidebar.svelte";
 import { translator } from "./lib/i18n.ts";
@@ -44,6 +45,8 @@ const o = $derived(present(view, now));
 		/>
 	{:else if view.page === "brain"}
 		<Brain {app} {view} {t} />
+	{:else if view.page === "settings"}
+		<Settings {app} {view} {t} />
 	{:else if view.page === "setup"}
 		<Setup {app} {view} {t} />
 	{:else if view.page === "logs"}

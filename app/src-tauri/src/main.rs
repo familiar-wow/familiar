@@ -1,6 +1,7 @@
 // No console window next to the app in release builds on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod process;
 mod sidecar;
 mod tray;
@@ -13,7 +14,7 @@ use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
 use sidecar::{Sidecar, SidecarState, lock};
 use tray::TrayState;
 
-const MAIN: &str = "main";
+pub(crate) const MAIN: &str = "main";
 
 /// What the main window's X does.
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -120,6 +121,11 @@ fn main() {
             open_main(app)
         }))
         .plugin(tauri_plugin_positioner::init())
+        // Started with the system: the entry says so with --hidden (not on Linux, see autostart.rs).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![autostart::HIDDEN]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecar::new())
@@ -132,12 +138,28 @@ fn main() {
             set_close_mode,
             show_main,
             quit,
+            autostart::autostart_enabled,
+            autostart::set_autostart,
         ])
         .on_window_event(on_window_event)
         .setup(|app| {
             // Without a tray (no AppIndicator on Linux) the window still works.
-            if let Err(e) = tray::create(app.handle()) {
-                eprintln!("familiar: no tray icon: {e}");
+            let tray = match tray::create(app.handle()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("familiar: no tray icon: {e}");
+                    false
+                }
+            };
+            // Started with the system: only the tray icon, the window opens from there. Without a
+            // tray icon the window shows anyway, or there would be no way to reach Familiar.
+            // Not on Linux: whether a tray host shows the icon is not known (autostart.rs).
+            if cfg!(not(target_os = "linux"))
+                && tray
+                && std::env::args().any(|a| a == autostart::HIDDEN)
+                && let Some(main) = app.get_webview_window(MAIN)
+            {
+                let _ = main.hide();
             }
             sidecar::start(app.handle());
             Ok(())

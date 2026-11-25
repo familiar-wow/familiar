@@ -1,5 +1,6 @@
 // The only file that talks to Tauri: the shell's commands and events behind the Host interface,
 // so the rest of the pages and their tests never need Tauri.
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -31,6 +32,9 @@ export function tauriHost(): Host {
 		quit: async () => {
 			await invoke("quit");
 		},
+		version: () => getVersion(),
+		autostart: () => invoke<boolean>("autostart_enabled"),
+		setAutostart: (on) => invoke<void>("set_autostart", { on }),
 		pickFolder: async (title) => {
 			const chosen = await open({ directory: true, multiple: false, title });
 			return typeof chosen === "string" ? chosen : null;

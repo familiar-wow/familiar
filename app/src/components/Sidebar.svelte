@@ -14,13 +14,13 @@ let {
 	onOpen: (page: Page) => void;
 } = $props();
 
-// Settings comes with a later pull request; it stays in the list, dimmed.
+// Every page is in the list; one without `page` would show dimmed.
 const items: { icon: string; key: Key; page?: Page }[] = [
 	{ icon: "◈", key: "nav.overview", page: "overview" },
 	{ icon: "⚔", key: "nav.game", page: "game" },
 	{ icon: "✦", key: "nav.brain", page: "brain" },
 	{ icon: "☰", key: "nav.logs", page: "logs" },
-	{ icon: "⚙", key: "nav.settings" },
+	{ icon: "⚙", key: "nav.settings", page: "settings" },
 ];
 </script>
 

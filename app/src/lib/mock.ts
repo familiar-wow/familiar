@@ -4,6 +4,9 @@
 // `first` is a new player: a new settings file (setupDone false) and no addon yet.
 // `&brain=chatgpt|key|local|ssh` sets the brain that answers (default: the own agent `hermes acp`),
 // `&chatgpt=in` starts signed in with ChatGPT (also with `brain=chatgpt`).
+// Settings page: `&platform=linux` plays a Linux PC (default Windows), `&refuse=save` makes every
+// `settings.set` fail and `&refuse=autostart` the system's autostart entry, as a broken disk or
+// desktop would.
 //
 // Brain page cases: API keys for OpenRouter (keychain) and Anthropic (environment); a key that
 // starts with "bad" is refused by the provider. Ollama runs, LM Studio is installed but off
@@ -174,6 +177,8 @@ export function mockHost(
 			for (const h of handlers.get(event) ?? []) h(payload as never);
 		}, 0);
 	const later = (ms: number, fn: () => void) => setTimeout(fn, ms);
+	/** The system's autostart entry, which the settings follow. */
+	let autostartOn = false;
 
 	let state: SidecarState = {
 		gen: 1,
@@ -213,6 +218,15 @@ export function mockHost(
 		}
 	const query = new URLSearchParams(globalThis.location?.search ?? "");
 	const brainCase = query.get("brain") ?? "";
+	const refuse = query.get("refuse");
+	const platform = query.get("platform") === "linux" ? "linux" : "win32";
+	const folder =
+		platform === "linux"
+			? "/home/moonbreeze/.config/familiar"
+			: `${HOME}\\AppData\\Roaming\\Familiar`;
+	const sep = platform === "linux" ? "/" : "\\";
+	const settingsFile = `${folder}${sep}settings.json`;
+	const logsFolder = `${folder}${sep}logs`;
 	let settings: Line = {
 		app: {
 			language: language ?? "system",
@@ -293,7 +307,9 @@ export function mockHost(
 			keys[p] = source !== undefined;
 			if (source) keySources[p] = source;
 		}
-		return { settings: copy, keys, keySources, file: "" };
+		// Like the core: a key written into the settings file by hand.
+		const keysInFile = fileKey ? [fileKey] : [];
+		return { settings: copy, keys, keySources, keysInFile, file: settingsFile };
 	}
 
 	/** What a run uses: a change here needs a restart while Familiar runs. */
@@ -773,10 +789,14 @@ export function mockHost(
 			later(120, () => line({ id: request.id, error: { message } }));
 		switch (request.method) {
 			case "hello":
-				return reply({ version: VERSION, platform: "mock", settingsFile: "" });
+				return reply({ version: VERSION, platform, settingsFile });
 			case "settings.get":
 				return reply(shown());
 			case "settings.set": {
+				if (refuse === "save")
+					return fail(
+						`Could not save the settings: ${settingsFile} is read-only (EACCES).`,
+					);
 				const before = used(settings);
 				const next = structuredClone(p.settings as Line);
 				// As the core: a key sent here goes into the keychain, never into the file.
@@ -1005,6 +1025,8 @@ export function mockHost(
 			}
 			case "logs.recent":
 				return reply(log.slice(-Number(p.limit ?? 500)));
+			case "logs.folder":
+				return reply(logsFolder);
 			case "logs.open":
 				console.info("logs.open");
 				return reply(null);
@@ -1100,6 +1122,13 @@ export function mockHost(
 		},
 		quit: async () => {},
 		// No real dialog in a browser: the prompt stands in for it.
+		version: async () => "0.16.0",
+		autostart: async () => autostartOn,
+		setAutostart: async (on) => {
+			if (refuse === "autostart")
+				throw "The autostart entry could not be written: Permission denied (os error 13)";
+			autostartOn = on;
+		},
 		pickFolder: async (title) =>
 			globalThis.prompt?.(title, SECOND.replace(/\\_forever_$/, "")) ?? null,
 		on: async (event, handler) => {

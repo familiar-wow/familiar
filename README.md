@@ -32,24 +32,24 @@ Familiar only advises. It never moves, casts or targets for you. The design is d
 
 ## Roadmap
 
-| Phase                     | Goal                                                                   | Status                                        |
-| ------------------------- | ---------------------------------------------------------------------- | --------------------------------------------- |
-| 0 Foundation              | repository, tooling and the first architecture decisions               | done                                          |
-| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | done                                          |
-| 2 Game context and links  | the full character as context, links in both directions                | in progress: 14 game tools                    |
-| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    | in progress: built-in agent                   |
-| 4 Memory                  | a memory that survives a change of brain                               |                                               |
-| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    | in progress: window, tray, game and log pages |
-| 6 Public alpha            | release on CurseForge, website and user docs                           |                                               |
+| Phase                     | Goal                                                                   | Status                                         |
+| ------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------- |
+| 0 Foundation              | repository, tooling and the first architecture decisions               | done                                           |
+| 1 Walking skeleton        | a question typed in the game reaches a brain and the answer comes back | done                                           |
+| 2 Game context and links  | the full character as context, links in both directions                | in progress: 14 game tools                     |
+| 3 Brains                  | built-in agent for API keys and local models, any agent through ACP    | in progress: brain page in the app             |
+| 4 Memory                  | a memory that survives a change of brain                               |                                                |
+| 5 Desktop app and release | installers and updates for Windows, macOS and Linux                    | in progress: test builds for Windows and Linux |
+| 6 Public alpha            | release on CurseForge, website and user docs                           |                                                |
 
 ## Repository
 
-| Folder            | Contents                                 |
-| ----------------- | ---------------------------------------- |
-| [`addon/`](addon) | WoW addon (Lua)                          |
-| [`core/`](core)   | companion core (TypeScript, Bun)         |
-| [`app/`](app)     | desktop app (Tauri, Svelte)              |
-| [`docs/`](docs)   | architecture decisions and documentation |
+| Folder            | Contents                                                                |
+| ----------------- | ----------------------------------------------------------------------- |
+| [`addon/`](addon) | WoW addon (Lua)                                                         |
+| [`core/`](core)   | companion core (TypeScript, Bun)                                        |
+| [`app/`](app)     | desktop app (Tauri, Svelte)                                             |
+| [`docs/`](docs)   | architecture decisions and documentation, [installing](docs/install.md) |
 
 ## Contributing
 

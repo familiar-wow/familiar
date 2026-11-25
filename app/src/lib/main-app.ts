@@ -37,6 +37,8 @@ interface SettingsReply {
 	settings?: Settings;
 	keys?: Record<string, boolean>;
 	keySources?: Record<string, KeySource>;
+	/** Providers with a key in the settings file, also when another key is the one used. */
+	keysInFile?: string[];
 	file?: string;
 }
 
@@ -301,7 +303,47 @@ export class MainApp {
 		this.view.settings = got.settings;
 		this.view.keys = got.keys ?? {};
 		this.view.keySources = got.keySources ?? {};
+		this.view.keysInFile = got.keysInFile ?? [];
+		// A language chosen in the settings applies at once, here and in the tray panel.
+		this.view.language = resolveLanguage(
+			got.settings.app?.language,
+			this.o.systemLanguage,
+		);
 		this.changed();
+	}
+
+	/**
+	 * Changes the app's own settings (`app.*`): saved like any other change, then what the shell
+	 * does at once, the close button's behaviour. Familiar keeps running; none of them needs a
+	 * restart. Rejects with the core's message.
+	 */
+	async updateApp(
+		change: (app: NonNullable<Settings["app"]>) => NonNullable<Settings["app"]>,
+	): Promise<void> {
+		const saved = await this.updateSettings((settings) => ({
+			...settings,
+			app: change({ ...settings.app }),
+		}));
+		await this.host.setCloseMode(saved.app?.close === "quit" ? "quit" : "tray");
+	}
+
+	/** The desktop app's own version, from its build (the core's comes with hello). */
+	appVersion(): Promise<string> {
+		return this.host.version();
+	}
+
+	/** Whether the system starts Familiar now: its own entry, which may differ from the setting. */
+	systemAutostart(): Promise<boolean> {
+		return this.host.autostart();
+	}
+
+	/**
+	 * Starting with the system: the system's entry first, then the setting, so the setting never
+	 * says on while the system does not start Familiar. Rejects with the reason.
+	 */
+	async setAutostart(on: boolean): Promise<void> {
+		await this.host.setAutostart(on);
+		await this.updateApp((app) => ({ ...app, autostart: on }));
 	}
 
 	/** The folder dialog, titled in the page's language; `title` for another purpose. */
@@ -450,6 +492,7 @@ export class MainApp {
 			...(this.view.settings ? { settings: this.view.settings } : {}),
 			keys: this.view.keys,
 			keySources: this.view.keySources,
+			keysInFile: this.view.keysInFile,
 			...(this.view.brainTab ? { brainTab: this.view.brainTab } : {}),
 		};
 	}
@@ -492,6 +535,8 @@ export class MainApp {
 					}
 					this.changed();
 					await this.host.setCloseMode(app?.close === "quit" ? "quit" : "tray");
+					// The autostart entry is left as it is: the player may have switched it off in
+					// the system (Windows' Startup apps). The Settings page shows a difference.
 				},
 			},
 			{

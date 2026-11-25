@@ -7,6 +7,8 @@ import brainDe from "../locales/brain.de.json" with { type: "json" };
 import brainEn from "../locales/brain.en.json" with { type: "json" };
 import baseDe from "../locales/de.json" with { type: "json" };
 import baseEn from "../locales/en.json" with { type: "json" };
+import settingsDe from "../locales/settings.de.json" with { type: "json" };
+import settingsEn from "../locales/settings.en.json" with { type: "json" };
 import setupDe from "../locales/setup.de.json" with { type: "json" };
 import setupEn from "../locales/setup.en.json" with { type: "json" };
 import type { Language } from "./types.ts";
@@ -17,10 +19,11 @@ export const parts = {
 	brain: { en: brainEn, de: brainDe },
 	agent: { en: agentEn, de: agentDe },
 	setup: { en: setupEn, de: setupDe },
+	settings: { en: settingsEn, de: settingsDe },
 };
 
-const en = { ...baseEn, ...brainEn, ...agentEn, ...setupEn };
-const de = { ...baseDe, ...brainDe, ...agentDe, ...setupDe };
+const en = { ...baseEn, ...brainEn, ...agentEn, ...setupEn, ...settingsEn };
+const de = { ...baseDe, ...brainDe, ...agentDe, ...setupDe, ...settingsDe };
 
 export type Key = keyof typeof en;
 export type Translate = (
