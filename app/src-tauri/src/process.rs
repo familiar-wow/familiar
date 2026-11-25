@@ -55,14 +55,18 @@ mod imp {
         /// Called once, by the thread that owns `child`.
         pub fn wait(&self, child: &mut Child) -> io::Result<ExitStatus> {
             if let Err(e) = wait_unreaped(self.pid) {
-                // Something else reaped the core, so its ids are no longer ours to signal.
                 eprintln!("familiar: cannot wait for the core: {e}");
-                *lock(&self.reaped) = true;
-                return child.wait();
+                if e.raw_os_error() == Some(libc::ECHILD) {
+                    // Something else reaped the core, so its ids are no longer ours to signal.
+                    *lock(&self.reaped) = true;
+                    return child.wait();
+                }
+                // Any other failure says nothing about the core, which may still run: it is
+                // still ours and unreaped, so kill it and its group before the reap below.
             }
             let mut reaped = lock(&self.reaped);
             kill_group(self.pid);
-            // Does not block: the core is a zombie by now.
+            // Does not block for long: the core is a zombie by now, or was just killed.
             let status = child.wait();
             *reaped = true;
             status
@@ -108,26 +112,17 @@ mod imp {
     }
 }
 
-// The job object and the thread resume are adapted from tauri-plugin-shell's `job_object.rs`
-// (Apache-2.0 OR MIT), see NOTICE.
 #[cfg(windows)]
 mod imp {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
-    use std::os::windows::process::CommandExt;
     use std::{mem, ptr};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject, TerminateJobObject,
-    };
-    use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
     };
 
     use super::*;
@@ -140,12 +135,11 @@ mod imp {
 
     pub fn spawn(mut command: Command) -> io::Result<(Process, Child)> {
         let job = Job::new()?;
-        // Suspended, so the core cannot start anything before it is in the job. This replaces
-        // the flags set so far, hence `CREATE_NO_WINDOW` again.
-        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        // The core goes into the job right after it started. It starts programs of its own
+        // only when the app asks it over stdin, which cannot happen before this returns, and
+        // processes started after the assignment are in the job too.
         let mut child = command.spawn()?;
-        if let Err(e) = job.assign(&child).and_then(|()| resume_threads(child.id())) {
-            // Do not leave a suspended core behind.
+        if let Err(e) = job.assign(&child) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(e);
@@ -170,17 +164,18 @@ mod imp {
         }
     }
 
-    /// An owned job object. Closing the handle kills every process in the job, so the core's
+    /// A job object that kills every process in it when its last handle closes, so the core's
     /// tree also goes when Familiar dies without a chance to clean up.
     struct Job(HANDLE);
 
-    // SAFETY: the handle is only ever passed to thread-safe Win32 calls.
+    // SAFETY: the handle is only passed to Win32 calls that may come from any thread.
     unsafe impl Send for Job {}
     unsafe impl Sync for Job {}
 
     impl Job {
         fn new() -> io::Result<Self> {
-            // SAFETY: both arguments may be null: default security, no name.
+            // SAFETY: both arguments may be null: default security, no name. The handle is not
+            // inheritable, so no child keeps the job alive.
             let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
             if handle.is_null() {
                 return Err(io::Error::last_os_error());
@@ -226,47 +221,5 @@ mod imp {
             // SAFETY: the handle is open and not used after this.
             unsafe { CloseHandle(self.0) };
         }
-    }
-
-    /// `std` closes the main thread's handle right after `CreateProcess`, so a suspended child
-    /// can only be resumed by looking its threads up again.
-    fn resume_threads(pid: u32) -> io::Result<()> {
-        // SAFETY: plain call; the snapshot handle is closed below.
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        let result = resume_snapshot_threads(snapshot, pid);
-        // SAFETY: the snapshot is open and not used after this.
-        unsafe { CloseHandle(snapshot) };
-        result
-    }
-
-    fn resume_snapshot_threads(snapshot: HANDLE, pid: u32) -> io::Result<()> {
-        // SAFETY: the entry is plain data; `dwSize` is set as the API asks.
-        let mut entry: THREADENTRY32 = unsafe { mem::zeroed() };
-        entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
-        // SAFETY: `snapshot` is open and `entry` is valid for the calls in this loop.
-        let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
-        while found {
-            if entry.th32OwnerProcessID == pid {
-                // SAFETY: plain call; the thread handle is closed below.
-                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if thread.is_null() {
-                    return Err(io::Error::last_os_error());
-                }
-                // SAFETY: `thread` is open with the right to resume it.
-                let resumed = unsafe { ResumeThread(thread) };
-                let error = io::Error::last_os_error();
-                // SAFETY: `thread` is open and not used after this.
-                unsafe { CloseHandle(thread) };
-                if resumed == u32::MAX {
-                    return Err(error);
-                }
-            }
-            // SAFETY: as above.
-            found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
-        }
-        Ok(())
     }
 }

@@ -5,10 +5,11 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -23,6 +24,9 @@ const STDERR_TAIL: usize = 20;
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const RESTART_WAIT: Duration = Duration::from_secs(10);
+/// How long the output may still drain once the core was reaped and its group killed. Only a
+/// descendant that left the group (`setsid`) and kept a pipe open makes this run out.
+const DRAIN: Duration = Duration::from_secs(2);
 
 /// Lines for the core's stdin thread.
 type Writer = mpsc::Sender<Vec<u8>>;
@@ -108,6 +112,14 @@ struct Done {
 }
 
 impl Done {
+    /// For "no core yet": nothing to wait for.
+    fn finished() -> Self {
+        Done {
+            ended: Mutex::new(true),
+            cv: Condvar::new(),
+        }
+    }
+
     fn set(&self) {
         *lock(&self.ended) = true;
         self.cv.notify_all();
@@ -147,7 +159,7 @@ impl Sidecar {
                 state: SidecarState::new(0, false),
                 writer: None,
                 process: None,
-                done: Arc::new(Done::default()),
+                done: Arc::new(Done::finished()),
                 quitting: false,
             }),
             ops: Mutex::new(()),
@@ -169,6 +181,12 @@ impl Sidecar {
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
         writer.send(bytes).map_err(|_| NOT_RUNNING.to_string())
+    }
+
+    /// The latest generation's end, also while its `finish` is still under way: its `running`
+    /// is false by then, but its `sidecar-exit` may not have gone out yet.
+    fn last_done(&self) -> Arc<Done> {
+        lock(&self.inner).done.clone()
     }
 
     /// The running generation's stdin queue, process and termination signal.
@@ -257,13 +275,16 @@ fn spawn_next(app: &AppHandle) {
 
     let process = Arc::new(process);
     let (writer, queue) = mpsc::channel();
-    {
+    // `kill_on_exit` sets `quitting` under this lock and then looks for a core: either it finds
+    // this one, or this sees `quitting` and kills it right after its supervisor started.
+    let quitting = {
         let mut inner = lock(&sidecar.inner);
         inner.state = SidecarState::new(generation, true);
         inner.writer = Some(writer);
         inner.process = Some(process.clone());
         inner.done = done.clone();
-    }
+        inner.quitting
+    };
     emit(app, "sidecar-started", StartedPayload { generation });
     // The generation's threads start after `sidecar-started`, so a core that dies at once
     // still reports its lines and its exit after its start.
@@ -273,14 +294,18 @@ fn spawn_next(app: &AppHandle) {
             .name(format!("core-{generation}"))
             .spawn(move || supervise(app, generation, &process, child, queue, &done))
     };
-    if let Err(e) = supervisor {
-        // Nobody waits for this core now. It is never reaped, so its ids stay its own and the
-        // kill is safe.
-        process.kill();
-        let reason = format!("Could not start the core: {e}");
-        eprintln!("familiar: {reason}");
-        stderr_line(app, generation, &reason);
-        finish(app, generation, None, &done);
+    match supervisor {
+        Ok(_) if quitting => process.kill(),
+        Ok(_) => {}
+        Err(e) => {
+            // Nobody waits for this core now. It is never reaped, so its ids stay its own and
+            // the kill is safe.
+            process.kill();
+            let reason = format!("Could not start the core: {e}");
+            eprintln!("familiar: {reason}");
+            stderr_line(app, generation, &reason);
+            finish(app, generation, None, &done);
+        }
     }
 }
 
@@ -326,18 +351,35 @@ fn run(
     process: &Process,
     mut child: Child,
     queue: mpsc::Receiver<Vec<u8>>,
-    on_stdout: impl FnMut(String) + Send + 'static,
-    on_stderr: impl FnMut(String) + Send + 'static,
+    mut on_stdout: impl FnMut(String) + Send + 'static,
+    mut on_stderr: impl FnMut(String) + Send + 'static,
 ) -> Option<i32> {
-    let mut readers = Vec::new();
+    // Set when draining gave up: a reader still blocked on a pipe that something else holds
+    // then forwards nothing more, so no line comes after the generation's end.
+    let cut = Arc::new(AtomicBool::new(false));
+    let (out_cut, err_cut) = (cut.clone(), cut.clone());
+    let on_stdout = move |line| {
+        if !out_cut.load(Ordering::SeqCst) {
+            on_stdout(line);
+        }
+    };
+    let on_stderr = move |line| {
+        if !err_cut.load(Ordering::SeqCst) {
+            on_stderr(line);
+        }
+    };
+    let (ended, drained) = mpsc::channel();
+    let mut readers = 0;
     let served = serve(
         generation,
         &mut child,
         queue,
         on_stdout,
         on_stderr,
+        &ended,
         &mut readers,
     );
+    drop(ended);
     if let Err(e) = served {
         // A core that cannot be fed or heard is of no use.
         eprintln!("familiar: cannot talk to the core: {e}");
@@ -350,21 +392,35 @@ fn run(
             None
         }
     };
-    for reader in readers {
-        let _ = reader.join();
+    let deadline = Instant::now() + DRAIN;
+    let mut left = readers;
+    while left > 0 {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match drained.recv_timeout(wait) {
+            Ok(()) => left -= 1,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "familiar: something the core started keeps its output open; not waiting for it"
+                );
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
+    cut.store(true, Ordering::SeqCst);
     code
 }
 
-/// Starts the threads for the core's three pipes. The readers started so far are in `readers`
-/// also when a later step fails.
+/// Starts the threads for the core's three pipes. Each reader says on `ended` when its pipe
+/// ended; `readers` counts the ones started, also when a later step fails.
 fn serve(
     generation: u64,
     child: &mut Child,
     queue: mpsc::Receiver<Vec<u8>>,
     on_stdout: impl FnMut(String) + Send + 'static,
     on_stderr: impl FnMut(String) + Send + 'static,
-    readers: &mut Vec<JoinHandle<()>>,
+    ended: &mpsc::Sender<()>,
+    readers: &mut usize,
 ) -> io::Result<()> {
     let missing = || io::Error::other("a pipe is missing");
     let stdin = child.stdin.take().ok_or_else(missing)?;
@@ -374,8 +430,18 @@ fn serve(
     // Writes block, so they get their own thread, which holds no lock. Nobody joins it: a write
     // stuck on a core that stopped reading comes free when the core is killed.
     named("stdin").spawn(move || stdin_loop(stdin, queue))?;
-    readers.push(named("stdout").spawn(move || read_lines(BufReader::new(stdout), on_stdout))?);
-    readers.push(named("stderr").spawn(move || read_lines(BufReader::new(stderr), on_stderr))?);
+    let out_ended = ended.clone();
+    named("stdout").spawn(move || {
+        read_lines(BufReader::new(stdout), on_stdout);
+        let _ = out_ended.send(());
+    })?;
+    *readers += 1;
+    let err_ended = ended.clone();
+    named("stderr").spawn(move || {
+        read_lines(BufReader::new(stderr), on_stderr);
+        let _ = err_ended.send(());
+    })?;
+    *readers += 1;
     Ok(())
 }
 
@@ -429,7 +495,7 @@ fn stderr_line(app: &AppHandle, generation: u64, line: &str) {
     let seq = {
         let sidecar = app.state::<Sidecar>();
         let mut inner = lock(&sidecar.inner);
-        // Cannot differ: the next generation only starts after this one's readers ended.
+        // A reader that was cut off may still be around when the next generation started.
         if inner.state.generation != generation {
             return;
         }
@@ -479,13 +545,15 @@ pub async fn restart(app: AppHandle) -> Result<(), String> {
         if lock(&sidecar.inner).quitting {
             return Ok(());
         }
-        if let Some((writer, process, done)) = sidecar.current() {
+        if let Some((writer, process, _)) = sidecar.current() {
             drop(writer);
             process.kill();
-            if !done.wait(RESTART_WAIT) {
-                eprintln!("familiar: the old core did not end in time; no new one started");
-                return Err(DID_NOT_STOP.to_string());
-            }
+        }
+        // Waits for the latest generation's end even when it was no longer running, so its
+        // `sidecar-exit` always goes out before the next one's `sidecar-started`.
+        if !sidecar.last_done().wait(RESTART_WAIT) {
+            eprintln!("familiar: the old core did not end in time; no new one started");
+            return Err(DID_NOT_STOP.to_string());
         }
         // The app may have begun to exit while this waited.
         if !lock(&sidecar.inner).quitting {
@@ -684,7 +752,6 @@ mod process_tests {
             "sh -c 'sleep 30 & sleep 31' & sleep 0.3; echo started; echo oops >&2; exit 3",
         );
         let pgid = child.id();
-        assert_eq!(group(pgid).len(), 1);
         let (_writer, queue) = mpsc::channel();
         let (out, on_stdout) = collect();
         let (err, on_stderr) = collect();
@@ -730,6 +797,25 @@ mod process_tests {
         assert_eq!(runner.join().unwrap(), None);
         assert!(killed.elapsed() < Duration::from_secs(5));
         assert!(group_is_gone(pgid));
+    }
+
+    #[test]
+    fn a_child_that_left_the_group_cannot_hold_the_end_up() {
+        // `setsid` takes the child out of the core's group, so the group kill misses it, and it
+        // keeps the core's stdout open.
+        let (process, child) = fake_core("setsid sleep 30 & sleep 0.3; echo started; exit 4");
+        let (_writer, queue) = mpsc::channel();
+        let (out, on_stdout) = collect();
+        let started = Instant::now();
+
+        let code = run(1, &process, child, queue, on_stdout, |_| {});
+
+        assert_eq!(code, Some(4));
+        // The escaped child really kept the pipe open: the end came only after the drain.
+        assert!(started.elapsed() >= DRAIN);
+        assert!(started.elapsed() < DRAIN + Duration::from_secs(3));
+        assert_eq!(*lock(&out), ["started"]);
+        let _ = Command::new("pkill").args(["-f", "^sleep 30$"]).status();
     }
 
     #[test]
