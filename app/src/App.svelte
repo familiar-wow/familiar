@@ -40,7 +40,7 @@ const o = $derived(present(view, now));
 			{view}
 			{t}
 			restartNeeded={o.restartNeeded}
-			onRestartFamiliar={() => app.restartFamiliar()}
+			onRestartFamiliar={async () => void (await app.restartFamiliar())}
 		/>
 	{:else if view.page === "brain"}
 		<Brain {app} {view} {t} />
@@ -53,7 +53,7 @@ const o = $derived(present(view, now));
 			{o}
 			{t}
 			onRestartCore={() => app.restartCore()}
-			onRestartFamiliar={() => app.restartFamiliar()}
+			onRestartFamiliar={async () => void (await app.restartFamiliar())}
 		/>
 	{/if}
 </div>

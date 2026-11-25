@@ -146,6 +146,8 @@ export class AcpBrain implements Brain {
 				stopReason,
 				chars: text.length,
 			});
+			if (!timedOut && stopReason === "end_turn" && text)
+				this.turn?.onAnswered?.();
 			reply(answerFor(stopReason, text));
 			if (fresh) this.checkWow(session, served);
 		} catch (error) {

@@ -326,6 +326,22 @@ function to(over: Partial<SshHost> = {}): SshHost {
 	};
 }
 
+test("a test's command forwards no port: the running Familiar may hold it", () => {
+	const { command } = sshCommand(
+		{ ...agent(), port: undefined },
+		{ askpass: [] },
+	);
+	expect(command).toEqual([
+		"ssh",
+		"-T",
+		"-o",
+		"BatchMode=yes",
+		"gamer",
+		"hermes",
+		"acp",
+	]);
+});
+
 test("sshCommand with a key never asks", () => {
 	expect(sshCommand(agent(), { askpass: [] })).toEqual({
 		command: [

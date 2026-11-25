@@ -66,6 +66,11 @@ export interface Turn {
 	onNote(text: string): void;
 	/** The agent asks for permission; true allows it once. */
 	onPermission(title: string): Promise<boolean>;
+	/**
+	 * A real answer came, not a message about a failure (both are strings to the player). Only
+	 * the app's test needs to tell them apart.
+	 */
+	onAnswered?(): void;
 }
 
 export interface Brain {

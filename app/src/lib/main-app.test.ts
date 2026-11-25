@@ -457,15 +457,20 @@ test("a new core starts with an empty log buffer and fills it again", async () =
 	expect(app.view.lines).toHaveLength(1);
 });
 
-test("the setup assistant opens once when it never ran, not for every new core", async () => {
+test("a new player gets the setup assistant once, and Familiar waits for it to start", async () => {
 	const f = fakeHost();
 	f.replies["settings.get"] = {
-		result: { settings: { app: { language: "en" } }, keys: {} },
+		result: {
+			settings: { app: { language: "en", setupDone: false } },
+			keys: {},
+		},
 	};
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
 	await settle();
 	expect(app.view.page).toBe("setup");
+	// The assistant installs the addon itself: the bootstrap does not start Familiar.
+	expect(f.sent.map((s) => s.method)).not.toContain("start");
 	app.open("overview");
 	await app.restartCore();
 	await settle();
@@ -473,16 +478,26 @@ test("the setup assistant opens once when it never ran, not for every new core",
 	expect(app.view.page).toBe("overview");
 });
 
-test("finishing the setup saves setupDone with the rest and goes to the overview", async () => {
+test("a player from before the app (no setupDone) is not sent through the assistant", async () => {
 	const f = fakeHost();
 	f.replies["settings.get"] = {
-		result: {
-			settings: {
-				app: { language: "en" },
-				brain: { command: ["hermes", "acp"] },
-			},
-			keys: { openai: true },
-		},
+		result: { settings: { app: { language: "en" }, brain: {} }, keys: {} },
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.page).toBe("overview");
+	expect(f.sent.map((s) => s.method)).toContain("start");
+});
+
+test("finishing the setup saves setupDone with the rest, opens a page and starts Familiar", async () => {
+	const f = fakeHost();
+	let saved: Record<string, unknown> = {
+		app: { language: "en", setupDone: false },
+		brain: { command: ["hermes", "acp"] },
+	};
+	f.replies["settings.get"] = {
+		result: { settings: saved, keys: { openai: true } },
 	};
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
@@ -491,8 +506,9 @@ test("finishing the setup saves setupDone with the rest and goes to the overview
 	f.replies["settings.set"] = {
 		result: { settings: { app: { setupDone: true } }, keys: {} },
 	};
-	await app.finishSetup();
-	expect(app.view.page).toBe("overview");
+	f.replies.start = { result: status({ running: true }) };
+	await app.finishSetup("brain");
+	expect(app.view.page).toBe("brain");
 	expect(app.view.settings?.app?.setupDone).toBe(true);
 	// The whole settings object goes back, with only setupDone changed.
 	expect(f.params.filter((p) => p.method === "settings.set")).toEqual([
@@ -506,6 +522,40 @@ test("finishing the setup saves setupDone with the rest and goes to the overview
 			},
 		},
 	]);
+	expect(f.sent.at(-1)?.method).toBe("start");
+	void saved;
+	saved = {};
+});
+
+test("settings changes run one after another, so neither undoes the other", async () => {
+	const f = fakeHost();
+	let file: Record<string, unknown> = { app: { setupDone: true } };
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	// A core that keeps what it is given: settings.get answers with the last save.
+	f.replies["settings.get"] = { result: { settings: file, keys: {} } };
+	const keep = (p?: Record<string, unknown>) => {
+		file = p?.settings as Record<string, unknown>;
+		f.replies["settings.get"] = { result: { settings: file, keys: {} } };
+	};
+	const send = f.host.send;
+	f.host.send = async (line) => {
+		const r = JSON.parse(line);
+		if (r.method === "settings.set") {
+			keep(r.params);
+			f.replies["settings.set"] = { result: { settings: file, keys: {} } };
+		}
+		return send(line);
+	};
+	await Promise.all([
+		app.rememberBrain({ kind: "chatgpt", name: "gpt-6-luna" }),
+		app.rememberBrain({ kind: "key", provider: "openrouter", name: "m" }),
+	]);
+	expect((file.app as { brains: unknown }).brains).toEqual({
+		chatgpt: { name: "gpt-6-luna" },
+		key: { provider: "openrouter", name: "m" },
+	});
 });
 
 test("use this brain: saved, then a running Familiar restarts and a stopped one starts", async () => {
@@ -526,7 +576,9 @@ test("use this brain: saved, then a running Familiar restarts and a stopped one 
 	await settle();
 	expect(app.view.status?.running).toBe(true);
 	f.sent.length = 0;
-	await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" });
+	expect(await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" })).toEqual({
+		ok: true,
+	});
 	expect(f.sent.map((s) => s.method)).toEqual([
 		"settings.get",
 		"settings.set",
@@ -536,7 +588,11 @@ test("use this brain: saved, then a running Familiar restarts and a stopped one 
 		settings: {
 			app: {
 				setupDone: true,
-				brains: { chatgpt: { name: "gpt-6-luna" } },
+				// The agent that answered before keeps its place on its tab.
+				brains: {
+					agent: { command: ["hermes", "acp"] },
+					chatgpt: { name: "gpt-6-luna" },
+				},
 			},
 			brain: {
 				use: "model",
@@ -546,7 +602,18 @@ test("use this brain: saved, then a running Familiar restarts and a stopped one 
 			},
 		},
 	});
-	app.view.status = status({ running: false });
+	// A new brain that does not start: the page hears why, and the status is asked again.
+	f.replies.restart = { error: "Could not start the agent." };
+	f.replies.status = { result: status({ running: false }) };
+	f.sent.length = 0;
+	expect(await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" })).toEqual({
+		ok: false,
+		problem: "Could not start the agent.",
+	});
+	expect(f.sent.at(-1)?.method).toBe("status");
+	expect(app.view.status?.running).toBe(false);
+	// Stopped: Use this starts it.
+	f.replies.start = { result: status({ running: true }) };
 	f.sent.length = 0;
 	await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" });
 	expect(f.sent.map((s) => s.method)).toEqual([
@@ -554,6 +621,87 @@ test("use this brain: saved, then a running Familiar restarts and a stopped one 
 		"settings.set",
 		"start",
 	]);
+});
+
+test("one ChatGPT sign-in at a time, with its address shown while it waits", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["chatgpt.signIn"] = "never";
+	const first = app.signInChatGpt();
+	const second = app.signInChatGpt();
+	expect(second).toBe(first);
+	await settle();
+	expect(f.sent.filter((s) => s.method === "chatgpt.signIn")).toHaveLength(1);
+	f.line(1, {
+		event: "chatgpt-url",
+		data: { url: "https://auth.openai.com/oauth/authorize?x=1" },
+	});
+	expect(app.view.chatgptUrl).toBe(
+		"https://auth.openai.com/oauth/authorize?x=1",
+	);
+	// Only an https address is shown.
+	f.line(1, { event: "chatgpt-url", data: { url: "javascript:alert(1)" } });
+	expect(app.view.chatgptUrl).toBe(
+		"https://auth.openai.com/oauth/authorize?x=1",
+	);
+	const id = f.sent.find((s) => s.method === "chatgpt.signIn")?.id;
+	f.line(1, { id, result: { account: "me@example.com", usage: "https://u" } });
+	expect(await first).toEqual({
+		account: "me@example.com",
+		usage: "https://u",
+	});
+	expect(app.view.chatgptUrl).toBeUndefined();
+});
+
+test("a key goes only to key.set, and the page learns where keys are afterwards", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["key.set"] = { result: null };
+	f.replies["settings.get"] = {
+		result: {
+			settings: { app: { setupDone: true } },
+			keys: { openrouter: true },
+			keySources: { openrouter: "keychain" },
+		},
+	};
+	await app.setKey("openrouter", "sk-test-123");
+	expect(f.params.find((p) => p.method === "key.set")?.params).toEqual({
+		provider: "openrouter",
+		key: "sk-test-123",
+	});
+	expect(app.view.keySources).toEqual({ openrouter: "keychain" });
+	expect(JSON.stringify(app.view)).not.toContain("sk-test-123");
+});
+
+test("the brain test: a real answer, or the core's words, never a timeout's crash", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["brain.test"] = {
+		result: { ok: false, ms: 120, problem: "Could not start x", tools: [] },
+	};
+	expect(
+		await app.testBrain({ kind: "agent", where: "local", command: ["x"] }),
+	).toEqual({ ok: false, ms: 120, problem: "Could not start x", tools: [] });
+	f.replies["brain.test"] = { error: "The settings are broken." };
+	expect(
+		await app.testBrain({ kind: "agent", where: "local", command: ["x"] }),
+	).toMatchObject({ ok: false, problem: "The settings are broken." });
+});
+
+test("openBrain opens the Brain page on a kind's tab", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	app.openBrain("local");
+	expect(app.view.page).toBe("brain");
+	expect(app.view.brainTab).toBe("local");
 });
 
 test("familiar-open from the tray panel switches the page, also across a new core", async () => {

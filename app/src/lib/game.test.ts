@@ -291,6 +291,15 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 		start: async () => {
 			started++;
 		},
+		// As MainApp does it: read, change, save.
+		updateSettings: async (change) => {
+			const got = await deps.call<{ settings: Record<string, unknown> }>(
+				"settings.get",
+			);
+			const next = change(structuredClone(got.settings));
+			await deps.call("settings.set", { settings: next });
+			return next;
+		},
 		...over,
 	};
 	return {

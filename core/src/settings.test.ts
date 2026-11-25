@@ -21,12 +21,11 @@ test("old settings without brain.use keep the player's agent", () => {
 	});
 });
 
-test("old settings get the app's new fields: setup not done, nothing remembered", () => {
+test("old settings get the app's new fields: setup unset, nothing remembered", () => {
 	withFile('{"brain":{"command":["hermes","acp"]}}', (file) => {
-		expect(loadSettings(file).app).toMatchObject({
-			setupDone: false,
-			brains: {},
-		});
+		const app = loadSettings(file).app;
+		expect(app.setupDone).toBeUndefined();
+		expect(app.brains).toEqual({});
 	});
 	withFile(
 		JSON.stringify({
@@ -57,6 +56,35 @@ test("old settings get the app's new fields: setup not done, nothing remembered"
 	// A remembered API key provider is one that takes a key, not a local server.
 	withFile(
 		'{"app":{"brains":{"key":{"provider":"ollama","name":"x"}}}}',
+		(file) => {
+			expect(() => loadSettings(file)).toThrow();
+		},
+	);
+});
+
+test("a server address is http or https, without a user or password in it", () => {
+	const local = (baseUrl: string) =>
+		JSON.stringify({
+			brain: {
+				use: "model",
+				model: { provider: "openai-compatible", name: "m", baseUrl },
+			},
+		});
+	withFile(local("http://192.168.1.20:11434/v1"), (file) => {
+		expect(loadSettings(file).brain.model?.baseUrl).toBe(
+			"http://192.168.1.20:11434/v1",
+		);
+	});
+	for (const bad of [
+		"http://me:secret@host/v1",
+		"file:///etc/passwd",
+		"ftp://host/v1",
+	])
+		withFile(local(bad), (file) => {
+			expect(() => loadSettings(file)).toThrow();
+		});
+	withFile(
+		'{"app":{"brains":{"local":{"provider":"ollama","name":"m","baseUrl":"http://u:p@h/v1"}}}}',
 		(file) => {
 			expect(() => loadSettings(file)).toThrow();
 		},

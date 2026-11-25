@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { AcpBrain } from "../brain/acp.ts";
 import type { Brain, Question, Turn } from "../brain/chat.ts";
 import { ChatGpt, ChatGptError, USAGE_URL } from "../brain/chatgpt.ts";
-import { ModelBrain } from "../brain/model.ts";
+import { apiKey, ModelBrain } from "../brain/model.ts";
 import {
 	describeBrain,
 	prepareBrain,
@@ -52,6 +52,7 @@ import {
 	hostKey,
 	resolveHost,
 	type SshAgentConfig,
+	SshError,
 	testConnection,
 	trustHost,
 } from "./ssh.ts";
@@ -64,6 +65,11 @@ const KEYED: readonly Provider[] = [
 	"openrouter",
 	"deepseek",
 ];
+type KeySource = "keychain" | "file" | "environment";
+
+/** The app's test: the answer's own limit, and the whole test with starting the brain. */
+export const TEST_ANSWER_S = 60;
+export const TEST_TOTAL_S = 80;
 /** Log lines the app can ask for again, such as after its window was closed. */
 const KEEP = 500;
 
@@ -495,9 +501,20 @@ export class Sidecar {
 		const shown = structuredClone(settings);
 		if (shown.brain.model) delete shown.brain.model.apiKey;
 		const keys: Record<string, boolean> = {};
-		for (const provider of KEYED)
-			keys[provider] = (await this.keyFor(provider)) !== undefined;
-		return { settings: shown, keys, file: this.o.settingsFile };
+		// Where each key comes from: "Remove" deletes only the keychain's, and a key in the file
+		// or the environment stays usable after that.
+		const keySources: Record<string, KeySource> = {};
+		for (const provider of KEYED) {
+			const source = await this.keySource(provider, settings);
+			keys[provider] = source !== undefined;
+			if (source) keySources[provider] = source;
+		}
+		return {
+			settings: shown,
+			keys,
+			keySources,
+			file: this.o.settingsFile,
+		};
 	}
 
 	private async setSettings(value: unknown) {
@@ -530,6 +547,21 @@ export class Sidecar {
 				model.apiKey = inFile;
 			}
 		}
+		// A key in the file for a provider the new settings leave: the file would lose it, so it
+		// moves into the keychain first. Without a keychain nothing is saved, rather than the key
+		// being dropped where the player cannot see it.
+		const leaving = before?.brain.model;
+		if (leaving?.apiKey && !inFile && leaving.provider !== model?.provider) {
+			const name = names.apiKey(leaving.provider);
+			try {
+				if (!(await this.deps.secrets.get(name)))
+					await this.deps.secrets.set(name, leaving.apiKey);
+			} catch {
+				throw new PlayerError(
+					`The API key for ${leaving.provider} is in the settings file, and the system keychain cannot take it. Remove it from the file yourself, or keep that provider.`,
+				);
+			}
+		}
 		saveSettings(this.o.settingsFile, next);
 		// While Familiar runs, the overview shows the brain that answers, not the new one. Only
 		// what a run uses needs a restart; the app's own settings, such as the language, do not.
@@ -548,6 +580,21 @@ export class Sidecar {
 		} else this.status.brain = describeBrain(next);
 		this.changed();
 		return this.shownSettings(next);
+	}
+
+	/** Where `keyFor` would find the key, in the same order. */
+	private async keySource(
+		provider: Provider,
+		settings: Settings,
+	): Promise<KeySource | undefined> {
+		const stored = await this.deps.secrets
+			.get(names.apiKey(provider))
+			.catch(() => null);
+		if (stored) return "keychain";
+		const model = settings.brain.model;
+		if (model?.provider === provider && model.apiKey) return "file";
+		if (apiKey({ provider, name: "-" }, this.deps.env)) return "environment";
+		return undefined;
 	}
 
 	/** The key for a provider, found the same way as when Familiar starts. */
@@ -588,7 +635,8 @@ export class Sidecar {
 			auth: ssh.auth ?? "key",
 			command: ssh.command.map(String),
 			cwd: settings.brain.cwd,
-			port: settings.mcp.port,
+			// No port: the test checks the sign-in and the program, not the game tools, and the
+			// running Familiar may already hold this forward on that computer.
 		};
 	}
 
@@ -656,10 +704,12 @@ export class Sidecar {
 	private async testBrain(value: unknown) {
 		const settings =
 			value === undefined ? this.settings() : parseSettings(value);
-		const timeout = Math.min(settings.brain.timeout, 60);
+		const timeout = Math.min(settings.brain.timeout, TEST_ANSWER_S);
+		const started = performance.now();
 		const prepared = await prepareBrain(settings, {
 			secrets: this.deps.secrets,
 			askpass: this.o.askpass,
+			forward: false,
 		});
 		const brainSettings = { ...prepared.brain, timeout };
 		const quiet: Log = { event: () => {}, say: () => {} };
@@ -678,24 +728,37 @@ export class Sidecar {
 						env: prepared.env,
 					});
 		const tools: string[] = [];
+		let answered = false;
 		const turn: Turn = {
 			onTool: (title) => void tools.push(title.split(":")[0] ?? title),
 			onNote: () => {},
+			// Nobody is in game to ask: a test never allows anything.
 			onPermission: async () => false,
+			onAnswered: () => {
+				answered = true;
+			},
 		};
 		const question: Question = {
 			text: "This is a test from the Familiar app. Answer in one short sentence, without tools.",
 			character: {},
 		};
-		const started = performance.now();
+		// Starting an agent and opening its session come before the answer's own time limit:
+		// the whole test gets a deadline of its own, and the brain is stopped either way.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const late = new Promise<string>((resolve) => {
+			timer = setTimeout(
+				() => resolve(`No answer within ${TEST_TOTAL_S} s.`),
+				TEST_TOTAL_S * 1000,
+			);
+		});
 		try {
-			const answer = await brain.ask(question, turn);
-			return {
-				ms: Math.round(performance.now() - started),
-				answer: answer.slice(0, 300),
-				tools,
-			};
+			const text = await Promise.race([brain.ask(question, turn), late]);
+			const ms = Math.round(performance.now() - started);
+			return answered
+				? { ok: true, ms, answer: text.slice(0, 300), tools }
+				: { ok: false, ms, problem: text.slice(0, 300), tools };
 		} finally {
+			clearTimeout(timer);
 			brain.stop?.();
 		}
 	}
@@ -806,7 +869,8 @@ function shown(error: unknown): string {
 		error instanceof PlayerError ||
 		error instanceof ListError ||
 		error instanceof SecretError ||
-		error instanceof ChatGptError
+		error instanceof ChatGptError ||
+		error instanceof SshError
 	)
 		return error.message;
 	if (error instanceof Error && error.message.startsWith("The settings"))

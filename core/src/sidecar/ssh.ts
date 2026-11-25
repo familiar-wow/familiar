@@ -57,8 +57,11 @@ export interface SshAgentConfig {
 	command: string[];
 	/** The folder on the other computer to start the agent in. */
 	cwd?: string;
-	/** The MCP port on this computer that the other computer may reach. */
-	port: number;
+	/**
+	 * The MCP port on this computer that the other computer may reach. Left out for a test: the
+	 * running Familiar may hold the same forward, and a test does not need the game tools.
+	 */
+	port?: number;
 	/**
 	 * What ssh makes of this sign-in, filled in by `checkAuth`. A password or passphrase is
 	 * not used without it: it says whom the secret is for.
@@ -205,7 +208,10 @@ function words(c: SshAgentConfig, direct: boolean): string[] {
 		throw new SshError("That user name cannot be used.");
 	if (c.identityFile && /\p{Cc}/u.test(c.identityFile))
 		throw new SshError("That key file cannot be used.");
-	if (!Number.isInteger(c.port) || c.port < 1 || c.port > 65535)
+	if (
+		c.port !== undefined &&
+		(!Number.isInteger(c.port) || c.port < 1 || c.port > 65535)
+	)
 		throw new SshError("That port cannot be used.");
 	// ssh reads options even after the host, up to the first word that is not one. A command
 	// starting with "-" would be taken as an option of ssh on this computer.
@@ -229,10 +235,14 @@ function words(c: SshAgentConfig, direct: boolean): string[] {
 					];
 	return [
 		"-T",
-		"-o",
-		"ExitOnForwardFailure=yes",
-		"-R",
-		`127.0.0.1:${c.port}:127.0.0.1:${c.port}`,
+		...(c.port === undefined
+			? []
+			: [
+					"-o",
+					"ExitOnForwardFailure=yes",
+					"-R",
+					`127.0.0.1:${c.port}:127.0.0.1:${c.port}`,
+				]),
 		...(c.user ? ["-l", c.user] : []),
 		...(c.identityFile ? ["-i", c.identityFile] : []),
 		...auth,

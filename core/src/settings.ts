@@ -16,6 +16,25 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+/**
+ * A server's address: http or https only, and no user or password in it, since the settings
+ * file is plain text and the app shows it.
+ */
+const ServerUrl = z.url().refine(
+	(value) => {
+		const url = new URL(value);
+		return (
+			(url.protocol === "http:" || url.protocol === "https:") &&
+			!url.username &&
+			!url.password
+		);
+	},
+	{
+		message:
+			"A server address must start with http:// or https:// and hold no user or password.",
+	},
+);
+
 /** Providers the built-in agent can ask (brain/model.ts). */
 export const PROVIDERS = [
 	"openai",
@@ -41,7 +60,7 @@ const Model = z
 		 */
 		name: z.string().min(1),
 		/** The API's address; needed for "openai-compatible", optional for the others. */
-		baseUrl: z.url().optional(),
+		baseUrl: ServerUrl.optional(),
 		/**
 		 * The API key. Better left out: then it comes from the provider's environment variable,
 		 * such as OPENAI_API_KEY. The desktop app will keep it in the system keychain (FAM-6).
@@ -91,7 +110,7 @@ const Remembered = z.strictObject({
 		.strictObject({
 			provider: z.enum(["ollama", "lmstudio", "openai-compatible"]),
 			name: z.string().min(1),
-			baseUrl: z.url().optional(),
+			baseUrl: ServerUrl.optional(),
 		})
 		.optional(),
 	agent: z
@@ -115,8 +134,11 @@ const Settings = z.strictObject({
 			/** Start with Windows, in the tray. */
 			autostart: z.boolean().default(false),
 			language: z.enum(["system", "en", "de"]).default("system"),
-			/** The setup assistant ran, or the player chose to skip it. */
-			setupDone: z.boolean().default(false),
+			/**
+			 * The setup assistant ran, or the player skipped it; false while it runs. Unset for
+			 * settings from before the app: those players set Familiar up already.
+			 */
+			setupDone: z.boolean().optional(),
 			brains: Remembered.prefault({}),
 		})
 		.prefault({}),
@@ -216,7 +238,9 @@ export function settingsFolder(): string {
 /** Reads the settings. A missing file is written with the defaults, so there is one to edit. */
 export function loadSettings(file: string): Settings {
 	if (!existsSync(file)) {
-		const defaults = Settings.parse({});
+		// A new player: the desktop app's setup assistant runs once. A file from before the app
+		// has no setupDone at all, and its player is not sent through the assistant.
+		const defaults = Settings.parse({ app: { setupDone: false } });
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, `${JSON.stringify(defaults, null, "\t")}\n`);
 		return defaults;

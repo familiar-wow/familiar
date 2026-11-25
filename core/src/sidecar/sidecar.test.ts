@@ -231,6 +231,31 @@ test("lists another server's models, and refuses addresses that are no server", 
 	expect(asked).toHaveLength(2);
 });
 
+const FAKE_AGENT = [
+	process.execPath,
+	join(import.meta.dir, "..", "..", "test", "fake-agent.ts"),
+];
+
+test("the brain test says whether a real answer came, not only what was said", async () => {
+	const { call } = sidecar();
+	const agent = (command: string[]) => ({
+		settings: { brain: { use: "agent", command, timeout: 20 } },
+	});
+	const ok = (await call("brain.test", agent(FAKE_AGENT))).result as Record<
+		string,
+		unknown
+	>;
+	expect(ok.ok).toBe(true);
+	expect(String(ok.answer)).toContain("This is a test from the Familiar app");
+	expect(ok.ms).toBeNumber();
+	// A program that is no agent: the player reads why, and it is not called an answer.
+	const bad = (await call("brain.test", agent(["no-such-agent-xyz"])))
+		.result as Record<string, unknown>;
+	expect(bad.ok).toBe(false);
+	expect(String(bad.problem)).toContain("Could not start no-such-agent-xyz");
+	expect(bad.answer).toBeUndefined();
+}, 30_000);
+
 test("opens the log folder, and makes it first when nothing was logged yet", async () => {
 	let opened = "";
 	const { call, logs } = sidecar({
@@ -646,6 +671,74 @@ test("the app's own settings change nothing a run uses, so they need no restart"
 		running: true,
 		restartNeeded: false,
 	});
+});
+
+test("a key in the file moves into the keychain when the settings leave its provider", async () => {
+	const { call, store, settingsFile } = sidecar(
+		{ env: { DEEPSEEK_API_KEY: "sk-env" } },
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	const got = (await call("settings.get")).result as {
+		settings: Record<string, unknown>;
+		keySources: Record<string, string>;
+	};
+	expect(got.keySources).toEqual({
+		openrouter: "file",
+		deepseek: "environment",
+	});
+	// To the player's agent: the model and its key leave the settings file.
+	const next = structuredClone(got.settings) as {
+		brain: Record<string, unknown>;
+	};
+	next.brain.use = "agent";
+	delete next.brain.model;
+	expect(
+		(await call("settings.set", { settings: next })).error,
+	).toBeUndefined();
+	expect(await store.get(names.apiKey("openrouter"))).toBe("sk-file");
+	expect(readFileSync(settingsFile, "utf8")).not.toContain("sk-file");
+	const after = (await call("settings.get")).result as {
+		keySources: Record<string, string>;
+	};
+	expect(after.keySources.openrouter).toBe("keychain");
+});
+
+test("without a keychain, leaving a provider with a key in the file is refused, not lost", async () => {
+	const broken = {
+		...memoryStore(),
+		get: async () => null,
+		set: async () => {
+			throw new SecretError("No keychain.");
+		},
+	};
+	const { call, settingsFile } = sidecar(
+		{ secrets: broken },
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	const reply = await call("settings.set", {
+		settings: { brain: { use: "agent" } },
+	});
+	expect(reply.error?.message).toContain("cannot take it");
+	expect(reply.error?.message).not.toContain("sk-file");
+	expect(readFileSync(settingsFile, "utf8")).toContain("sk-file");
+});
+
+test("a new settings file says the setup assistant has not run yet", async () => {
+	const { call } = sidecar();
+	const got = (await call("settings.get")).result as {
+		settings: { app: { setupDone?: boolean } };
+	};
+	expect(got.settings.app.setupDone).toBe(false);
 });
 
 test("an old key from the file does not replace a newer one in the keychain", async () => {

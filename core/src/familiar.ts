@@ -89,7 +89,12 @@ export async function resolveKey(
  */
 export async function prepareBrain(
 	settings: Settings,
-	o: { secrets?: SecretStore; askpass?: string },
+	o: {
+		secrets?: SecretStore;
+		askpass?: string;
+		/** false for a test: no game tools, so no port forward back to this computer. */
+		forward?: boolean;
+	},
 ): Promise<{ brain: Settings["brain"]; env?: Record<string, string> }> {
 	const brain = structuredClone(settings.brain);
 	if (brain.use === "model" && brain.model) {
@@ -106,7 +111,7 @@ export async function prepareBrain(
 			auth: brain.ssh.auth,
 			command: brain.ssh.command,
 			cwd: brain.cwd,
-			port: settings.mcp.port,
+			...(o.forward === false ? {} : { port: settings.mcp.port }),
 		});
 		const built = sshCommand(checked, {
 			askpass: [o.askpass ?? process.execPath],

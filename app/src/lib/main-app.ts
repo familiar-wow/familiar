@@ -3,11 +3,18 @@
 // renders `view`.
 
 import { Bootstrap, type Step } from "./bootstrap.ts";
-import { applyChoice, type Choice, remember, type Settings } from "./brain.ts";
+import {
+	applyChoice,
+	type BrainKind,
+	type Choice,
+	remember,
+	type Settings,
+} from "./brain.ts";
 import { CoreClient, STOPPED } from "./client.ts";
 import { resolveLanguage, translator } from "./i18n.ts";
 import { emptyView, snapshot, trayUpdate, type View } from "./overview.ts";
 import { isQuestionLine } from "./questions.ts";
+import { timeoutFor } from "./timeouts.ts";
 import {
 	type Host,
 	messageOf,
@@ -26,21 +33,30 @@ export const KEEP_LINES = 2000;
 const RECENT = 500;
 /** Rust keeps the same number of stderr lines. */
 const KEEP_STDERR = 20;
-/** `brain.test` waits up to 60 s for the brain; a little more for starting it. */
-export const BRAIN_TEST_TIMEOUT_MS = 75_000;
-
 interface SettingsReply {
 	settings?: Settings;
 	keys?: Record<string, boolean>;
+	keySources?: Record<string, KeySource>;
 	file?: string;
 }
 
-/** What `brain.test` answers: how long it took, the start of the answer, the tools it named. */
+/** Where an API key comes from; "Remove" deletes only the keychain's. */
+export type KeySource = "keychain" | "file" | "environment";
+
+/**
+ * What `brain.test` answers: `ok` only for a real answer, with its start; otherwise `problem`,
+ * the core's words. `tools` are the tools it named.
+ */
 export interface BrainTest {
+	ok: boolean;
 	ms: number;
-	answer: string;
+	answer?: string;
+	problem?: string;
 	tools: string[];
 }
+
+/** How starting Familiar went: running, or why not. */
+export type Outcome = { ok: true } | { ok: false; problem: string };
 
 export interface MainAppOptions {
 	/** navigator.language, for `app.language: "system"`. */
@@ -64,6 +80,10 @@ export class MainApp {
 	private arriving?: Record<string, unknown>[];
 	/** The setup assistant opens by itself once per app start, not for every new core. */
 	private setupShown = false;
+	/** Settings changes, one after another (`updateSettings`). */
+	private settingsQueue: Promise<unknown> = Promise.resolve();
+	/** The ChatGPT sign-in that waits for the browser, if one does. */
+	private signingIn?: Promise<{ account: string; usage: string }>;
 
 	constructor(
 		private readonly host: Host,
@@ -118,13 +138,20 @@ export class MainApp {
 		this.changed();
 	}
 
-	/** A request to the current core, for the pages; `timeoutMs` for the slow ones. */
+	/**
+	 * A request to the current core, for the pages. Each method waits as long as it may need
+	 * (lib/timeouts.ts) unless `timeoutMs` says otherwise.
+	 */
 	call<T>(
 		method: string,
 		params?: Record<string, unknown>,
 		timeoutMs?: number,
 	): Promise<T> {
-		return this.client.request<T>(method, params, timeoutMs);
+		return this.client.request<T>(
+			method,
+			params,
+			timeoutMs ?? this.o.timeoutMs ?? timeoutFor(method),
+		);
 	}
 
 	/** Asks the core for its status again, after a page changed something. */
@@ -136,70 +163,137 @@ export class MainApp {
 		this.changed();
 	}
 
-	/** Saves the whole settings object and keeps what the core answers. */
-	async saveSettings(settings: Settings): Promise<Settings> {
-		const gen = this.view.gen;
-		const got = await this.client.request<SettingsReply>("settings.set", {
-			settings,
+	/**
+	 * Changes the settings: reads them, lets `change` make the new ones, saves them, one change
+	 * after another. Two pages saving at once would otherwise each write what they read, and the
+	 * later save would undo the earlier one. Rejects with the core's message.
+	 */
+	updateSettings(change: (settings: Settings) => Settings): Promise<Settings> {
+		const next = this.settingsQueue.then(async () => {
+			const gen = this.view.gen;
+			const got = await this.client.request<SettingsReply>("settings.get");
+			const saved = await this.client.request<SettingsReply>("settings.set", {
+				settings: change(structuredClone(got?.settings ?? {})),
+			});
+			if (gen === this.view.gen) this.takeSettings(saved);
+			return saved?.settings ?? {};
 		});
-		if (gen === this.view.gen) this.takeSettings(got);
-		return got?.settings ?? settings;
+		// A failed change does not stop the ones after it.
+		this.settingsQueue = next.catch(() => {});
+		return next;
 	}
 
-	/** The settings as the core has them now, for a page that changes part of them. */
-	async loadSettings(): Promise<Settings> {
-		const gen = this.view.gen;
-		const got = await this.client.request<SettingsReply>("settings.get");
-		if (gen === this.view.gen) this.takeSettings(got);
-		return got?.settings ?? {};
+	/** The settings as the core has them now, also into `view`; waits for changes under way. */
+	loadSettings(): Promise<Settings> {
+		const next = this.settingsQueue.then(async () => {
+			const gen = this.view.gen;
+			const got = await this.client.request<SettingsReply>("settings.get");
+			if (gen === this.view.gen) this.takeSettings(got);
+			return got?.settings ?? {};
+		});
+		this.settingsQueue = next.catch(() => {});
+		return next;
 	}
 
 	/** Keeps what a tab holds without changing the brain that answers. */
 	async rememberBrain(choice: Choice): Promise<void> {
-		await this.saveSettings(remember(await this.loadSettings(), choice));
+		await this.updateSettings((settings) => remember(settings, choice));
 	}
 
 	/**
-	 * "Use this": the choice becomes the brain that answers, and Familiar runs with it. A run
-	 * that is under way restarts, so the next question already goes to the new brain.
+	 * "Use this": the choice becomes the brain that answers, and Familiar runs with it; a run
+	 * under way restarts, so the next question goes to the new brain. Says whether Familiar runs
+	 * afterwards; if not, why. There is no way back to the old brain but choosing it again.
 	 */
-	async useBrain(choice: Choice): Promise<void> {
-		await this.saveSettings(applyChoice(await this.loadSettings(), choice));
-		if (this.view.status?.running) await this.restartFamiliar();
-		else await this.startFamiliar();
+	async useBrain(choice: Choice): Promise<Outcome> {
+		try {
+			await this.updateSettings((settings) => applyChoice(settings, choice));
+		} catch (error) {
+			return { ok: false, problem: messageOf(error) };
+		}
+		return this.view.status?.running
+			? this.restartFamiliar()
+			: this.startFamiliar();
 	}
 
-	/** "Test": one short question to `choice`, without saving it; the core's answer as it is. */
+	/**
+	 * "Test": one short question to `choice` without saving it. `ok` is true only for a real
+	 * answer; `problem` is the core's words otherwise. Takes up to 95 s.
+	 */
 	async testBrain(choice: Choice): Promise<BrainTest> {
 		const settings = applyChoice(await this.loadSettings(), choice);
-		return this.client.request<BrainTest>(
-			"brain.test",
-			{ settings },
-			BRAIN_TEST_TIMEOUT_MS,
-		);
+		try {
+			return await this.call<BrainTest>("brain.test", { settings });
+		} catch (error) {
+			return { ok: false, ms: 0, problem: messageOf(error), tools: [] };
+		}
 	}
 
-	/** The setup assistant ran or was skipped: it does not open by itself again. */
-	async finishSetup(): Promise<void> {
-		const settings = await this.loadSettings();
-		await this.saveSettings({
+	/** Stores an API key in the system keychain; the key goes nowhere else. */
+	async setKey(provider: string, key: string): Promise<void> {
+		await this.call("key.set", { provider, key });
+		await this.loadSettings();
+	}
+
+	/** Removes the keychain's key; one in the file or the environment stays (`keySources`). */
+	async deleteKey(provider: string): Promise<void> {
+		await this.call("key.delete", { provider });
+		await this.loadSettings();
+	}
+
+	/**
+	 * Signs in with ChatGPT in the browser. One sign-in at a time: a page that asks again while
+	 * one waits gets the same one. `view.chatgptUrl` holds the address meanwhile, in case the
+	 * browser did not open. Resolves with the account, or rejects with the core's message.
+	 */
+	signInChatGpt(): Promise<{ account: string; usage: string }> {
+		this.signingIn ??= this.call<{ account: string; usage: string }>(
+			"chatgpt.signIn",
+		).finally(() => {
+			this.signingIn = undefined;
+			this.view.chatgptUrl = undefined;
+			this.changed();
+		});
+		return this.signingIn;
+	}
+
+	/** Opens the Brain page on one kind's tab, such as the one chosen in the setup assistant. */
+	openBrain(kind: BrainKind): void {
+		this.view.brainTab = kind;
+		this.view.page = "brain";
+		this.changed();
+	}
+
+	/**
+	 * The setup assistant ran or was skipped: it does not open by itself again, and Familiar
+	 * starts, which the first start left to the assistant. `then` is the page to show.
+	 */
+	async finishSetup(then: Page = "overview"): Promise<void> {
+		await this.updateSettings((settings) => ({
 			...settings,
 			app: { ...settings.app, setupDone: true },
-		});
-		this.open("overview");
+		}));
+		this.open(then);
+		if (!this.view.status?.running) await this.startFamiliar();
+	}
+
+	/** The setup assistant runs: it says when Familiar starts (a new player). */
+	get firstRun(): boolean {
+		return this.view.settings?.app?.setupDone === false;
 	}
 
 	private takeSettings(got: SettingsReply | undefined): void {
 		if (!got?.settings) return;
 		this.view.settings = got.settings;
 		this.view.keys = got.keys ?? {};
+		this.view.keySources = got.keySources ?? {};
 		this.changed();
 	}
 
-	/** The folder dialog, titled in the page's language. */
-	pickFolder(): Promise<string | null> {
+	/** The folder dialog, titled in the page's language; `title` for another purpose. */
+	pickFolder(title?: string): Promise<string | null> {
 		return this.host.pickFolder(
-			translator(this.view.language)("client.pickTitle"),
+			title ?? translator(this.view.language)("client.pickTitle"),
 		);
 	}
 
@@ -217,16 +311,17 @@ export class MainApp {
 	}
 
 	/** The banner's button: Familiar runs again with the saved settings. */
-	restartFamiliar(): Promise<void> {
+	restartFamiliar(): Promise<Outcome> {
 		return this.run("restart");
 	}
 
 	/** Familiar runs again after it was stopped, such as by uninstalling the addon. */
-	startFamiliar(): Promise<void> {
+	startFamiliar(): Promise<Outcome> {
 		return this.run("start");
 	}
 
-	private async run(method: "start" | "restart"): Promise<void> {
+	/** Also says how it went, for a page that waits for it. */
+	private async run(method: "start" | "restart"): Promise<Outcome> {
 		const gen = this.view.gen;
 		try {
 			const status = await this.client.request<Status>(
@@ -234,15 +329,23 @@ export class MainApp {
 				undefined,
 				this.o.startTimeoutMs ?? START_TIMEOUT_MS,
 			);
-			if (gen !== this.view.gen) return;
+			if (gen !== this.view.gen) return { ok: false, problem: STOPPED };
 			this.view.status = status;
 			// It runs now: what kept it from starting before is no longer the news.
 			if (status?.running) this.view.failure = undefined;
+			this.changed();
+			return status?.running
+				? { ok: true }
+				: { ok: false, problem: this.view.failure ?? STOPPED };
 		} catch (error) {
-			if (gen !== this.view.gen) return;
-			this.view.failure = messageOf(error);
+			if (gen !== this.view.gen) return { ok: false, problem: STOPPED };
+			const problem = messageOf(error);
+			this.view.failure = problem;
+			this.changed();
+			// A restart stops the old run before the new one fails: the status says so.
+			await this.refreshStatus().catch(() => {});
+			return { ok: false, problem };
 		}
-		this.changed();
 	}
 
 	private async sync(): Promise<void> {
@@ -323,6 +426,8 @@ export class MainApp {
 			// Kept until the new core's settings.get answers, so an open page does not blank out.
 			...(this.view.settings ? { settings: this.view.settings } : {}),
 			keys: this.view.keys,
+			keySources: this.view.keySources,
+			...(this.view.brainTab ? { brainTab: this.view.brainTab } : {}),
 		};
 	}
 
@@ -356,8 +461,9 @@ export class MainApp {
 						this.o.systemLanguage,
 					);
 					this.takeSettings(got);
-					// The first time, the setup assistant opens; once, until it ran or was skipped.
-					if (app && app.setupDone !== true && !this.setupShown) {
+					// A new player (setupDone false, which only a new settings file has): the setup
+					// assistant opens, once per app start, until it ran or was skipped.
+					if (app?.setupDone === false && !this.setupShown) {
 						this.setupShown = true;
 						this.view.page = "setup";
 					}
@@ -390,6 +496,8 @@ export class MainApp {
 			{
 				name: "start",
 				run: async () => {
+					// A new player: the setup assistant installs the addon and starts Familiar.
+					if (this.firstRun) return;
 					const status = await ask<Status>(
 						"start",
 						this.o.startTimeoutMs ?? START_TIMEOUT_MS,
@@ -422,6 +530,13 @@ export class MainApp {
 			if (isQuestionLine(data))
 				this.view.log = [...this.view.log, data].slice(-KEEP_LOG);
 			this.changed();
+		} else if (event === "chatgpt-url" && data && typeof data === "object") {
+			// The sign-in's address, shown in case the browser did not open.
+			const url = (data as { url?: unknown }).url;
+			if (typeof url === "string" && /^https:\/\//.test(url)) {
+				this.view.chatgptUrl = url;
+				this.changed();
+			}
 		}
 	}
 

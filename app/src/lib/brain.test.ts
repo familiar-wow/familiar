@@ -168,21 +168,88 @@ test("in use: the same brain as now, however it got there", () => {
 	expect(isActive(base, { kind: "chatgpt", name: "gpt-6-luna" })).toBe(false);
 });
 
-test("a command line splits into words like a shell, without its tricks", () => {
+test("a command line splits into words: spaces separate, double quotes keep spaces", () => {
 	expect(splitCommand("  hermes   acp ")).toEqual(["hermes", "acp"]);
+	// A Windows path: quotes for the spaces, backslashes as they are.
 	expect(splitCommand('"C:\\Program Files\\Agent\\agent.exe" --acp')).toEqual([
 		"C:\\Program Files\\Agent\\agent.exe",
 		"--acp",
 	]);
-	expect(splitCommand("npx '@scope/pkg' $HOME ~ *")).toEqual([
+	// Nothing a shell would do: no variables, no ~, no globbing, single quotes are letters.
+	expect(splitCommand("npx @scope/pkg $HOME ~ * it's")).toEqual([
 		"npx",
 		"@scope/pkg",
 		"$HOME",
 		"~",
 		"*",
+		"it's",
 	]);
+	expect(splitCommand('say "\\"hello\\""')).toEqual(["say", '"hello"']);
 	expect(splitCommand('a "" b')).toEqual(["a", "", "b"]);
 	expect(splitCommand("")).toEqual([]);
-	const words = ["C:\\Program Files\\Agent\\agent.exe", "--acp", "x"];
-	expect(splitCommand(joinCommand(words))).toEqual(words);
+	// An open quote is a mistake to show, not a guess.
+	expect(splitCommand('agent "C:\\Program Files')).toBeUndefined();
+});
+
+test("joinCommand gives back exactly the words splitCommand reads", () => {
+	for (const words of [
+		["hermes", "acp"],
+		["C:\\Program Files\\Agent\\agent.exe", "--acp"],
+		["say", '"hello"', "it's"],
+		["a", "", "b"],
+		["C:\\dir\\", "x"],
+	])
+		expect(splitCommand(joinCommand(words))).toEqual(words);
+});
+
+test("switching away from a brain set up by hand keeps it on its tab", () => {
+	const byHand: Settings = {
+		brain: {
+			use: "model",
+			model: {
+				provider: "openai",
+				name: "gpt-6-luna",
+				baseUrl: "https://proxy.example/v1",
+			},
+		},
+	};
+	const s = applyChoice(byHand, { kind: "chatgpt", name: "gpt-6-luna" });
+	expect(choiceFor(s, "key")).toEqual({
+		kind: "key",
+		provider: "openai",
+		name: "gpt-6-luna",
+		baseUrl: "https://proxy.example/v1",
+	});
+	// And back: the provider's own address is not lost.
+	const back = applyChoice(s, choiceFor(s, "key") as never);
+	expect(back.brain?.model).toEqual(byHand.brain?.model);
+});
+
+test("a tab opens with what it held last, also for the kind that answers", () => {
+	const s = remember(
+		applyChoice(base, { kind: "chatgpt", name: "gpt-6-luna" }),
+		{ kind: "chatgpt", name: "gpt-6-luna-pro" },
+	);
+	expect(choiceFor(s, "chatgpt")).toEqual({
+		kind: "chatgpt",
+		name: "gpt-6-luna-pro",
+	});
+	expect(isActive(s, { kind: "chatgpt", name: "gpt-6-luna-pro" })).toBe(false);
+	expect(isActive(s, { kind: "chatgpt", name: "gpt-6-luna" })).toBe(true);
+});
+
+test("in use does not depend on the order fields were written in", () => {
+	const s: Settings = {
+		brain: {
+			use: "agent",
+			ssh: { command: ["hermes", "acp"], auth: "key", host: "homelab" },
+		},
+	};
+	expect(
+		isActive(s, {
+			kind: "agent",
+			where: "ssh",
+			ssh: { host: "homelab", auth: "key", command: ["hermes", "acp"] },
+		}),
+	).toBe(true);
 });
