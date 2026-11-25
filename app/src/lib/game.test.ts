@@ -266,6 +266,7 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 		"addon.uninstall": () => ({ folders: 257, rows: 3 }),
 	};
 	let refreshed = 0;
+	let started = 0;
 	const deps: GameDeps = {
 		call: async <T>(method: string, params?: Record<string, unknown>) => {
 			calls.push(params ? { method, params } : { method });
@@ -279,6 +280,10 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 			refreshed++;
 		},
 		statusClient: () => MAIN,
+		running: () => true,
+		start: async () => {
+			started++;
+		},
 		...over,
 	};
 	return {
@@ -287,6 +292,7 @@ function fakeDeps(over: Partial<GameDeps> = {}) {
 		replies,
 		saved: () => saved,
 		refreshed: () => refreshed,
+		started: () => started,
 	};
 }
 
@@ -392,6 +398,24 @@ test("repair installs into the client in use and refreshes", async () => {
 	});
 	expect(f.refreshed()).toBe(1);
 	expect(f.calls.map((c) => c.method)).toContain("game.find");
+});
+
+test("installing the addon again after an uninstall starts Familiar again", async () => {
+	let running = false;
+	const f = fakeDeps({ running: () => running });
+	const g = new GameController(f.deps);
+	await g.repair();
+	expect(f.started()).toBe(1);
+	// While it runs, a repair leaves it alone, and a failed install starts nothing.
+	running = true;
+	await g.repair();
+	expect(f.started()).toBe(1);
+	running = false;
+	f.replies["addon.install"] = () => {
+		throw new Error("Close WoW first.");
+	};
+	await g.repair();
+	expect(f.started()).toBe(1);
 });
 
 test("installing into a client without the addon is called an install", async () => {

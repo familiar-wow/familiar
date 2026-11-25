@@ -50,25 +50,41 @@ export function describeLogLine(
 }
 
 /** The rows for the page, oldest first: newest at the bottom. */
+/**
+ * A number per log line object, the same for as long as the line is kept: the Logs page keys its
+ * rows by it, so a line keeps its row when older ones drop out of the full buffer.
+ */
+const ids = new WeakMap<object, number>();
+let nextId = 0;
+export function lineId(line: object): number {
+	let id = ids.get(line);
+	if (id === undefined) {
+		id = ++nextId;
+		ids.set(line, id);
+	}
+	return id;
+}
+
 export function logEntries(
 	lines: readonly unknown[],
 	language: Language,
-): LogEntry[] {
+): (LogEntry & { id: number })[] {
 	const t = translator(language);
-	const entries: LogEntry[] = [];
+	const entries: (LogEntry & { id: number })[] = [];
 	for (const line of lines) {
 		const entry = describe(line, t, language);
-		if (entry) entries.push(entry);
+		if (entry && line && typeof line === "object")
+			entries.push({ ...entry, id: lineId(line) });
 	}
 	// Lines arrive in order; the sort only guards a merge of the recent log and live lines.
 	// Array.prototype.sort is stable, so lines of the same millisecond keep their order.
 	return entries.sort((a, b) => a.at - b.at);
 }
 
-export function filterLines(
-	entries: readonly LogEntry[],
+export function filterLines<E extends LogEntry>(
+	entries: readonly E[],
 	filter: LogFilter,
-): LogEntry[] {
+): E[] {
 	if (filter === "questions")
 		return entries.filter((e) => QUESTIONS.has(e.event));
 	if (filter === "tools") return entries.filter((e) => TOOLS.has(e.event));
@@ -198,11 +214,14 @@ function describe(
 			return row("logs.kind.brain", "dim", t("logs.session"));
 		}
 		case "brain-permission": {
-			// The agent's option ids (ACP): allow_once, reject_once, …; "cancelled" when none fit.
-			const answer = str(line.answer) ?? "";
-			const key = answer.startsWith("allow")
-				? "logs.permissionAllowed"
-				: "logs.permissionDenied";
+			// `allowed` says what the chosen option meant; its id is the agent's own word.
+			// Lines from before 0.15.0 lack it and say neither.
+			const key =
+				line.allowed === true
+					? "logs.permissionAllowed"
+					: line.allowed === false
+						? "logs.permissionDenied"
+						: "logs.permissionAsked";
 			return row(
 				"logs.kind.brain",
 				"info",

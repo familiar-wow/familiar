@@ -115,6 +115,7 @@
 	"logs.session": "New session with the agent",
 	"logs.session.noTools": "New session without the game tools: {why}",
 	"logs.permissionAllowed": "Allowed once: {tool}",
+	"logs.permissionAsked": "Asked for permission: {tool}",
 	"logs.permissionDenied": "Not allowed: {tool}",
 	"logs.agentAnswer": "The agent answered after {s}",
 	"logs.modelAnswer": "{model} answered after {s} ({steps} steps)",

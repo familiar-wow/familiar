@@ -115,6 +115,7 @@
 	"logs.session": "Neue Sitzung mit dem Agenten",
 	"logs.session.noTools": "Neue Sitzung ohne die Spielwerkzeuge: {why}",
 	"logs.permissionAllowed": "Einmal erlaubt: {tool}",
+	"logs.permissionAsked": "Um Erlaubnis gefragt: {tool}",
 	"logs.permissionDenied": "Nicht erlaubt: {tool}",
 	"logs.agentAnswer": "Der Agent hat nach {s} geantwortet",
 	"logs.modelAnswer": "{model} hat nach {s} geantwortet ({steps} Schritte)",

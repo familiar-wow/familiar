@@ -183,7 +183,15 @@ test("refuses a test realm, also one that would pass as a client folder", async 
 	mkdirSync(join(ptr, "Interface", "AddOns"), { recursive: true });
 	writeFileSync(join(ptr, "Wow.exe"), "");
 	const { call } = sidecar();
-	for (const path of [ptr, join(ptr, "Wow.exe"), join(root, "_classic_ptr_")])
+	const eraPtr = join(root, "_classic_era_ptr_");
+	mkdirSync(join(eraPtr, "Interface", "AddOns"), { recursive: true });
+	writeFileSync(join(eraPtr, "Wow.exe"), "");
+	for (const path of [
+		ptr,
+		join(ptr, "Wow.exe"),
+		join(root, "_classic_ptr_"),
+		eraPtr,
+	])
 		expect((await call("game.check", { path })).error?.message).toContain(
 			"test realm",
 		);

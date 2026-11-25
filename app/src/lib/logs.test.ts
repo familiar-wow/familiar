@@ -215,15 +215,27 @@ test("brain events", () => {
 		tone: "warn",
 		text: "New session without the game tools: unsupported",
 	});
+	// What the option meant counts, not the agent's id for it.
+	expect(
+		d({
+			event: "brain-permission",
+			tool: "web_search",
+			answer: "yes",
+			allowed: true,
+		})?.text,
+	).toBe("Allowed once: web_search");
+	expect(
+		d({
+			event: "brain-permission",
+			tool: "terminal: rm -rf ~",
+			answer: "allow_maybe",
+			allowed: false,
+		})?.text,
+	).toBe("Not allowed: terminal: rm -rf ~");
 	expect(
 		d({ event: "brain-permission", tool: "web_search", answer: "allow_once" })
 			?.text,
-	).toBe("Allowed once: web_search");
-	for (const answer of ["reject_once", "cancelled", undefined])
-		expect(
-			d({ event: "brain-permission", tool: "terminal: rm -rf ~", answer })
-				?.text,
-		).toBe("Not allowed: terminal: rm -rf ~");
+	).toBe("Asked for permission: web_search");
 	expect(
 		d({ event: "answer", ms: 5800, stopReason: "end_turn", chars: 9 })?.text,
 	).toBe("The agent answered after 5.8 s");

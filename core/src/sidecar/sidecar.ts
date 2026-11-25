@@ -717,7 +717,7 @@ function describeClient(client: string) {
 export function isTestRealm(chosen: string): boolean {
 	return chosen
 		.split(/[\\/]+/)
-		.some((part) => /^_(?:x?ptr|beta|[a-z]+_(?:x?ptr|beta))_$/i.test(part));
+		.some((part) => /^_(?:[a-z]+_)*(?:x?ptr|beta)_$/i.test(part));
 }
 
 /** The client folder from what the player chose: the folder, its parent, or the game's program. */

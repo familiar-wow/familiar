@@ -195,6 +195,10 @@ export interface GameDeps {
 	refreshStatus(): Promise<void>;
 	/** The client the core uses when the settings name none. */
 	statusClient(): string | undefined;
+	/** Whether Familiar carries questions right now. */
+	running(): boolean;
+	/** Starts Familiar with the saved settings, as when the app starts. */
+	start(): Promise<void>;
 }
 
 export class GameController {
@@ -265,7 +269,11 @@ export class GameController {
 				});
 			} catch (error) {
 				this.set({ outcome: { kind: "failed", message: messageOf(error) } });
+				await this.after();
+				return;
 			}
+			// Uninstalling stopped Familiar; with the addon back, it carries questions again.
+			if (!this.deps.running()) await this.deps.start().catch(() => {});
 			await this.after();
 		});
 	}

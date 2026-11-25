@@ -33,9 +33,34 @@ let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 const entries = $derived(logEntries(view.lines, view.language));
 const shown = $derived(filterLines(entries, filter));
 
+// While the player reads further up and older lines drop out of the full buffer, the line at the
+// top of the view stays where it is: remember it before the rows change, put it back after.
+let anchor: { id: number; offset: number } | undefined;
+$effect.pre(() => {
+	void shown;
+	anchor = undefined;
+	if (!box || stuck) return;
+	for (const row of box.querySelectorAll<HTMLElement>(".ln")) {
+		if (row.offsetTop + row.offsetHeight > box.scrollTop) {
+			anchor = {
+				id: Number(row.dataset.id),
+				offset: row.offsetTop - box.scrollTop,
+			};
+			break;
+		}
+	}
+});
+
 $effect(() => {
 	void shown;
-	if (box && stuck) box.scrollTop = box.scrollHeight;
+	if (!box) return;
+	if (stuck) {
+		box.scrollTop = box.scrollHeight;
+		return;
+	}
+	const row =
+		anchor && box.querySelector<HTMLElement>(`.ln[data-id="${anchor.id}"]`);
+	if (anchor && row) box.scrollTop = row.offsetTop - anchor.offset;
 });
 
 $effect(() => () => clearTimeout(copiedTimer));
@@ -125,8 +150,8 @@ async function openFolder() {
 		{:else if shown.length === 0}
 			<p class="empty">{t("logs.emptyFilter")}</p>
 		{:else}
-			{#each shown as e, i (i)}
-				<div class="ln">
+			{#each shown as e (e.id)}
+				<div class="ln" data-id={e.id}>
 					<span class="t">{clock(e.at)}</span>
 					<span class="k {e.tone}">{e.kind}</span>
 					<span class="x" class:dim={e.tone === "dim"}>{e.text}</span>
@@ -208,6 +233,8 @@ async function openFolder() {
 	}
 
 	.logs {
+		/* The rows measure their place from here, for the anchor while reading further up. */
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		overflow: auto;

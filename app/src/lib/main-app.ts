@@ -134,11 +134,20 @@ export class MainApp {
 	}
 
 	/** The banner's button: Familiar runs again with the saved settings. */
-	async restartFamiliar(): Promise<void> {
+	restartFamiliar(): Promise<void> {
+		return this.run("restart");
+	}
+
+	/** Familiar runs again after it was stopped, such as by uninstalling the addon. */
+	startFamiliar(): Promise<void> {
+		return this.run("start");
+	}
+
+	private async run(method: "start" | "restart"): Promise<void> {
 		const gen = this.view.gen;
 		try {
 			const status = await this.client.request<Status>(
-				"restart",
+				method,
 				undefined,
 				this.o.startTimeoutMs ?? START_TIMEOUT_MS,
 			);

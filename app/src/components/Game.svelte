@@ -25,6 +25,8 @@ const game = new GameController({
 	pickFolder: () => app.pickFolder(),
 	refreshStatus: () => app.refreshStatus(),
 	statusClient: () => app.view.status?.client,
+	running: () => app.view.status?.running === true,
+	start: () => app.startFamiliar(),
 });
 
 let current: GameState = $state.raw(game.state);

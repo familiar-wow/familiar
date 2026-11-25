@@ -262,8 +262,14 @@ export function mockHost(
 		status.last = { at: now, ms: 24_100, tools: ["quests", "flightpaths"] };
 	}
 
-	/** The addon keeps talking while WoW runs: small messages and acks, now and then. */
+	/**
+	 * The addon keeps talking while WoW runs: small messages and acks, now and then.
+	 * `?trickle=<ms>` changes the pace, `&fill=<n>` sends n lines at once first: together they
+	 * show the Logs page with a full buffer.
+	 */
 	function trickle() {
+		const query = new URLSearchParams(globalThis.location?.search ?? "");
+		const pace = Number(query.get("trickle")) || 2500;
 		let id = 100;
 		const tick = () => {
 			if (!status.game.running) return;
@@ -271,9 +277,13 @@ export function mockHost(
 			logLine({ event: "message", key: "k7f2", id, ack: id - 1, bytes: 64 });
 			status.game.lastContact = Date.now();
 			if (id % 3 === 0) logLine({ event: "send", bytes: 24, slot: id % 16 });
-			later(2500, tick);
+			later(pace, tick);
 		};
-		later(2500, tick);
+		for (let i = Number(query.get("fill")) || 0; i > 0; i--) {
+			id++;
+			logLine({ event: "message", key: "k7f2", id, ack: id - 1, bytes: 64 });
+		}
+		later(pace, tick);
 	}
 
 	/** One question with its tools, as the core logs it. */
