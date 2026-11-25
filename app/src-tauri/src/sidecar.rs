@@ -343,9 +343,10 @@ fn supervise(
 }
 
 /// Feeds the core's stdin from `queue`, hands its output on line by line, and returns its exit
-/// code once all of this happened, in this order: the core exited, what it left running was
-/// killed, it was reaped, and both readers reached the end of their pipe. The pipes close when
-/// their last holder is dead, so no line can follow.
+/// code once all of this happened, in this order: the core exited, what it left running in its
+/// group was killed, it was reaped, and both readers reached the end of their pipe, or `DRAIN`
+/// ran out because something outside the group still holds one. In that case the readers are
+/// cut off: a line already on its way may still go out, nothing after it.
 fn run(
     generation: u64,
     process: &Process,
@@ -803,7 +804,11 @@ mod process_tests {
     fn a_child_that_left_the_group_cannot_hold_the_end_up() {
         // `setsid` takes the child out of the core's group, so the group kill misses it, and it
         // keeps the core's stdout open.
-        let (process, child) = fake_core("setsid sleep 30 & sleep 0.3; echo started; exit 4");
+        let pidfile = std::env::temp_dir().join(format!("familiar-escaped-{}", std::process::id()));
+        let (process, child) = fake_core(&format!(
+            "setsid sleep 30 & echo $! > '{}'; sleep 0.3; echo started; exit 4",
+            pidfile.display()
+        ));
         let (_writer, queue) = mpsc::channel();
         let (out, on_stdout) = collect();
         let started = Instant::now();
@@ -815,7 +820,15 @@ mod process_tests {
         assert!(started.elapsed() >= DRAIN);
         assert!(started.elapsed() < DRAIN + Duration::from_secs(3));
         assert_eq!(*lock(&out), ["started"]);
-        let _ = Command::new("pkill").args(["-f", "^sleep 30$"]).status();
+        // Only the child this test let escape.
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|p| p.trim().parse::<libc::pid_t>().ok())
+        {
+            // SAFETY: only sends a signal to the process this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&pidfile);
     }
 
     #[test]

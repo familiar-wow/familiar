@@ -135,9 +135,11 @@ mod imp {
 
     pub fn spawn(mut command: Command) -> io::Result<(Process, Child)> {
         let job = Job::new()?;
-        // The core goes into the job right after it started. It starts programs of its own
-        // only when the app asks it over stdin, which cannot happen before this returns, and
-        // processes started after the assignment are in the job too.
+        // The core goes into the job right after it started; everything it starts after that is
+        // in the job too. Only its first checks at start-up (a registry query, the process list)
+        // may begin before the assignment. They end within seconds and start no agent: the brain
+        // and the game connection only start when the app asks over stdin, which cannot happen
+        // before this returns.
         let mut child = command.spawn()?;
         if let Err(e) = job.assign(&child) {
             let _ = child.kill();
