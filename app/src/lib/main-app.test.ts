@@ -207,6 +207,48 @@ test("a restarted core gets its own bootstrap; the old core's lines are ignored"
 	expect(app.view.status?.problems).toEqual([]);
 });
 
+test("a restart whose core cannot start shows why, though no event said it", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	// As Rust does when the spawn fails: the reason only in the sticky state, then the events.
+	f.host.restart = async () => {
+		f.setState({
+			gen: 2,
+			running: false,
+			exitCode: null,
+			stderrTail: ["Could not start the core: not found"],
+		});
+		f.fire("sidecar-started", { gen: 2 });
+		f.fire("sidecar-exit", { gen: 2, code: null });
+	};
+	await app.restartCore();
+	await settle();
+	expect(app.view.gen).toBe(2);
+	expect(app.view.exited).toBe(true);
+	expect(app.view.stderrTail).toEqual(["Could not start the core: not found"]);
+});
+
+test("stderr lines the page heard are not repeated from the sticky state", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.fire("sidecar-stderr", { gen: 1, line: "one" });
+	f.fire("sidecar-stderr", { gen: 1, line: "two" });
+	f.setState({
+		gen: 1,
+		running: false,
+		exitCode: 1,
+		stderrTail: ["one", "two", "three"],
+	});
+	f.host.restart = async () => {};
+	await app.restartCore();
+	await settle();
+	expect(app.view.stderrTail).toEqual(["one", "two", "three"]);
+});
+
 test("status and log events from the core update the view", async () => {
 	const f = fakeHost();
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });

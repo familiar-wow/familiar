@@ -1,15 +1,18 @@
 import { expect, test } from "bun:test";
 import { clock, recentQuestions, toolChips } from "./questions.ts";
 
-const q = (at: number, text: string) => ({
+let next = 0;
+const q = (at: number, text: string, n = ++next) => ({
 	at,
 	event: "question",
+	n,
 	text,
 	character: { name: "Moonbreeze" },
 });
-const a = (at: number, ms: number, tools: string[] = []) => ({
+const a = (at: number, ms: number, tools: string[] = [], n = next) => ({
 	at,
 	event: "answered",
+	n,
 	ms,
 	bytes: 10,
 	tools,
@@ -46,17 +49,35 @@ test("a question without an answer yet stays open", () => {
 });
 
 test("an answer whose question was cut from the log has no text", () => {
-	expect(recentQuestions([a(7, 2100, ["quests"]), q(8, "Next?")])).toEqual([
+	expect(recentQuestions([a(7, 2100, ["quests"], 90), q(8, "Next?")])).toEqual([
 		{ at: 8, text: "Next?", tools: [] },
 		{ at: 7, ms: 2100, tools: ["quests"] },
 	]);
 });
 
-test("an answer closes the newest open question; an unanswered one stays open", () => {
-	const rows = recentQuestions([q(1, "lost"), q(2, "second"), a(3, 1000)]);
+test("overlapping questions each get their own answer, by number", () => {
+	// Asked A, then B before A was answered: the answers come in the order the brain worked.
+	const rows = recentQuestions([
+		q(1, "A", 1),
+		q(2, "B", 2),
+		a(3, 1000, ["quests"], 1),
+		a(4, 5000, ["lookup"], 2),
+	]);
 	expect(rows).toEqual([
-		{ at: 2, text: "second", ms: 1000, tools: [] },
-		{ at: 1, text: "lost", tools: [] },
+		{ at: 2, text: "B", ms: 5000, tools: ["lookup"] },
+		{ at: 1, text: "A", ms: 1000, tools: ["quests"] },
+	]);
+});
+
+test("an answer that could not reach the game says so; the next question is not touched", () => {
+	const rows = recentQuestions([
+		q(1, "lost", 1),
+		q(2, "second", 2),
+		{ at: 3, event: "undelivered", n: 1, ms: 800, tools: [] },
+	]);
+	expect(rows).toEqual([
+		{ at: 2, text: "second", tools: [] },
+		{ at: 1, text: "lost", ms: 800, undelivered: true, tools: [] },
 	]);
 });
 

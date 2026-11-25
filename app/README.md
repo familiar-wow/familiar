@@ -11,7 +11,7 @@ The desktop app: a window with the overview and a panel above the tray icon, bui
 
 ## Develop
 
-Rust 1.85 or newer, and on Linux the WebKitGTK packages: on Debian or Ubuntu `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev build-essential`.
+Rust 1.90 or newer, and on Linux the WebKitGTK packages: on Debian or Ubuntu `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev build-essential`.
 
 ```sh
 cd app

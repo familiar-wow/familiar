@@ -104,6 +104,44 @@ test("notes the character of each question for the game tools", async () => {
 	expect(game.character?.character).toEqual({ name: "Alt" });
 });
 
+test("numbers each question, so overlapping answers find their own question", async () => {
+	const events: Record<string, unknown>[] = [];
+	const record: Log = {
+		event: (name, data = {}) => void events.push({ event: name, ...data }),
+		say: () => {},
+	};
+	const release: Record<string, () => void> = {};
+	let up = true;
+	const conversation = new Conversation(
+		{
+			ask: (question) =>
+				new Promise((resolve) => {
+					release[question.text] = () => resolve(`re: ${question.text}`);
+				}),
+		},
+		() => {
+			if (!up) throw new Error("the game is gone");
+		},
+		record,
+		new Game(),
+	);
+	conversation.receive(encode("question\n\nfirst"));
+	conversation.receive(encode("question\n\nsecond"));
+	await Bun.sleep(5);
+	release.first?.();
+	await Bun.sleep(5);
+	up = false;
+	release.second?.();
+	await Bun.sleep(5);
+	const shown = events.map(({ event, n, text }) => ({ event, n, text }));
+	expect(shown).toEqual([
+		{ event: "question", n: 1, text: "first" },
+		{ event: "question", n: 2, text: "second" },
+		{ event: "answered", n: 1, text: undefined },
+		{ event: "undelivered", n: 2, text: undefined },
+	]);
+});
+
 test("strips the Markdown models write anyway, and keeps game links", () => {
 	expect(
 		plain(

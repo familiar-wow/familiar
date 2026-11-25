@@ -1,5 +1,6 @@
 <script lang="ts">
-import { resolveLanguage, seconds, translator } from "./lib/i18n.ts";
+import { resolveLanguage, translator } from "./lib/i18n.ts";
+import { duration } from "./lib/overview.ts";
 import type { Host, TraySnapshot } from "./lib/types.ts";
 
 let { host }: { host: Host } = $props();
@@ -86,7 +87,7 @@ const subline = $derived(
 						{:else}
 							<span class="one-line cut">{t("questions.cut")}</span>
 						{/if}
-						<span class="ms">{q.ms === undefined ? "…" : seconds(q.ms, language)}</span>
+						<span class="ms">{duration(q, language)}</span>
 						{#if q.tools.length > 0}<small class="one-line">{q.tools.join(" · ")}</small>{/if}
 					</div>
 				{/each}

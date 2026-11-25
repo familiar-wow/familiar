@@ -111,8 +111,17 @@ function rows(view: View, max: number): QuestionRow[] {
 		time: clock(q.at),
 		text: q.text,
 		tools: toolChips(q.tools),
-		duration: q.ms === undefined ? "…" : seconds(q.ms, view.language),
+		duration: duration(q, view.language),
 	}));
+}
+
+/** "…" while open, "not delivered" when the game was gone, else the seconds. */
+export function duration(
+	q: { ms?: number; undelivered?: true },
+	language: Language,
+): string {
+	if (q.undelivered) return translator(language)("questions.undelivered");
+	return q.ms === undefined ? "…" : seconds(q.ms, language);
 }
 
 export function snapshot(view: View): TraySnapshot {
@@ -127,6 +136,7 @@ export function snapshot(view: View): TraySnapshot {
 			at: q.at,
 			text: q.text,
 			ms: q.ms,
+			...(q.undelivered ? { undelivered: true as const } : {}),
 			tools: toolChips(q.tools),
 		})),
 	};

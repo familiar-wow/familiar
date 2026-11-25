@@ -43,6 +43,7 @@
 	"brain.unknown": "Not set up yet",
 	"brain.last": "last answer {s}",
 	"questions.empty": "No questions yet. Ask in game with /familiar.",
+	"questions.undelivered": "not delivered",
 	"questions.cut": "(question not in the log)",
 	"restart.banner": "Settings changed. Restart Familiar to use them.",
 	"restart.button": "Restart now",

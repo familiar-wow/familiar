@@ -1,5 +1,6 @@
-// Recent questions from the core's log: a `question` line opens one, an `answered` line closes
-// it. The question text is game data: the pages show it as text only, never as HTML.
+// Recent questions from the core's log: a `question` line opens one, the `answered` or
+// `undelivered` line with the same number `n` closes it. Answers can overlap, so only the number
+// pairs them. The question text is game data: the pages show it as text only, never as HTML.
 
 export interface Asked {
 	/** When it was asked, or answered when the question was cut from the log. */
@@ -8,23 +9,23 @@ export interface Asked {
 	text?: string;
 	/** Undefined while the question is still open. */
 	ms?: number;
+	/** The answer was ready but could not go to the game. */
+	undelivered?: true;
 	tools: string[];
 }
+
+const EVENTS = new Set(["question", "answered", "undelivered"]);
 
 /** The log lines that matter here; others are left out to keep the memory small. */
 export function isQuestionLine(line: unknown): line is Record<string, unknown> {
 	if (!line || typeof line !== "object") return false;
-	const event = (line as Record<string, unknown>).event;
-	return event === "question" || event === "answered";
+	return EVENTS.has(String((line as Record<string, unknown>).event));
 }
 
-/**
- * Pairs the lines, newest first. An answer closes the newest open question: a question whose
- * answer never went out (the game was gone) stays open instead of taking the next one's time.
- */
+/** Pairs the lines by their number, newest first. A question without an end stays open. */
 export function recentQuestions(lines: readonly unknown[], max = 8): Asked[] {
 	const all: Asked[] = [];
-	const open: Asked[] = [];
+	const open = new Map<unknown, Asked>();
 	for (const line of lines) {
 		if (!isQuestionLine(line)) continue;
 		const at = typeof line.at === "number" ? line.at : 0;
@@ -35,16 +36,18 @@ export function recentQuestions(lines: readonly unknown[], max = 8): Asked[] {
 				tools: [],
 			};
 			all.push(q);
-			open.push(q);
+			if (line.n !== undefined) open.set(line.n, q);
 			continue;
 		}
 		const tools = Array.isArray(line.tools) ? line.tools.map(String) : [];
 		const ms = typeof line.ms === "number" ? line.ms : 0;
-		const q = open.pop();
-		if (q) {
-			q.ms = ms;
-			q.tools = tools;
-		} else all.push({ at, ms, tools });
+		const q = open.get(line.n);
+		open.delete(line.n);
+		const end: Asked = q ?? { at, tools: [] };
+		end.ms = ms;
+		end.tools = tools;
+		if (line.event === "undelivered") end.undelivered = true;
+		if (!q) all.push(end);
 	}
 	return all.reverse().slice(0, max);
 }

@@ -34,7 +34,13 @@ export interface TraySnapshot {
 	character?: string;
 	characterLine?: string;
 	brain: string;
-	recent: { at: number; text?: string; ms?: number; tools: string[] }[];
+	recent: {
+		at: number;
+		text?: string;
+		ms?: number;
+		undelivered?: true;
+		tools: string[];
+	}[];
 }
 
 export interface TrayUpdate {

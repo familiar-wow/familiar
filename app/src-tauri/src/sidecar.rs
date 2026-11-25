@@ -14,11 +14,15 @@ use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
 pub const NOT_RUNNING: &str = "The core is not running.";
+pub const DID_NOT_STOP: &str = "The old core did not stop. Quit Familiar and start it again.";
 const SHUTDOWN: &[u8] = b"{\"id\":\"quit\",\"method\":\"shutdown\"}\n";
 const STDERR_TAIL: usize = 20;
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const RESTART_WAIT: Duration = Duration::from_secs(10);
+
+/// Lines for the core's stdin thread.
+type Writer = mpsc::Sender<Vec<u8>>;
 
 /// A poisoned lock only means another thread panicked while holding it; the data is still usable,
 /// and these paths must not panic in turn.
@@ -59,13 +63,6 @@ struct StartedPayload {
     generation: u64,
 }
 
-/// What the stdin thread of one generation does next.
-enum Msg {
-    Line(Vec<u8>),
-    /// Kill the child, wait for it, then report back.
-    Kill(mpsc::Sender<()>),
-}
-
 /// Set once a generation's termination was handled, after its `sidecar-exit` went out.
 #[derive(Default)]
 struct Done {
@@ -92,7 +89,9 @@ struct Inner {
     state: SidecarState,
     /// Feeds the stdin thread, which owns the `CommandChild`. Dropped once the core ended, which
     /// ends that thread.
-    writer: Option<mpsc::Sender<Msg>>,
+    writer: Option<Writer>,
+    /// The running core's process id, for kills that must not wait behind a blocked write.
+    pid: Option<u32>,
     done: Arc<Done>,
     /// Set by a quit, so a restart waiting behind it does not start a new core.
     quitting: bool,
@@ -115,6 +114,7 @@ impl Sidecar {
                     stderr_tail: VecDeque::new(),
                 },
                 writer: None,
+                pid: None,
                 done: Arc::new(Done::default()),
                 quitting: false,
             }),
@@ -136,18 +136,48 @@ impl Sidecar {
         let mut bytes = Vec::with_capacity(line.len() + 1);
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        writer
-            .send(Msg::Line(bytes))
-            .map_err(|_| NOT_RUNNING.to_string())
+        writer.send(bytes).map_err(|_| NOT_RUNNING.to_string())
     }
 
-    /// The running generation's stdin queue and termination signal.
-    fn current(&self) -> Option<(mpsc::Sender<Msg>, Arc<Done>)> {
+    /// The running generation's stdin queue, process id and termination signal.
+    fn current(&self) -> Option<(Writer, u32, Arc<Done>)> {
         let inner = lock(&self.inner);
-        match (&inner.writer, inner.state.running) {
-            (Some(writer), true) => Some((writer.clone(), inner.done.clone())),
+        match (&inner.writer, inner.pid, inner.state.running) {
+            (Some(writer), Some(pid), true) => Some((writer.clone(), pid, inner.done.clone())),
             _ => None,
         }
+    }
+}
+
+/// Kills the core and everything it started, without going through its stdin thread: that
+/// thread may hang in a write to a core that stopped reading, and the kill has to get through.
+/// Called only while the generation still runs (its `finish` has not happened), and the core
+/// leads its own process group, so the id cannot belong to another program yet.
+fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let mut command = {
+        let mut c = std::process::Command::new("kill");
+        c.args(["-KILL", "--", &format!("-{pid}")]);
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("taskkill");
+        c.args(["/F", "/T", "/PID", &pid.to_string()]);
+        // No console window flashing up for the kill.
+        c.creation_flags(0x0800_0000);
+        c
+    };
+    match command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("familiar: killing the core exited with {status}"),
+        Err(e) => eprintln!("familiar: cannot kill the core: {e}"),
     }
 }
 
@@ -173,7 +203,7 @@ fn spawn_next(app: &AppHandle) {
     let done = Arc::new(Done::default());
 
     match spawn_child(app, generation) {
-        Ok((events, writer)) => {
+        Ok((events, writer, pid)) => {
             {
                 let mut inner = lock(&sidecar.inner);
                 inner.state = SidecarState {
@@ -183,6 +213,7 @@ fn spawn_next(app: &AppHandle) {
                     stderr_tail: VecDeque::new(),
                 };
                 inner.writer = Some(writer);
+                inner.pid = Some(pid);
                 inner.done = done.clone();
             }
             emit(app, "sidecar-started", StartedPayload { generation });
@@ -202,6 +233,7 @@ fn spawn_next(app: &AppHandle) {
                     stderr_tail: VecDeque::from([reason]),
                 };
                 inner.writer = None;
+                inner.pid = None;
                 inner.done = done.clone();
             }
             emit(app, "sidecar-started", StartedPayload { generation });
@@ -221,50 +253,42 @@ fn spawn_next(app: &AppHandle) {
 fn spawn_child(
     app: &AppHandle,
     generation: u64,
-) -> Result<(Receiver<CommandEvent>, mpsc::Sender<Msg>), String> {
+) -> Result<(Receiver<CommandEvent>, Writer, u32), String> {
     let (events, child) = app
         .shell()
         .sidecar("familiar-core")
         .map_err(|e| e.to_string())?
         .args(args())
-        // A kill also takes what the core started (an agent such as `hermes acp`): its own
-        // process group on Unix, a job object on Windows.
+        // The core leads its own process group on Unix, so `kill_tree` also takes what it
+        // started (an agent such as `hermes acp`); on Windows `taskkill /T` follows the tree.
         .set_process_group(true)
         // No kill on drop: the child is dropped after it ended, and a group kill then could hit
         // a reused process id. Dropping it closes its stdin, which ends a core that still runs.
         .spawn()
         .map_err(|e| e.to_string())?;
+    let pid = child.pid();
     let (writer, queue) = mpsc::channel();
-    // Writes and kills block, so they get their own thread, off the main thread and the runtime.
-    // If the thread cannot start, the child is dropped, its stdin closes and the core leaves.
+    // Writes block, so they get their own thread, off the main thread and the runtime. If the
+    // thread cannot start, the child is dropped, its stdin closes and the core leaves.
     std::thread::Builder::new()
         .name(format!("core-stdin-{generation}"))
         .spawn(move || stdin_loop(child, queue))
         .map_err(|e| e.to_string())?;
-    Ok((events, writer))
+    Ok((events, writer, pid))
 }
 
-fn stdin_loop(mut child: CommandChild, queue: mpsc::Receiver<Msg>) {
+/// Writes queued lines until the queue closes, which `finish` does once the core ended; then the
+/// child is dropped. A write stuck on a core that stopped reading comes free when it is killed.
+fn stdin_loop(mut child: CommandChild, queue: mpsc::Receiver<Vec<u8>>) {
     let mut broken = false;
-    for msg in queue {
-        match msg {
-            Msg::Line(bytes) => {
-                if broken {
-                    continue;
-                }
-                if let Err(e) = child.write(&bytes) {
-                    // The core is gone or going; its `Terminated` follows. Say it once.
-                    eprintln!("familiar: cannot write to the core: {e}");
-                    broken = true;
-                }
-            }
-            Msg::Kill(ack) => {
-                if let Err(e) = child.kill() {
-                    eprintln!("familiar: cannot kill the core: {e}");
-                }
-                let _ = ack.send(());
-                return;
-            }
+    for bytes in queue {
+        if broken {
+            continue;
+        }
+        if let Err(e) = child.write(&bytes) {
+            // The core is gone or going; its `Terminated` follows. Say it once.
+            eprintln!("familiar: cannot write to the core: {e}");
+            broken = true;
         }
     }
 }
@@ -335,6 +359,7 @@ fn finish(app: &AppHandle, generation: u64, code: Option<i32>, done: &Done) {
         if inner.state.generation == generation {
             inner.state.running = false;
             inner.state.exit_code = Some(code);
+            inner.pid = None;
             inner.writer.take()
         } else {
             None
@@ -361,30 +386,32 @@ fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
 }
 
 /// Kills the current core (if any), waits until its exit was handled, then starts the next one.
-pub async fn restart(app: AppHandle) {
+/// A core that does not end is not left behind for a second one: the restart fails instead.
+pub async fn restart(app: AppHandle) -> Result<(), String> {
     let result = tauri::async_runtime::spawn_blocking(move || {
         let sidecar = app.state::<Sidecar>();
         let _ops = lock(&sidecar.ops);
         if lock(&sidecar.inner).quitting {
-            return;
+            return Ok(());
         }
-        if let Some((writer, done)) = sidecar.current() {
-            let (ack, _) = mpsc::channel();
-            let _ = writer.send(Msg::Kill(ack));
-            drop(writer);
+        if let Some((_, pid, done)) = sidecar.current() {
+            kill_tree(pid);
             if !done.wait(RESTART_WAIT) {
-                eprintln!("familiar: the old core did not end in time; starting a new one anyway");
+                eprintln!("familiar: the old core did not end in time; no new one started");
+                return Err(DID_NOT_STOP.to_string());
             }
         }
         // The app may have begun to exit while this waited.
         if !lock(&sidecar.inner).quitting {
             spawn_next(&app);
         }
+        Ok(())
     })
     .await;
-    if let Err(e) = result {
+    result.unwrap_or_else(|e| {
         eprintln!("familiar: restart failed: {e}");
-    }
+        Err(DID_NOT_STOP.to_string())
+    })
 }
 
 /// Graceful quit: ask the core to shut down, give it 3 s, kill it if needed, then exit.
@@ -396,11 +423,11 @@ pub fn quit(app: AppHandle) {
             let sidecar = app.state::<Sidecar>();
             let _ops = lock(&sidecar.ops);
             lock(&sidecar.inner).quitting = true;
-            if let Some((writer, done)) = sidecar.current() {
-                let _ = writer.send(Msg::Line(SHUTDOWN.to_vec()));
+            if let Some((writer, pid, done)) = sidecar.current() {
+                let _ = writer.send(SHUTDOWN.to_vec());
+                drop(writer);
                 if !done.wait(QUIT_GRACE) {
-                    let (ack, _) = mpsc::channel();
-                    let _ = writer.send(Msg::Kill(ack));
+                    kill_tree(pid);
                     if !done.wait(KILL_WAIT) {
                         eprintln!("familiar: the core did not end; exiting anyway");
                     }
@@ -415,15 +442,11 @@ pub fn quit(app: AppHandle) {
     }
 }
 
-/// On any normal end of the app: kill a core that still runs. The kill itself runs on the core's
-/// stdin thread; this only waits a bounded time for it.
+/// On any normal end of the app: kill a core that still runs, and everything it started.
 pub fn kill_on_exit(app: &AppHandle) {
     let sidecar = app.state::<Sidecar>();
     lock(&sidecar.inner).quitting = true;
-    if let Some((writer, _)) = sidecar.current() {
-        let (ack, acked) = mpsc::channel();
-        if writer.send(Msg::Kill(ack)).is_ok() && acked.recv_timeout(KILL_WAIT).is_err() {
-            eprintln!("familiar: the core did not end before the app exited");
-        }
+    if let Some((_, pid, _)) = sidecar.current() {
+        kill_tree(pid);
     }
 }

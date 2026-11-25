@@ -4,7 +4,7 @@ version = "0.14.0"
 description = "Familiar's desktop app: window, tray icon, and the core as a sidecar"
 license = "MIT"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 publish = false
 
 [build-dependencies]

@@ -55,7 +55,7 @@ Requests may overlap: a ChatGPT sign-in that waits for the browser does not hold
 
   `restartNeeded` is true when the settings were saved while Familiar ran; `brain` keeps showing the brain that answers until `restart`.
 
-- `log`: each line of the log as it is written, the same JSON as in the log file. A `question` line carries the question's text and the character, the `answered` line after it how long the answer took and which tools it used. Answers are not in it.
+- `log`: each line of the log as it is written, the same JSON as in the log file. A `question` line carries a number `n`, the question's text and the character; the `answered` line with the same `n` says how long the answer took and which tools it used, or an `undelivered` line says the answer was ready but could not reach the game. Questions can overlap, so only `n` pairs them. Answers are not in it.
 - `status` forgets the addon's hello and the last contact when a WoW process goes away, so it only shows a game as connected while the addon that said hello still runs.
 - `chatgpt-url`: the sign-in address, in case the browser did not open.
 - `invalid`: a line that was no request.

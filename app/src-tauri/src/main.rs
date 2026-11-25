@@ -42,8 +42,11 @@ fn sidecar_send(window: Window, sidecar: State<'_, Sidecar>, line: String) -> Re
 }
 
 #[tauri::command]
-async fn sidecar_restart(app: AppHandle) {
-    sidecar::restart(app).await;
+async fn sidecar_restart(window: Window, app: AppHandle) -> Result<(), String> {
+    if window.label() != MAIN {
+        return Err("Only the main window restarts the core.".into());
+    }
+    sidecar::restart(app).await
 }
 
 #[tauri::command]

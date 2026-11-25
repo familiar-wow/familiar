@@ -24,6 +24,8 @@ export const STATUS_MS = 4000;
 export class Conversation {
 	private readonly waiting = new Map<number, (allow: boolean) => void>();
 	private nextId = 1;
+	/** Numbers the questions, so the app pairs each answer with its question: they overlap. */
+	private asked = 0;
 
 	constructor(
 		private readonly brain: Brain,
@@ -65,7 +67,9 @@ export class Conversation {
 		this.log.say(`Question: ${question.text}`);
 		// For the desktop app's overview: who asks what, and later how long it took and with what.
 		// The question is in the log anyway, in the line above.
+		const n = ++this.asked;
 		this.log.event("question", {
+			n,
 			text: question.text,
 			character: question.character,
 		});
@@ -89,10 +93,12 @@ export class Conversation {
 		});
 		status.stop();
 		const text = clip(plain(reply), MAX_ANSWER);
-		if (this.down({ kind: "answer", text })) {
-			const ms = Math.round(performance.now() - asked);
+		const ms = Math.round(performance.now() - asked);
+		if (!this.down({ kind: "answer", text })) {
+			this.log.event("undelivered", { n, ms, tools });
+		} else {
 			const bytes = new TextEncoder().encode(text).length;
-			this.log.event("answered", { ms, bytes, tools });
+			this.log.event("answered", { n, ms, bytes, tools });
 			this.log.say(
 				`Answered after ${(ms / 1000).toFixed(1)} s, ${bytes} bytes.`,
 			);

@@ -43,6 +43,7 @@
 	"brain.unknown": "Noch nicht eingerichtet",
 	"brain.last": "letzte Antwort {s}",
 	"questions.empty": "Noch keine Fragen. Frag im Spiel mit /familiar.",
+	"questions.undelivered": "nicht zugestellt",
 	"questions.cut": "(Frage nicht im Protokoll)",
 	"restart.banner": "Einstellungen geändert. Starte Familiar neu, damit sie gelten.",
 	"restart.button": "Jetzt neu starten",

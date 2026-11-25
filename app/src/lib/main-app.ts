@@ -128,6 +128,9 @@ export class MainApp {
 		}
 		if (state.gen < this.view.gen) return;
 		if (state.gen > this.view.gen) this.switchTo(state.gen, state.stderrTail);
+		// Rust keeps the stderr of this core too, such as why it could not start at all, which
+		// no event carries: take what the page has not heard yet.
+		else this.mergeStderr(state.stderrTail);
 		if (!state.running) {
 			this.markExited(state.exitCode ?? null);
 			return;
@@ -157,6 +160,20 @@ export class MainApp {
 		this.view.exitCode = code;
 		this.client.stopped(this.view.gen, STOPPED);
 		this.changed();
+	}
+
+	/** The sticky tail ends with what the page already has, or holds lines it never got. */
+	private mergeStderr(sticky: readonly string[]): void {
+		const have = this.view.stderrTail;
+		let known = Math.min(have.length, sticky.length);
+		while (
+			known > 0 &&
+			have.slice(-known).join("\n") !== sticky.slice(0, known).join("\n")
+		)
+			known--;
+		const fresh = sticky.slice(known);
+		if (fresh.length > 0)
+			this.view.stderrTail = [...have, ...fresh].slice(-KEEP_STDERR);
 	}
 
 	private stderr(gen: number, line: string): void {
