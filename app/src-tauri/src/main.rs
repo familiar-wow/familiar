@@ -14,6 +14,8 @@ use sidecar::{Sidecar, SidecarState, lock};
 use tray::TrayState;
 
 const MAIN: &str = "main";
+/** The argument the system's autostart passes: start in the tray, without the window. */
+const HIDDEN: &str = "--hidden";
 
 /// What the main window's X does.
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -120,6 +122,11 @@ fn main() {
             open_main(app)
         }))
         .plugin(tauri_plugin_positioner::init())
+        // Started with the system: the app says so with --hidden and stays in the tray.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![HIDDEN]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecar::new())
@@ -136,8 +143,20 @@ fn main() {
         .on_window_event(on_window_event)
         .setup(|app| {
             // Without a tray (no AppIndicator on Linux) the window still works.
-            if let Err(e) = tray::create(app.handle()) {
-                eprintln!("familiar: no tray icon: {e}");
+            let tray = match tray::create(app.handle()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("familiar: no tray icon: {e}");
+                    false
+                }
+            };
+            // Started with the system: only the tray icon, the window opens from there. Without a
+            // tray icon the window shows anyway, or there would be no way to reach Familiar.
+            if tray
+                && std::env::args().any(|a| a == HIDDEN)
+                && let Some(main) = app.get_webview_window(MAIN)
+            {
+                let _ = main.hide();
             }
             sidecar::start(app.handle());
             Ok(())

@@ -35,6 +35,8 @@ function fakeHost(
 	const snapshots: TraySnapshot[] = [];
 	const closeModes: string[] = [];
 	const picks: string[] = [];
+	let autostartOn = false;
+	const autostartCalls: boolean[] = [];
 	const params: { method: string; params?: Record<string, unknown> }[] = [];
 	const replies: Record<string, Reply> = {
 		hello: { result: { version: "0.14.0" } },
@@ -83,6 +85,11 @@ function fakeHost(
 		setCloseMode: async (m) => void closeModes.push(m),
 		showMain: async () => {},
 		quit: async () => {},
+		autostart: async () => autostartOn,
+		setAutostart: async (on) => {
+			autostartCalls.push(on);
+			autostartOn = on;
+		},
 		pickFolder: async (title) => {
 			picks.push(title);
 			return "D:\\Games\\World of Warcraft";
@@ -106,6 +113,7 @@ function fakeHost(
 		snapshots,
 		closeModes,
 		picks,
+		autostartCalls,
 		params,
 		replies,
 		fire,
@@ -715,6 +723,82 @@ test("the brain test: a real answer, or the core's words, never a timeout's cras
 	expect(
 		await app.testBrain({ kind: "agent", where: "local", command: ["x"] }),
 	).toMatchObject({ ok: false, problem: "The settings are broken." });
+});
+
+test("app settings: the language applies at once, the close button follows", async () => {
+	const f = fakeHost();
+	let file: Record<string, unknown> = {
+		app: { language: "en", close: "tray", setupDone: true },
+	};
+	f.replies["settings.get"] = { result: { settings: file, keys: {} } };
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.language).toBe("en");
+	const send = f.host.send;
+	f.host.send = async (line) => {
+		const r = JSON.parse(line);
+		if (r.method === "settings.set") {
+			file = r.params.settings;
+			f.replies["settings.set"] = { result: { settings: file, keys: {} } };
+			f.replies["settings.get"] = { result: { settings: file, keys: {} } };
+		}
+		return send(line);
+	};
+	f.closeModes.length = 0;
+	await app.updateApp((a) => ({ ...a, language: "de", close: "quit" }));
+	expect(app.view.language).toBe("de");
+	expect(f.closeModes).toEqual(["quit"]);
+	expect((file.app as Record<string, unknown>).setupDone).toBe(true);
+	// No restart for the app's own settings.
+	expect(f.sent.map((s) => s.method)).not.toContain("restart");
+});
+
+test("autostart: the system's entry first, then the setting; a failure saves nothing", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: { settings: { app: { setupDone: true } }, keys: {} },
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["settings.set"] = { result: { settings: {}, keys: {} } };
+	f.sent.length = 0;
+	await app.setAutostart(true);
+	expect(f.autostartCalls.at(-1)).toBe(true);
+	expect(f.params.at(-1)).toMatchObject({
+		method: "settings.set",
+		params: { settings: { app: { autostart: true } } },
+	});
+	f.host.setAutostart = async () => {
+		throw new Error("The system refused.");
+	};
+	const before = f.params.length;
+	await expect(app.setAutostart(false)).rejects.toThrow("The system refused.");
+	expect(f.params.length).toBe(before);
+});
+
+test("at start the system's autostart entry follows the setting", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: {
+			settings: { app: { setupDone: true, autostart: true } },
+			keys: {},
+		},
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(f.autostartCalls).toEqual([true]);
+	// Already as the setting says: nothing is touched.
+	const g = fakeHost();
+	g.replies["settings.get"] = {
+		result: { settings: { app: { setupDone: true } }, keys: {} },
+	};
+	const other = new MainApp(g.host, { systemLanguage: "en-US" });
+	await other.start();
+	await settle();
+	expect(g.autostartCalls).toEqual([]);
 });
 
 test("openBrain opens a kind's tab once; the next visit follows the brain that answers", async () => {

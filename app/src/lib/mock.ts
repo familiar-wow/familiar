@@ -174,6 +174,8 @@ export function mockHost(
 			for (const h of handlers.get(event) ?? []) h(payload as never);
 		}, 0);
 	const later = (ms: number, fn: () => void) => setTimeout(fn, ms);
+	/** The system's autostart entry, which the settings follow. */
+	let autostartOn = false;
 
 	let state: SidecarState = {
 		gen: 1,
@@ -1100,6 +1102,10 @@ export function mockHost(
 		},
 		quit: async () => {},
 		// No real dialog in a browser: the prompt stands in for it.
+		autostart: async () => autostartOn,
+		setAutostart: async (on) => {
+			autostartOn = on;
+		},
 		pickFolder: async (title) =>
 			globalThis.prompt?.(title, SECOND.replace(/\\_forever_$/, "")) ?? null,
 		on: async (event, handler) => {

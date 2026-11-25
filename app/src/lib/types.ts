@@ -29,7 +29,13 @@ export type Connection = "connected" | "waiting" | "error";
 export type Language = "en" | "de";
 export type CloseMode = "tray" | "quit";
 /** The main window's pages; Brain and Settings come later. */
-export type Page = "overview" | "game" | "brain" | "logs" | "setup";
+export type Page =
+	| "overview"
+	| "game"
+	| "brain"
+	| "logs"
+	| "settings"
+	| "setup";
 
 /** A WoW Forever client, as `game.find` and `game.check` describe it. */
 export interface GameClient {
@@ -91,6 +97,10 @@ export interface Host {
 	quit(): Promise<void>;
 	/** Asks the player for a folder; null when they cancel. Only the main window may. */
 	pickFolder(title: string): Promise<string | null>;
+	/** Whether Familiar starts with the system (the system's own entry, not the settings). */
+	autostart(): Promise<boolean>;
+	/** Turns starting with the system on or off; it then starts in the tray. */
+	setAutostart(on: boolean): Promise<void>;
 	on<K extends keyof HostEvents>(
 		event: K,
 		handler: (payload: HostEvents[K]) => void,
