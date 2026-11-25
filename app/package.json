@@ -1,0 +1,28 @@
+{
+	"name": "@familiar/app",
+	"version": "0.14.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"typecheck": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+		"sidecar": "bun scripts/sidecar.ts",
+		"tauri": "tauri"
+	},
+	"dependencies": {
+		"@fontsource-variable/inter": "5.3.0",
+		"@fontsource/cinzel": "5.3.0",
+		"@fontsource/jetbrains-mono": "5.3.0",
+		"@tauri-apps/api": "2.12.5"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "7.3.2",
+		"@tauri-apps/cli": "2.12.6",
+		"@types/bun": "1.4.4",
+		"svelte": "5.59.1",
+		"svelte-check": "4.7.8",
+		"typescript": "6.0.3",
+		"vite": "8.3.8"
+	}
+}

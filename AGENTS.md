@@ -66,11 +66,13 @@ These protect players and the project. Don't trade them for speed.
 bun install
 bun run check       # Biome lint and format check; must pass before every commit
 bun run fix         # apply safe fixes and formatting
-bun run typecheck   # TypeScript
+bun run typecheck   # TypeScript and Svelte
 bun test            # tests; the addon test needs Lua 5.1 with the bit library, see addon/README.md
 ```
 
-Checks for Rust arrive with the desktop app. Spikes list their own commands in their README.
+The desktop app's Rust shell has its own checks, see [app/README.md](app/README.md):
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` in `app/src-tauri`. Spikes list
+their own commands in their README.
 
 ## Done means verified
 
