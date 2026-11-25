@@ -5,18 +5,13 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
-import { AcpBrain } from "./brain/acp.ts";
-import type { Brain } from "./brain/chat.ts";
 import { ChatGpt, ChatGptError, USAGE_URL } from "./brain/chatgpt.ts";
-import { ModelBrain, missing } from "./brain/model.ts";
-import { Conversation } from "./conversation.ts";
-import { echoBrain } from "./echo.ts";
-import { Game } from "./game.ts";
+import { startFamiliar } from "./familiar.ts";
 import { fileLog } from "./log.ts";
-import { type McpServer, serveMcp } from "./mcp/server.ts";
-import { wowTools } from "./mcp/tools.ts";
 import { loadSettings, type Settings, settingsFolder } from "./settings.ts";
-import { Transport } from "./transport/transport.ts";
+import { keychain } from "./sidecar/secrets.ts";
+import { serveSidecar } from "./sidecar/sidecar.ts";
+import { askpassMain } from "./sidecar/ssh.ts";
 import {
 	addonsFiles,
 	clientProcesses,
@@ -26,17 +21,16 @@ import {
 	type WowPaths,
 	wowPaths,
 } from "./wow/client.ts";
-import { install, isInstalled, uninstall } from "./wow/install.ts";
+import { isInstalled, uninstall } from "./wow/install.ts";
 
 const VERSION = pkg.version;
-/** Seconds the window waits for an answer beyond the brain's timeout. */
-const PATIENCE_S = 30;
 
 const USAGE = `familiar ${VERSION}: the Familiar app for development builds
 
   familiar              install or update the addon, then answer questions until Ctrl+C
   familiar check        show which client it found, without changing anything
   familiar uninstall    remove the addon and its helpers (close WoW first)
+  familiar sidecar      for the desktop app: commands and events as JSON lines on stdin/stdout
   familiar login chatgpt    sign in with ChatGPT, so your ChatGPT plan answers
   familiar logout chatgpt   sign out of ChatGPT; --forget also forgets the account,
                             so that another ChatGPT account can sign in
@@ -85,123 +79,25 @@ interface RunOptions {
 
 async function run(paths: WowPaths, options: RunOptions): Promise<void> {
 	const { logs, settingsFile, settings } = options;
-	const { interface: iface, version: build } = clientVersion(paths.client);
-	const running = (await clientProcesses()).length > 0;
-	const fresh = !isInstalled(paths);
-	const result = install(paths, iface, VERSION);
 	mkdirSync(logs, { recursive: true });
 	const logFile = join(logs, `familiar-${stamp()}.jsonl`);
-	const log = fileLog(logFile);
-	log.event("start", {
-		version: VERSION,
-		platform: process.platform,
-		client: paths.client,
-		interface: iface,
-		build,
-		install: result,
-		brain: options.echo
-			? "echo"
-			: settings.brain.use === "model"
-				? {
-						provider: settings.brain.model?.provider,
-						model: settings.brain.model?.name,
-					}
-				: settings.brain.command,
-	});
-	console.log(`familiar ${VERSION}`);
-	console.log(
-		`Client: ${paths.client} (interface ${iface}${build ? `, ${build}` : ""})`,
-	);
-	console.log(`Log:    ${logFile}`);
-	const { command, permissions, cwd, use, model } = settings.brain;
-	if (options.echo) console.log("Brain:  an echo, to test the transport");
-	else if (use === "model" && model) {
-		console.log(
-			`Brain:  Familiar's built-in agent with ${model.name} from ${model.provider}, set in ${settingsFile}`,
-		);
-		const problem = missing(model);
-		if (problem) console.log(`\n!! ${problem}\n`);
-		if (model.provider === "chatgpt") {
-			const account = new ChatGpt({ folder: dirname(settingsFile) }).account();
-			console.log(
-				account
-					? `        Using ChatGPT plan (${account}). Manage usage: ${USAGE_URL}`
-					: "\n!! Not signed in to ChatGPT. Run `familiar login chatgpt`, then start Familiar again.\n",
-			);
-		}
-	} else {
-		console.log(
-			`Brain:  ${command.join(" ")} (permission requests: ${permissions}), set in ${settingsFile}`,
-		);
-		console.log(`        sessions open in ${cwd ?? dirname(settingsFile)}`);
-		if (!Bun.which(command[0] ?? ""))
-			console.log(
-				`\n!! ${command[0]} was not found. Install it, or change brain.command in the settings.\n`,
-			);
-	}
-	// The game's state as tools for the agent (ADR 0007). The echo has no use for them, and the
-	// built-in agent calls them in this process (ADR 0008).
-	const game = new Game();
-	let wow: McpServer | undefined;
-	if (!options.echo && use === "agent") {
-		const { port } = settings.mcp;
-		try {
-			wow = serveMcp({ port, tools: wowTools(game), version: VERSION, log });
-			console.log(`Tools:  ${wow.url}, handed to the agent with each session`);
-		} catch (error) {
-			const taken = (error as { code?: string }).code === "EADDRINUSE";
-			log.event("mcp-error", { port, error: String(error) });
-			console.log(
-				taken
-					? `\n!! Port ${port} is in use, so the agent gets no game tools. If another familiar is\n!! running, close it: two of them both answer the game. Otherwise set mcp.port in\n!! ${settingsFile}.\n`
-					: `\n!! The game tools could not start on port ${port}, so the agent gets none: ${error instanceof Error ? error.message : error}\n`,
-			);
-		}
-	}
-	if (fresh) console.log("Addon installed.");
-	else if (result.added + result.updated > 0) console.log("Addon updated.");
-	if (running && result.added > 0)
-		console.log(
-			"\n!! WoW is running and new files were added. Quit WoW completely and start it again;\n!! /reload does not find new files.\n",
-		);
-	else if (running && result.updated > 0)
-		console.log("WoW is running: type /reload in game.");
-
-	// Starts nothing until the first question.
-	const brain: Brain & { stop?: () => void } =
-		use === "model"
-			? new ModelBrain(settings.brain, {
-					log,
-					tools: wowTools(game),
-					chatgpt: new ChatGpt({ folder: dirname(settingsFile) }),
-				})
-			: new AcpBrain(settings.brain, {
-					folder: dirname(settingsFile),
-					log,
-					version: VERSION,
-					wow,
-				});
-	const transport = new Transport({
+	const familiar = await startFamiliar({
 		paths,
-		log,
-		// The brain answers every question within its timeout, if only to say that there is no
-		// answer. PATIENCE_S on top covers starting the agent and the way back; after that the
-		// window stops waiting (addon/Familiar/Chat.lua).
-		welcome: `Familiar app ${VERSION}\npatience: ${Math.ceil(settings.brain.timeout) + PATIENCE_S}`,
+		settings,
+		settingsFile,
+		log: fileLog(logFile),
+		logFile,
+		version: VERSION,
+		echo: options.echo,
+		secrets: keychain(),
+		notes: {
+			info: (text) => console.log(text),
+			warn: (text) => console.log(`\n!! ${text}\n`),
+		},
 	});
-	const conversation = new Conversation(
-		options.echo ? echoBrain : brain,
-		(body) => transport.send(body),
-		log,
-		game,
-	);
-	transport.onMessage((body, info) => conversation.receive(body, info));
-	await transport.start();
 	console.log("\nReady. In game, /familiar opens the window. Ctrl+C stops.\n");
 	const stop = () => {
-		transport.stop();
-		brain.stop?.();
-		wow?.stop();
+		familiar.stop();
 		process.exit(0);
 	};
 	process.on("SIGINT", stop);
@@ -284,6 +180,15 @@ async function logout(folder: string, forget: boolean): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	// `ssh` starts this program to ask for a password (sidecar/ssh.ts): it prints the secret from
+	// the keychain that FAMILIAR_ASKPASS names and does nothing else. Its argument is ssh's prompt.
+	if (process.env.FAMILIAR_ASKPASS && process.env.SSH_ASKPASS_REQUIRE)
+		process.exit(
+			await askpassMain(Bun.argv.slice(2), {
+				store: keychain(),
+				env: process.env,
+			}),
+		);
 	const { values, positionals } = parseArgs({
 		args: Bun.argv.slice(2),
 		options: {
@@ -319,17 +224,24 @@ async function main(): Promise<void> {
 			? login(folder)
 			: logout(folder, values.forget ?? false);
 	}
-	if (command !== "run") exitWith(USAGE);
 	const settingsFile = resolve(
 		values.settings ?? join(settingsFolder(), "settings.json"),
 	);
+	if (command === "sidecar")
+		return serveSidecar({
+			settingsFile,
+			logs: resolve(values.logs ?? join(dirname(settingsFile), "logs")),
+			version: VERSION,
+			askpass: process.execPath,
+		});
+	if (command !== "run") exitWith(USAGE);
 	let settings: Settings;
 	try {
 		settings = loadSettings(settingsFile);
 	} catch (error) {
 		exitWith(error instanceof Error ? error.message : String(error));
 	}
-	await run(await resolveClient(values.wow), {
+	await run(await resolveClient(values.wow ?? settings.game.client), {
 		logs: resolve(values.logs ?? "familiar-logs"),
 		settingsFile,
 		settings,

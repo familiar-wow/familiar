@@ -45,6 +45,11 @@ export interface AcpBrainOptions {
 	version: string;
 	/** The `wow` server, which every session gets; none if it could not start. */
 	wow?: Pick<McpServer, "url" | "port" | "token" | "served">;
+	/**
+	 * More environment for the agent's process, such as what `ssh` needs to ask Familiar for a
+	 * password (sidecar/ssh.ts). Never a secret itself, only where to find it.
+	 */
+	env?: Record<string, string>;
 }
 
 export class AcpBrain implements Brain {
@@ -167,10 +172,11 @@ export class AcpBrain implements Brain {
 
 	private async start(): Promise<Agent> {
 		const { command, permissions } = this.settings;
-		const { folder, log, version } = this.options;
+		const { folder, log, version, env } = this.options;
 		const started = performance.now();
 		const child = Bun.spawn(command, {
 			cwd: folder,
+			...(env ? { env: { ...process.env, ...env } } : {}),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",

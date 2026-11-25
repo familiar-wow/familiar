@@ -1,0 +1,279 @@
+// The sidecar against fake programs and a fake keychain: requests in, replies and events out.
+import { afterAll, expect, test } from "bun:test";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Log } from "../log.ts";
+import { ListError } from "./models.ts";
+import { memoryStore, names } from "./secrets.ts";
+import { clientFolder, type Deps, Sidecar } from "./sidecar.ts";
+
+const folders: string[] = [];
+afterAll(() => {
+	for (const f of folders) rmSync(f, { recursive: true, force: true });
+});
+
+function temp(): string {
+	const dir = mkdtempSync(join(tmpdir(), "familiar-sidecar-"));
+	folders.push(dir);
+	return dir;
+}
+
+/** A WoW folder with a _forever_ client in it. */
+function wow(): { root: string; client: string } {
+	const root = temp();
+	const client = join(root, "_forever_");
+	mkdirSync(join(client, "Interface", "AddOns"), { recursive: true });
+	mkdirSync(join(client, "WTF", "Account"), { recursive: true });
+	writeFileSync(join(client, "Wow.exe"), "");
+	writeFileSync(
+		join(root, ".build.info"),
+		"Branch!STRING:0|Product!STRING:0|Version!STRING:0\nus|wowf|1.60.1.71037\n",
+	);
+	return { root, client };
+}
+
+function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
+	const dir = temp();
+	const settingsFile = join(dir, "settings.json");
+	if (settings) writeFileSync(settingsFile, JSON.stringify(settings));
+	const out: Record<string, unknown>[] = [];
+	const store = memoryStore();
+	const s = new Sidecar({
+		settingsFile,
+		logs: join(dir, "logs"),
+		version: "0.0.0-test",
+		askpass: "/opt/familiar",
+		write: (line) => void out.push(JSON.parse(line)),
+		deps: {
+			secrets: store,
+			findClients: async () => [],
+			clientProcesses: async () => [],
+			openUrl: () => {},
+			...deps,
+		},
+	});
+	let id = 0;
+	const call = async (method: string, params?: Record<string, unknown>) => {
+		const mine = ++id;
+		await s.handle(JSON.stringify({ id: mine, method, params }));
+		const reply = out.find((m) => m.id === mine) as
+			| { result?: unknown; error?: { message: string } }
+			| undefined;
+		if (!reply) throw new Error(`no reply to ${method}`);
+		return reply;
+	};
+	return { s, out, store, settingsFile, call };
+}
+
+test("answers hello, refuses unknown methods and lines that are no request", async () => {
+	const { s, out, call } = sidecar();
+	expect((await call("hello")).result).toMatchObject({ version: "0.0.0-test" });
+	expect((await call("no.such")).error?.message).toBe(
+		"Unknown method no.such.",
+	);
+	await s.handle("not json");
+	expect(out.at(-1)).toEqual({
+		event: "invalid",
+		data: { message: "Not a request." },
+	});
+});
+
+test("settings: the app never sees a key, and a key it sends goes to the keychain", async () => {
+	const { call, store, settingsFile } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: {
+					provider: "openrouter",
+					name: "openai/gpt-6-luna",
+					apiKey: "sk-in-file",
+				},
+			},
+		},
+	);
+	const got = (await call("settings.get")).result as {
+		settings: { brain: { model: Record<string, unknown> } };
+		keys: Record<string, boolean>;
+	};
+	expect(got.settings.brain.model.apiKey).toBeUndefined();
+	expect(got.keys.openrouter).toBe(true);
+
+	// Sent back without the key (the app never had it): the key in the file stays.
+	await call("settings.set", { settings: got.settings });
+	expect(
+		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
+	).toBe("sk-in-file");
+
+	// A new key from the app: into the keychain, out of the file.
+	const next = structuredClone(got.settings);
+	next.brain.model.apiKey = "sk-new";
+	await call("settings.set", { settings: next });
+	expect(
+		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
+	).toBeUndefined();
+	expect(await store.get(names.apiKey("openrouter"))).toBe("sk-new");
+	expect(JSON.stringify((await call("settings.get")).result)).not.toContain(
+		"sk-",
+	);
+});
+
+test("settings that do not fit are refused with words that name no value", async () => {
+	const { call } = sidecar();
+	const reply = await call("settings.set", {
+		settings: { brain: { use: "model", "sk-secret-in-a-key-name": 1 } },
+	});
+	expect(reply.error?.message).toContain("does not know");
+	expect(reply.error?.message).not.toContain("sk-secret");
+});
+
+test("finds the game, and takes a folder, its parent or the game's program", async () => {
+	const { root, client } = wow();
+	const { call } = sidecar({ findClients: async () => [client] });
+	expect((await call("game.find")).result).toEqual([
+		{ client, version: "1.60.1.71037", interface: 16001, installed: false },
+	]);
+	expect(clientFolder(root)).toBe(client);
+	expect(clientFolder(join(client, "Wow.exe"))).toBe(client);
+	expect(clientFolder(temp())).toBeUndefined();
+	expect((await call("game.check", { path: temp() })).error?.message).toContain(
+		"not a WoW Forever folder",
+	);
+});
+
+test("keys: stored, found and removed; models are listed with the stored key", async () => {
+	let seen = "";
+	const { call } = sidecar({
+		listModels: async (_provider, key) => {
+			seen = key;
+			return [{ id: "openai/gpt-6-luna", recommended: true }];
+		},
+	});
+	expect(
+		(await call("models.list", { provider: "openrouter" })).error?.message,
+	).toBe("Enter the API key first.");
+	expect(
+		(await call("key.set", { provider: "openrouter", key: " sk-or-1 " }))
+			.result,
+	).toBeNull();
+	expect((await call("key.has", { provider: "openrouter" })).result).toBe(true);
+	expect(
+		(await call("models.list", { provider: "openrouter" })).result,
+	).toEqual([{ id: "openai/gpt-6-luna", recommended: true }]);
+	expect(seen).toBe("sk-or-1");
+	expect((await call("key.delete", { provider: "openrouter" })).result).toBe(
+		true,
+	);
+	expect((await call("key.has", { provider: "openrouter" })).result).toBe(
+		false,
+	);
+	expect(
+		(await call("key.set", { provider: "nope", key: "x" })).error?.message,
+	).toBe("Choose a provider.");
+});
+
+test("errors: our own words pass, anything else says nothing about itself", async () => {
+	const { call } = sidecar({
+		listModels: async () => {
+			throw new ListError("The provider refused the key.");
+		},
+		findAgents: async () => {
+			throw new Error("internal detail sk-should-not-show");
+		},
+	});
+	expect(
+		(await call("models.list", { provider: "openai", key: "sk-x" })).error
+			?.message,
+	).toBe("The provider refused the key.");
+	expect((await call("agents.find")).error?.message).toBe(
+		"Something went wrong (Error).",
+	);
+});
+
+test("a host that could be read as an ssh option is refused", async () => {
+	let asked = "";
+	const { call } = sidecar({
+		resolveHost: async (host) => {
+			asked = host;
+			return {
+				host,
+				hostname: host,
+				user: "u",
+				port: 22,
+				identityFiles: [],
+				fromConfig: false,
+			};
+		},
+	});
+	for (const host of ["-oProxyCommand=evil", "a b", ""])
+		expect((await call("ssh.resolve", { host })).error?.message).toBe(
+			"Enter the computer's name or address.",
+		);
+	expect(asked).toBe("");
+	expect((await call("ssh.resolve", { host: "homelab" })).result).toMatchObject(
+		{
+			hostname: "homelab",
+		},
+	);
+});
+
+test("start runs Familiar and the status follows what the log says", async () => {
+	const { client } = wow();
+	let log: Log | undefined;
+	let stopped = false;
+	const { call, out } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async (o) => {
+				log = o.log;
+				o.notes.warn("Port 27495 is in use.");
+				return {
+					install: { added: 1, updated: 0, removed: 0 } as never,
+					fresh: true,
+					stop: () => {
+						stopped = true;
+					},
+				};
+			},
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	const started = (await call("start")).result as Record<string, unknown>;
+	expect(started).toMatchObject({
+		running: true,
+		client,
+		brain: { kind: "agent", command: ["hermes", "acp"] },
+		problems: ["Port 27495 is in use."],
+	});
+	log?.event("hello", { text: "Familiar 0.0.0, build 1" });
+	log?.event("message", { key: "k", id: 1 });
+	log?.event("question", { character: { name: "Moonbreeze", level: "35" } });
+	log?.event("answered", {
+		ms: 3800,
+		bytes: 120,
+		tools: ["quests", "flightpaths"],
+	});
+	const last = out.filter((m) => m.event === "status").at(-1)?.data as Record<
+		string,
+		unknown
+	>;
+	expect(last).toMatchObject({
+		game: { hello: "Familiar 0.0.0, build 1" },
+		character: { name: "Moonbreeze" },
+		last: { ms: 3800, tools: ["quests", "flightpaths"] },
+	});
+	expect((last.game as { lastContact?: number }).lastContact).toBeNumber();
+	expect(out.some((m) => m.event === "log")).toBe(true);
+	expect(
+		((await call("logs.recent", { limit: 2 })).result as unknown[]).length,
+	).toBe(2);
+	await call("stop");
+	expect(stopped).toBe(true);
+});

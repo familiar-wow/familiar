@@ -45,6 +45,7 @@ export class Conversation {
 		const text = new TextDecoder().decode(body);
 		if (hello) {
 			this.game.forget();
+			this.log.event("hello", { text });
 			this.log.say(`The addon says hello: ${text}`);
 			return;
 		}
@@ -62,14 +63,20 @@ export class Conversation {
 
 	private async answer(question: Question): Promise<void> {
 		this.log.say(`Question: ${question.text}`);
+		// For the desktop app's overview: who asks, and later how long it took and with what.
+		this.log.event("question", { character: question.character });
 		this.game.see(question.character, question.revs);
 		const asked = performance.now();
 		const status = throttle(
 			(title) => this.down({ kind: "status", text: clip(title, MAX_STATUS) }),
 			STATUS_MS,
 		);
+		const tools: string[] = [];
 		const reply = await this.brain.ask(question, {
-			onTool: status.tool,
+			onTool: (title) => {
+				tools.push(title.split(":")[0] ?? title);
+				status.tool(title);
+			},
 			onNote: (note) => {
 				this.log.say(`  ${note}`);
 				this.down({ kind: "note", text: clip(note, MAX_NOTE) });
@@ -79,9 +86,11 @@ export class Conversation {
 		status.stop();
 		const text = clip(plain(reply), MAX_ANSWER);
 		if (this.down({ kind: "answer", text })) {
-			const s = ((performance.now() - asked) / 1000).toFixed(1);
+			const ms = Math.round(performance.now() - asked);
+			const bytes = new TextEncoder().encode(text).length;
+			this.log.event("answered", { ms, bytes, tools });
 			this.log.say(
-				`Answered after ${s} s, ${new TextEncoder().encode(text).length} bytes.`,
+				`Answered after ${(ms / 1000).toFixed(1)} s, ${bytes} bytes.`,
 			);
 		}
 	}

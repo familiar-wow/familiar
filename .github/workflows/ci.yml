@@ -94,7 +94,8 @@ jobs:
           if (-not (Test-Path (Join-Path $client 'Interface\AddOns\Familiar\Familiar.toc'))) { throw 'the addon was not installed' }
 
   # The brain runs as a child process on stdin and stdout, and the font bank uses hard links:
-  # both work differently on Windows. The `wow` server listens on a port there too.
+  # both work differently on Windows. The `wow` server listens on a port there too. The
+  # desktop app's sidecar uses the Windows Credential Manager, ssh.exe and reg.exe.
   windows-test:
     name: Windows test
     runs-on: windows-latest
@@ -107,7 +108,7 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - run: bun test acp.test bank.test server.test game.test chatgpt.test model.test settings.test
+      - run: bun test acp.test bank.test server.test game.test chatgpt.test model.test settings.test sidecar/
         working-directory: core
 
   # The only check the ruleset for main requires. Add every new job to `needs`.

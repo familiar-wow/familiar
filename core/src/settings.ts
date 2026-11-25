@@ -1,7 +1,15 @@
-// The settings file, until the desktop app has a settings page (FAM-6). For the player's own
-// agent it holds the bridge's settings only: that brain is set up in the agent (ADR 0006). For
-// the built-in agent it names the model and its provider (ADR 0008).
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// The settings file, shared by the command line and the desktop app (FAM-6), which edits it
+// through the sidecar. For the player's own agent it holds the bridge's settings only: that brain
+// is set up in the agent (ADR 0006). For the built-in agent it names the model and its provider
+// (ADR 0008); the key belongs in the system keychain, not here.
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -40,7 +48,35 @@ const Model = z
 		path: ["baseUrl"],
 	});
 
+/**
+ * The player's own agent on another computer, reached through `ssh` (sidecar/ssh.ts). When set,
+ * it replaces `brain.command`. Passwords and passphrases are in the system keychain.
+ */
+const Ssh = z.strictObject({
+	/** A name, an address or a Host from ~/.ssh/config. */
+	host: z.string().min(1),
+	/** Override the user; by default ~/.ssh/config or the local user name decides. */
+	user: z.string().min(1).optional(),
+	/** Override the key file; by default ~/.ssh/config or ssh's defaults decide. */
+	identityFile: z.string().min(1).optional(),
+	auth: z.enum(["key", "passphrase", "password"]).default("key"),
+	/** The agent's ACP command on that computer, ideally with its full path. */
+	command: z.array(z.string().min(1)).min(1),
+});
+
 const Settings = z.strictObject({
+	/** The WoW Forever client folder the player chose; found automatically when left out. */
+	game: z.strictObject({ client: z.string().min(1).optional() }).prefault({}),
+	/** How the desktop app behaves; the command line ignores this. */
+	app: z
+		.strictObject({
+			/** What the window's close button does. */
+			close: z.enum(["tray", "quit"]).default("tray"),
+			/** Start with Windows, in the tray. */
+			autostart: z.boolean().default(false),
+			language: z.enum(["system", "en", "de"]).default("system"),
+		})
+		.prefault({}),
 	brain: z
 		.strictObject({
 			/**
@@ -64,6 +100,8 @@ const Settings = z.strictObject({
 			 * agent runs, which matters for an agent on another machine.
 			 */
 			cwd: z.string().min(1).optional(),
+			/** The agent on another computer; replaces `command` when set. */
+			ssh: Ssh.optional(),
 		})
 		.refine((b) => b.use !== "model" || b.model, {
 			message:
@@ -82,6 +120,30 @@ const Settings = z.strictObject({
 		.prefault({}),
 });
 export type Settings = z.infer<typeof Settings>;
+
+/** Checks settings from the app or a file; throws an error that names no values. */
+export function parseSettings(json: unknown, where = "The settings"): Settings {
+	const result = Settings.safeParse(json);
+	if (!result.success) throw new Error(`${where}:\n${problems(result.error)}`);
+	return result.data;
+}
+
+/**
+ * Writes the settings: to a new file next to the old one, then renamed over it, so a crash
+ * never leaves half a file.
+ */
+export function saveSettings(file: string, settings: Settings): void {
+	const clean = parseSettings(settings);
+	mkdirSync(dirname(file), { recursive: true });
+	const tmp = `${file}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(clean, null, "\t")}\n`);
+		renameSync(tmp, file);
+	} catch (error) {
+		rmSync(tmp, { force: true });
+		throw error;
+	}
+}
 
 /** Where the settings live: the usual folder for app settings on each system. */
 export function settingsFolder(): string {
@@ -115,9 +177,7 @@ export function loadSettings(file: string): Settings {
 			`${file} is not valid JSON. Check the quotes, commas and brackets near the last change.`,
 		);
 	}
-	const result = Settings.safeParse(json);
-	if (!result.success) throw new Error(`${file}:\n${problems(result.error)}`);
-	return result.data;
+	return parseSettings(json, file);
 }
 
 /**
