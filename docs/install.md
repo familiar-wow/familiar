@@ -19,6 +19,8 @@ Two packages, built on Ubuntu 22.04 so they also run on older systems:
 - Debian and Ubuntu: `sudo apt install ./Familiar_<version>_amd64.deb`.
 - Anything else: `chmod +x Familiar_<version>_amd64.AppImage` and start it.
 
+Start with the system cannot name a program in a folder with a `%` in its name; the switch then says so.
+
 The tray icon needs a desktop with AppIndicator support. Linux desktops do not report clicks on the icon, so its
 menu is the way in.
 

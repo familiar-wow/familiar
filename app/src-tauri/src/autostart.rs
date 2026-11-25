@@ -78,6 +78,7 @@ mod imp {
         let program = program
             .to_str()
             .ok_or("Familiar's path is not valid text, so no autostart entry can name it.")?;
+        super::nameable(program)?;
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir)
                 .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
@@ -97,6 +98,19 @@ mod imp {
     }
 }
 
+/// Whether an autostart entry can name `program`. A desktop expands `%` in Exec at launch, and
+/// GLib refuses `%%` because it checks that the program exists before it expands it, so a path
+/// with a `%` cannot be written either way.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn nameable(program: &str) -> Result<(), String> {
+    if program.contains('%') {
+        return Err(format!(
+            "Familiar is in a folder whose name has a %, which an autostart entry cannot hold: {program}. Move it to a folder without one."
+        ));
+    }
+    Ok(())
+}
+
 /// The autostart file for `program`. No `--hidden` on Linux: whether a tray host is there to show
 /// the icon cannot be told at login, and a hidden window without an icon could not be reached.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -109,8 +123,7 @@ fn desktop_entry(program: &str) -> String {
 
 /// A program path for `Exec`, in the two layers the Desktop Entry spec reads it with.
 /// 1. The argument: in double quotes, with `"`, `` ` ``, `$` and `\` behind a backslash.
-///    No path holds a field code (`%f`, `%u` …), so a `%` stays as it is: GLib checks that the
-///    program exists before it expands `%%`, and refuses an entry whose path has one.
+///    A path with `%` never gets here (`set` refuses it).
 /// 2. The value: a key's value is a string first, where `\` is itself an escape, so every
 ///    backslash from step 1 (and in the path) is doubled once more; control characters, which a
 ///    value cannot hold, as `\n`, `\t`, `\r`.
@@ -159,8 +172,13 @@ mod tests {
         // A backslash: `\\` as an argument, `\\\\` in the value.
         assert_eq!(exec_quote(r"/a\b"), r#""/a\\\\b""#);
         assert_eq!(exec_quote(r#"/q"x"#), r#""/q\\"x""#);
-        assert_eq!(exec_quote("/100%"), "\"/100%\"");
         assert_eq!(exec_quote("/a\nb"), r#""/a\nb""#);
+    }
+
+    #[test]
+    fn a_path_with_a_percent_sign_is_refused() {
+        assert!(nameable("/home/me/100%/Familiar").is_err());
+        assert!(nameable("/home/me/My Apps/Familiar").is_ok());
     }
 
     #[test]
@@ -184,13 +202,14 @@ mod tests {
             "$Games/Familiar.AppImage",
             r#"say "hi"/Familiar"#,
             r"back\slash/Familiar",
-            "`tick`/100%/Familiar",
+            "`tick`/Familiar",
         ];
         let mut list = String::new();
         for (i, name) in names.iter().enumerate() {
             let program = std::path::Path::new(&dir).join("p").join(name);
             std::fs::create_dir_all(program.parent().unwrap()).unwrap();
-            std::fs::write(&program, "#!/bin/sh\n").unwrap();
+            // Leaves a mark next to itself, so a check can see that it was started.
+            std::fs::write(&program, "#!/bin/sh\n: > \"$0.ran\"\n").unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             let path = program.to_str().unwrap();
