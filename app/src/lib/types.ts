@@ -28,6 +28,19 @@ export interface SidecarState {
 export type Connection = "connected" | "waiting" | "error";
 export type Language = "en" | "de";
 export type CloseMode = "tray" | "quit";
+/** The main window's pages; Brain and Settings come later. */
+export type Page = "overview" | "game" | "logs";
+
+/** A WoW Forever client, as `game.find` and `game.check` describe it. */
+export interface GameClient {
+	/** The client folder, its `_forever_` folder. */
+	client: string;
+	version?: string;
+	interface?: number;
+	installed: boolean;
+	/** The version in the installed addon's `.toc`; absent when it is not installed. */
+	addonVersion?: string;
+}
 
 export interface TraySnapshot {
 	connection: Connection;
@@ -60,6 +73,8 @@ export interface HostEvents {
 	"sidecar-started": { gen: number };
 	"familiar-snapshot": TraySnapshot;
 	"familiar-snapshot-request": null;
+	/** The tray panel asks the main window to show a page. */
+	"familiar-open": { page: Page };
 }
 
 /**
@@ -74,6 +89,8 @@ export interface Host {
 	setCloseMode(mode: CloseMode): Promise<void>;
 	showMain(): Promise<void>;
 	quit(): Promise<void>;
+	/** Asks the player for a folder; null when they cancel. Only the main window may. */
+	pickFolder(title: string): Promise<string | null>;
 	on<K extends keyof HostEvents>(
 		event: K,
 		handler: (payload: HostEvents[K]) => void,

@@ -120,6 +120,7 @@ fn main() {
             open_main(app)
         }))
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecar::new())
         .manage(Close(Mutex::new(CloseMode::default())))

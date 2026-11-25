@@ -1,0 +1,7 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "dialog",
+	"description": "The main window may ask the player for a folder, such as the game's. Nothing else of the dialog plugin, and not from the tray panel.",
+	"windows": ["main"],
+	"permissions": ["dialog:allow-open"]
+}

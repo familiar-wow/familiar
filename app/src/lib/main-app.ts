@@ -3,12 +3,13 @@
 // renders `view`.
 import { Bootstrap, type Step } from "./bootstrap.ts";
 import { CoreClient, STOPPED } from "./client.ts";
-import { resolveLanguage } from "./i18n.ts";
+import { resolveLanguage, translator } from "./i18n.ts";
 import { emptyView, snapshot, trayUpdate, type View } from "./overview.ts";
 import { isQuestionLine } from "./questions.ts";
 import {
 	type Host,
 	messageOf,
+	type Page,
 	type SidecarState,
 	type Status,
 } from "./types.ts";
@@ -17,6 +18,10 @@ import {
 export const START_TIMEOUT_MS = 60_000;
 /** Question lines kept for the overview; it shows 8. */
 const KEEP_LOG = 200;
+/** All log lines kept for the Logs page. */
+export const KEEP_LINES = 2000;
+/** What `logs.recent` gives at most. */
+const RECENT = 500;
 /** Rust keeps the same number of stderr lines. */
 const KEEP_STDERR = 20;
 
@@ -70,6 +75,7 @@ export class MainApp {
 			h.on("sidecar-exit", (p) => this.exited(p.gen, p.code)),
 			h.on("sidecar-started", (p) => this.started(p.gen)),
 			h.on("familiar-snapshot-request", () => this.sendSnapshot(true)),
+			h.on("familiar-open", (p) => this.open(p.page)),
 		]);
 		this.changed();
 		await this.sync();
@@ -84,6 +90,34 @@ export class MainApp {
 	dispose(): void {
 		for (const off of this.unlisten) off();
 		this.unlisten = [];
+	}
+
+	/** Shows a page: the sidebar, or the tray panel through `familiar-open`. */
+	open(page: Page): void {
+		if (page === this.view.page) return;
+		this.view.page = page;
+		this.changed();
+	}
+
+	/** A request to the current core, for the pages. */
+	call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+		return this.client.request<T>(method, params);
+	}
+
+	/** Asks the core for its status again, after a page changed something. */
+	async refreshStatus(): Promise<void> {
+		const gen = this.view.gen;
+		const status = await this.client.request<Status>("status");
+		if (gen !== this.view.gen || !status) return;
+		this.view.status = status;
+		this.changed();
+	}
+
+	/** The folder dialog, titled in the page's language. */
+	pickFolder(): Promise<string | null> {
+		return this.host.pickFolder(
+			translator(this.view.language)("client.pickTitle"),
+		);
 	}
 
 	/** The error state's button: a new core. */
@@ -191,6 +225,7 @@ export class MainApp {
 			...emptyView(this.view.language),
 			gen,
 			version: this.view.version,
+			page: this.view.page,
 		};
 	}
 
@@ -198,8 +233,9 @@ export class MainApp {
 		const ask = async <T>(
 			method: string,
 			timeoutMs?: number,
+			params?: Record<string, unknown>,
 		): Promise<T | undefined> => {
-			const result = await this.client.request<T>(method, undefined, timeoutMs);
+			const result = await this.client.request<T>(method, params, timeoutMs);
 			if (gen !== this.view.gen) throw new Abandoned();
 			return result ?? undefined;
 		};
@@ -241,7 +277,9 @@ export class MainApp {
 				run: async () => {
 					this.arriving = [];
 					try {
-						const lines = await ask<unknown[]>("logs.recent");
+						const lines = await ask<unknown[]>("logs.recent", undefined, {
+							limit: RECENT,
+						});
 						this.loadLog(Array.isArray(lines) ? lines : []);
 					} finally {
 						this.arriving = undefined;
@@ -264,11 +302,12 @@ export class MainApp {
 
 	/** The recent log replaces what the page had; lines that came while it was asked for stay. */
 	private loadLog(lines: unknown[]): void {
-		const log = lines.filter(isQuestionLine);
-		const seen = new Set(log.map((line) => JSON.stringify(line)));
+		const all = lines.filter(isLine);
+		const seen = new Set(all.map((line) => JSON.stringify(line)));
 		for (const line of this.arriving ?? [])
-			if (!seen.has(JSON.stringify(line))) log.push(line);
-		this.view.log = log.slice(-KEEP_LOG);
+			if (!seen.has(JSON.stringify(line))) all.push(line);
+		this.view.lines = all.slice(-KEEP_LINES);
+		this.view.log = all.filter(isQuestionLine).slice(-KEEP_LOG);
 		this.changed();
 	}
 
@@ -276,9 +315,11 @@ export class MainApp {
 		if (event === "status" && data && typeof data === "object") {
 			this.view.status = data as Status;
 			this.changed();
-		} else if (event === "log" && isQuestionLine(data)) {
+		} else if (event === "log" && isLine(data)) {
 			this.arriving?.push(data);
-			this.view.log = [...this.view.log, data].slice(-KEEP_LOG);
+			this.view.lines = [...this.view.lines, data].slice(-KEEP_LINES);
+			if (isQuestionLine(data))
+				this.view.log = [...this.view.log, data].slice(-KEEP_LOG);
 			this.changed();
 		}
 	}
@@ -306,4 +347,8 @@ export class MainApp {
 		this.lastSnapshot = key;
 		this.host.emit("familiar-snapshot", snap).catch(() => {});
 	}
+}
+
+function isLine(line: unknown): line is Record<string, unknown> {
+	return !!line && typeof line === "object" && !Array.isArray(line);
 }

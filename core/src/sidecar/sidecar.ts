@@ -32,7 +32,12 @@ import {
 	isClientFolder,
 	wowPaths,
 } from "../wow/client.ts";
-import { install, isInstalled, uninstall } from "../wow/install.ts";
+import {
+	install,
+	installedVersion,
+	isInstalled,
+	uninstall,
+} from "../wow/install.ts";
 import { findAgents, findLocalServers } from "./detect.ts";
 import { ListError, listModels, type Provider } from "./models.ts";
 import {
@@ -110,6 +115,8 @@ export interface Deps {
 	trustHost: typeof trustHost;
 	testConnection: typeof testConnection;
 	openUrl: (url: string) => void;
+	/** Shows a folder in the system's file manager. */
+	openFolder: (folder: string) => void;
 	now: () => number;
 	env: Record<string, string | undefined>;
 }
@@ -158,6 +165,7 @@ export class Sidecar {
 			trustHost,
 			testConnection,
 			openUrl,
+			openFolder,
 			now: Date.now,
 			env: process.env,
 			...o.deps,
@@ -319,6 +327,11 @@ export class Sidecar {
 				return this.recent.slice(-limit);
 			},
 			"logs.folder": () => this.o.logs,
+			"logs.open": () => {
+				mkdirSync(this.o.logs, { recursive: true });
+				this.deps.openFolder(this.o.logs);
+				return null;
+			},
 
 			"settings.get": () => this.shownSettings(this.settings()),
 			"settings.set": (p) => this.setSettings(p.settings),
@@ -328,7 +341,12 @@ export class Sidecar {
 				return clients.map((client) => describeClient(client));
 			},
 			"game.check": (p) => {
-				const client = clientFolder(String(p.path ?? ""));
+				const path = String(p.path ?? "");
+				if (isTestRealm(path))
+					throw new PlayerError(
+						"This is a test realm. Familiar works with the normal WoW Forever client in the _forever_ folder.",
+					);
+				const client = clientFolder(path);
 				if (!client)
 					throw new PlayerError(
 						"This is not a WoW Forever folder. Choose the _forever_ folder or the game's program in it.",
@@ -684,12 +702,22 @@ export async function serveSidecar(o: SidecarOptions): Promise<void> {
 
 function describeClient(client: string) {
 	const { interface: iface, version } = clientVersion(client);
+	const paths = wowPaths(client);
+	const addonVersion = installedVersion(paths);
 	return {
 		client,
 		version,
 		interface: iface,
-		installed: isInstalled(wowPaths(client)),
+		installed: isInstalled(paths),
+		...(addonVersion ? { addonVersion } : {}),
 	};
+}
+
+/** A test realm's folder or something in it, such as `_ptr_` or `_beta_`: not for Familiar. */
+export function isTestRealm(chosen: string): boolean {
+	return chosen
+		.split(/[\\/]+/)
+		.some((part) => /^_(?:x?ptr|beta|[a-z]+_(?:x?ptr|beta))_$/i.test(part));
 }
 
 /** The client folder from what the player chose: the folder, its parent, or the game's program. */
@@ -749,6 +777,21 @@ function stamp(ms: number): string {
 		.slice(0, 19)
 		.replace(/[-:]/g, "")
 		.replace("T", "-");
+}
+
+function openFolder(folder: string): void {
+	// explorer.exe reports an exit code of 1 even when it opened the folder: nothing to check.
+	const command =
+		process.platform === "win32"
+			? ["explorer", folder]
+			: process.platform === "darwin"
+				? ["open", folder]
+				: ["xdg-open", folder];
+	try {
+		Bun.spawn(command, { stdout: "ignore", stderr: "ignore" });
+	} catch {
+		// The Logs page shows the folder too.
+	}
 }
 
 function openUrl(url: string): void {

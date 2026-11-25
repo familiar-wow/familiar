@@ -2,6 +2,7 @@
 import { afterAll, expect, test } from "bun:test";
 import {
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -14,7 +15,13 @@ import { join } from "node:path";
 import type { Log } from "../log.ts";
 import { ListError } from "./models.ts";
 import { memoryStore, names, SecretError } from "./secrets.ts";
-import { clientFolder, type Deps, Sidecar, type Status } from "./sidecar.ts";
+import {
+	clientFolder,
+	type Deps,
+	isTestRealm,
+	Sidecar,
+	type Status,
+} from "./sidecar.ts";
 
 const folders: string[] = [];
 afterAll(() => {
@@ -44,12 +51,13 @@ function wow(): { root: string; client: string } {
 function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 	const dir = temp();
 	const settingsFile = join(dir, "settings.json");
+	const logs = join(dir, "logs");
 	if (settings) writeFileSync(settingsFile, JSON.stringify(settings));
 	const out: Record<string, unknown>[] = [];
 	const store = memoryStore();
 	const s = new Sidecar({
 		settingsFile,
-		logs: join(dir, "logs"),
+		logs,
 		version: "0.0.0-test",
 		askpass: "/opt/familiar",
 		write: (line) => void out.push(JSON.parse(line)),
@@ -58,6 +66,7 @@ function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 			findClients: async () => [],
 			clientProcesses: async () => [],
 			openUrl: () => {},
+			openFolder: () => {},
 			...deps,
 		},
 	});
@@ -71,7 +80,7 @@ function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 		if (!reply) throw new Error(`no reply to ${method}`);
 		return reply;
 	};
-	return { s, out, store, settingsFile, call };
+	return { s, out, store, settingsFile, logs, call };
 }
 
 test("answers hello, refuses unknown methods and lines that are no request", async () => {
@@ -150,6 +159,45 @@ test("finds the game, and takes a folder, its parent or the game's program", asy
 	expect((await call("game.check", { path: temp() })).error?.message).toContain(
 		"not a WoW Forever folder",
 	);
+	// Installed, the addon's own version shows.
+	expect((await call("addon.install", { client })).error).toBeUndefined();
+	expect((await call("game.find")).result).toEqual([
+		{
+			client,
+			version: "1.60.1.71037",
+			interface: 16001,
+			installed: true,
+			addonVersion: "0.0.0-test",
+		},
+	]);
+});
+
+test("refuses a test realm, also one that would pass as a client folder", async () => {
+	const root = temp();
+	const ptr = join(root, "_ptr_");
+	mkdirSync(join(ptr, "Interface", "AddOns"), { recursive: true });
+	writeFileSync(join(ptr, "Wow.exe"), "");
+	const { call } = sidecar();
+	for (const path of [ptr, join(ptr, "Wow.exe"), join(root, "_classic_ptr_")])
+		expect((await call("game.check", { path })).error?.message).toContain(
+			"test realm",
+		);
+	expect(isTestRealm(join(root, "_forever_"))).toBe(false);
+	expect(isTestRealm(join(root, "_xptr_", "Wow.exe"))).toBe(true);
+	expect(isTestRealm(join(root, "_beta_"))).toBe(true);
+	expect(isTestRealm(join(root, "ptr notes"))).toBe(false);
+});
+
+test("opens the log folder, and makes it first when nothing was logged yet", async () => {
+	let opened = "";
+	const { call, logs } = sidecar({
+		openFolder: (folder) => {
+			opened = folder;
+		},
+	});
+	expect((await call("logs.open")).result).toBeNull();
+	expect(opened).toBe(logs);
+	expect(existsSync(logs)).toBe(true);
 });
 
 test("keys: stored, found and removed; models are listed with the stored key", async () => {

@@ -39,6 +39,12 @@ $effect(() => {
 	document.documentElement.lang = language;
 });
 
+// The main window owns the pages: ask it for the log, then bring it up.
+async function openLogs() {
+	await host.emit("familiar-open", { page: "logs" }).catch(() => {});
+	await host.showMain().catch(() => {});
+}
+
 // A wrap breaks before a "·", never after it, and keeps "24.1 s" together.
 function wrapWell(text: string): string {
 	return text.replaceAll(" · ", " ·\u00a0").replace(/(\d) s\b/g, "$1\u00a0s");
@@ -98,7 +104,7 @@ const subline = $derived(
 	{/if}
 
 	<div class="bar">
-		<button class="btn ghost" disabled>{t("tray.logs")}</button>
+		<button class="btn ghost" onclick={openLogs}>{t("tray.logs")}</button>
 		<button class="btn primary" onclick={() => host.showMain().catch(() => {})}>
 			{t("tray.open")}
 		</button>

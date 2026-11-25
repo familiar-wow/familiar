@@ -1,6 +1,7 @@
 <script lang="ts">
 import type { Translate } from "../lib/i18n.ts";
 import type { Overview } from "../lib/overview.ts";
+import RestartBanner from "./RestartBanner.svelte";
 
 let {
 	o,
@@ -33,12 +34,7 @@ async function once(action: () => Promise<void>) {
 	<p class="sub">{o.sub}</p>
 
 	{#if o.restartNeeded}
-		<div class="banner" role="status">
-			<span>{t("restart.banner")}</span>
-			<button class="btn" disabled={busy} onclick={() => once(onRestartFamiliar)}>
-				{t("restart.button")}
-			</button>
-		</div>
+		<RestartBanner {t} onRestart={onRestartFamiliar} />
 	{/if}
 
 	<div class="grid">
@@ -142,19 +138,6 @@ async function once(action: () => Promise<void>) {
 		margin-bottom: 22px;
 	}
 
-	.banner {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		justify-content: space-between;
-		margin-bottom: 16px;
-		padding: 10px 14px;
-		border-radius: 10px;
-		font-size: 13px;
-		background: rgba(224, 164, 78, 0.08);
-		border: 1px solid rgba(224, 164, 78, 0.35);
-	}
-
 	.grid {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
@@ -239,7 +222,7 @@ async function once(action: () => Promise<void>) {
 
 	.questions li {
 		display: grid;
-		grid-template-columns: 54px minmax(0, 1fr) 70px;
+		grid-template-columns: 54px minmax(0, 1fr) minmax(70px, max-content);
 		gap: 0 6px;
 		padding: 10px 6px;
 		border-top: 1px solid var(--line);

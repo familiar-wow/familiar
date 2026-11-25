@@ -1,6 +1,6 @@
 [package]
 name = "familiar-app"
-version = "0.14.0"
+version = "0.15.0"
 description = "Familiar's desktop app: window, tray icon, and the core as a sidecar"
 license = "MIT"
 edition = "2024"
@@ -12,6 +12,7 @@ tauri-build = { version = "2.7.6", features = [] }
 
 [dependencies]
 tauri = { version = "2.12.7", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2.8.4"
 tauri-plugin-shell = "2.6.0"
 tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5.5"
