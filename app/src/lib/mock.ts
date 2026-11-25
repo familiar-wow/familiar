@@ -307,7 +307,9 @@ export function mockHost(
 			keys[p] = source !== undefined;
 			if (source) keySources[p] = source;
 		}
-		return { settings: copy, keys, keySources, file: settingsFile };
+		// Like the core: a key written into the settings file by hand.
+		const keysInFile = fileKey ? [fileKey] : [];
+		return { settings: copy, keys, keySources, keysInFile, file: settingsFile };
 	}
 
 	/** What a run uses: a change here needs a restart while Familiar runs. */

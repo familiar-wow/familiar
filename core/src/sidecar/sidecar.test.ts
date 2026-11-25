@@ -852,6 +852,26 @@ test("the app's own settings change nothing a run uses, so they need no restart"
 	});
 });
 
+test("a key in the file is named although a keychain key is the one used", async () => {
+	const { call } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	await call("key.set", { provider: "openrouter", key: "sk-new" });
+	const got = (await call("settings.get")).result as {
+		keySources: Record<string, string>;
+		keysInFile: string[];
+	};
+	expect(got.keySources.openrouter).toBe("keychain");
+	expect(got.keysInFile).toEqual(["openrouter"]);
+	expect(JSON.stringify(got)).not.toContain("sk-file");
+});
+
 test("a key in the file moves into the keychain when the settings leave its provider", async () => {
 	const { call, store, settingsFile } = sidecar(
 		{ env: { DEEPSEEK_API_KEY: "sk-env" } },

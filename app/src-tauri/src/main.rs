@@ -153,7 +153,9 @@ fn main() {
             };
             // Started with the system: only the tray icon, the window opens from there. Without a
             // tray icon the window shows anyway, or there would be no way to reach Familiar.
-            if tray
+            // Not on Linux: whether a tray host shows the icon is not known (autostart.rs).
+            if cfg!(not(target_os = "linux"))
+                && tray
                 && std::env::args().any(|a| a == autostart::HIDDEN)
                 && let Some(main) = app.get_webview_window(MAIN)
             {

@@ -49,6 +49,8 @@ export interface View {
 	keys: Record<string, boolean>;
 	/** Per provider: where that key is: keychain, settings file or environment. */
 	keySources: Record<string, "keychain" | "file" | "environment">;
+	/** Providers with an API key in the settings file (a file the player might share). */
+	keysInFile: string[];
 	/** The ChatGPT sign-in's address while it waits for the browser. */
 	chatgptUrl?: string;
 	/** The Brain page's tab to open, when a page asked for one (`openBrain`). */
@@ -67,6 +69,7 @@ export function emptyView(language: Language): View {
 		page: "overview",
 		keys: {},
 		keySources: {},
+		keysInFile: [],
 	};
 }
 

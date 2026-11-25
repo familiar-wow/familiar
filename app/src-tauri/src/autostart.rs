@@ -88,8 +88,9 @@ mod imp {
 
     /// `~/.config/autostart/Familiar.desktop`, or under `$XDG_CONFIG_HOME`.
     fn entry() -> Result<PathBuf, String> {
-        let config = match std::env::var_os("XDG_CONFIG_HOME") {
-            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        // Only an absolute XDG_CONFIG_HOME counts, as the XDG spec says.
+        let config = match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            Some(dir) if dir.is_absolute() => dir,
             _ => PathBuf::from(std::env::var_os("HOME").ok_or("No home folder.")?).join(".config"),
         };
         Ok(config.join("autostart").join("Familiar.desktop"))
@@ -106,23 +107,37 @@ fn desktop_entry(program: &str) -> String {
     )
 }
 
-/// A program path as the Desktop Entry spec wants it in `Exec`: in double quotes, with `"`, `` ` ``,
-/// `$` and `\` escaped by a backslash, and `%` doubled since it starts a field code.
+/// A program path for `Exec`, in the two layers the Desktop Entry spec reads it with.
+/// 1. The argument: in double quotes, with `"`, `` ` ``, `$` and `\` behind a backslash.
+///    No path holds a field code (`%f`, `%u` …), so a `%` stays as it is: GLib checks that the
+///    program exists before it expands `%%`, and refuses an entry whose path has one.
+/// 2. The value: a key's value is a string first, where `\` is itself an escape, so every
+///    backslash from step 1 (and in the path) is doubled once more; control characters, which a
+///    value cannot hold, as `\n`, `\t`, `\r`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn exec_quote(path: &str) -> String {
-    let mut out = String::from("\"");
+    let mut arg = String::from("\"");
     for ch in path.chars() {
         match ch {
             '"' | '`' | '$' | '\\' => {
-                out.push('\\');
-                out.push(ch);
+                arg.push('\\');
+                arg.push(ch);
             }
-            '%' => out.push_str("%%"),
-            _ => out.push(ch),
+            _ => arg.push(ch),
         }
     }
-    out.push('"');
-    out
+    arg.push('"');
+    let mut value = String::with_capacity(arg.len());
+    for ch in arg.chars() {
+        match ch {
+            '\\' => value.push_str("\\\\"),
+            '\n' => value.push_str("\\n"),
+            '\t' => value.push_str("\\t"),
+            '\r' => value.push_str("\\r"),
+            _ => value.push(ch),
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -138,11 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn special_characters_are_escaped() {
-        assert_eq!(
-            exec_quote("/a/\"b\"/$c/`d`/e\\f/100%"),
-            "\"/a/\\\"b\\\"/\\$c/\\`d\\`/e\\\\f/100%%\""
-        );
+    fn special_characters_are_escaped_in_both_layers() {
+        // `$` is `\$` as an argument, and that backslash is doubled in the value.
+        assert_eq!(exec_quote("/g/$Games"), r#""/g/\\$Games""#);
+        // A backslash: `\\` as an argument, `\\\\` in the value.
+        assert_eq!(exec_quote(r"/a\b"), r#""/a\\\\b""#);
+        assert_eq!(exec_quote(r#"/q"x"#), r#""/q\\"x""#);
+        assert_eq!(exec_quote("/100%"), "\"/100%\"");
+        assert_eq!(exec_quote("/a\nb"), r#""/a\nb""#);
     }
 
     #[test]
@@ -150,5 +168,36 @@ mod tests {
         let entry = desktop_entry("/usr/bin/Familiar");
         assert!(entry.contains("\nExec=\"/usr/bin/Familiar\"\n"));
         assert!(!entry.contains(HIDDEN));
+    }
+
+    /// Writes the entry for odd paths to `FAMILIAR_DESKTOP_DIR` for a desktop parser (GLib) to
+    /// read back; see app/README.md. Does nothing without it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn entries_for_a_desktop_parser() {
+        let Some(dir) = std::env::var_os("FAMILIAR_DESKTOP_DIR") else {
+            return;
+        };
+        // Real programs under `dir`: a desktop only takes an entry whose program exists.
+        let names = [
+            "My Apps/Familiar.AppImage",
+            "$Games/Familiar.AppImage",
+            r#"say "hi"/Familiar"#,
+            r"back\slash/Familiar",
+            "`tick`/100%/Familiar",
+        ];
+        let mut list = String::new();
+        for (i, name) in names.iter().enumerate() {
+            let program = std::path::Path::new(&dir).join("p").join(name);
+            std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+            std::fs::write(&program, "#!/bin/sh\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = program.to_str().unwrap();
+            let file = std::path::Path::new(&dir).join(format!("e{i}.desktop"));
+            std::fs::write(&file, desktop_entry(path)).unwrap();
+            list.push_str(&format!("{}\t{path}\n", file.display()));
+        }
+        std::fs::write(std::path::Path::new(&dir).join("list.tsv"), list).unwrap();
     }
 }

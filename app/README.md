@@ -33,4 +33,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test     # the process tests read /proc, so they run on Linux only
 ```
 
+The Linux autostart entry quotes the program's path in two layers (`src-tauri/src/autostart.rs`). To check it the
+way a desktop reads it, have the tests write entries for odd paths and read them with GLib:
+
+```sh
+FAMILIAR_DESKTOP_DIR=/tmp/entries cargo test autostart
+python3 ../scripts/desktop-entry-check.py /tmp/entries
+```
+
 [docs/install.md](../docs/install.md) covers installing, what the app keeps where, and removing it. CI builds the Windows installer and the Linux packages. On both systems it starts the built app against an empty client folder and checks that the addon arrives and that the core goes away with the app. The Windows installer is first installed silently. It is not signed yet (FAM-18), so Windows SmartScreen warns before it runs.

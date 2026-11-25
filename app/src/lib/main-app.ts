@@ -37,6 +37,8 @@ interface SettingsReply {
 	settings?: Settings;
 	keys?: Record<string, boolean>;
 	keySources?: Record<string, KeySource>;
+	/** Providers with a key in the settings file, also when another key is the one used. */
+	keysInFile?: string[];
 	file?: string;
 }
 
@@ -301,6 +303,7 @@ export class MainApp {
 		this.view.settings = got.settings;
 		this.view.keys = got.keys ?? {};
 		this.view.keySources = got.keySources ?? {};
+		this.view.keysInFile = got.keysInFile ?? [];
 		// A language chosen in the settings applies at once, here and in the tray panel.
 		this.view.language = resolveLanguage(
 			got.settings.app?.language,
@@ -489,6 +492,7 @@ export class MainApp {
 			...(this.view.settings ? { settings: this.view.settings } : {}),
 			keys: this.view.keys,
 			keySources: this.view.keySources,
+			keysInFile: this.view.keysInFile,
 			...(this.view.brainTab ? { brainTab: this.view.brainTab } : {}),
 		};
 	}

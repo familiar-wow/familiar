@@ -239,12 +239,10 @@ test("the autostart switch shows what the system does, and says when the setting
 test("a key still in the settings file is named, so the player does not share the file", () => {
 	const p = presentSettings(
 		{ busy: [], errors: {} },
+		// The keychain's key is used, but the file still holds one: the file matters.
 		view({
-			keySources: {
-				openrouter: "file",
-				openai: "keychain",
-				deepseek: "environment",
-			},
+			keySources: { openrouter: "keychain" },
+			keysInFile: ["openrouter"],
 		}),
 		t,
 		"en",

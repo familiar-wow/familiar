@@ -535,10 +535,13 @@ export class Sidecar {
 			keys[provider] = source !== undefined;
 			if (source) keySources[provider] = source;
 		}
+		// A key in the file, whichever key is used: the file is what the player might share.
+		const filed = settings.brain.model;
 		return {
 			settings: shown,
 			keys,
 			keySources,
+			keysInFile: filed?.apiKey ? [filed.provider] : [],
 			file: this.o.settingsFile,
 		};
 	}

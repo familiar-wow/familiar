@@ -255,9 +255,7 @@ export function presentSettings(
 			: state.coreVersion;
 	const files: SettingsPage["files"] = {
 		open: field("openLogs"),
-		keysInFile: Object.entries(view.keySources)
-			.filter(([, source]) => source === "file")
-			.map(([provider]) => provider),
+		keysInFile: [...view.keysInFile],
 	};
 	if (state.file) files.file = state.file;
 	if (state.fileError) files.fileError = oneLine(state.fileError);
