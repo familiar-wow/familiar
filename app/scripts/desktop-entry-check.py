@@ -29,6 +29,9 @@ for row in open(f"{folder}/list.tsv", encoding="utf-8"):
         info = None
     ran = False
     if info is not None:
+        # A mark from an earlier run would pass a launch that did nothing.
+        if os.path.exists(f"{want}.ran"):
+            os.remove(f"{want}.ran")
         info.launch([], None)
         for _ in range(50):
             if os.path.exists(f"{want}.ran"):
