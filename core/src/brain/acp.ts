@@ -213,6 +213,8 @@ export class AcpBrain implements Brain {
 					log.event("brain-permission", {
 						tool: title,
 						answer: choice?.optionId ?? "cancelled",
+						// The id is the agent's own word; the kind says what it means.
+						allowed: choice?.kind === "allow_once",
 					});
 					return {
 						outcome: choice
@@ -344,7 +346,7 @@ export class AcpBrain implements Brain {
 function choose(
 	options: { optionId: string; kind: string }[],
 	allow: boolean | undefined,
-): { optionId: string } | undefined {
+): { optionId: string; kind: string } | undefined {
 	if (allow === undefined) return undefined;
 	const once = (kind: string) => options.find((o) => o.kind === kind);
 	return (allow && once("allow_once")) || once("reject_once");

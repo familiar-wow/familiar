@@ -219,8 +219,8 @@ test("answers a permission request once, as the settings say", async () => {
 	expect(
 		events.filter((e) => e.name === "brain-permission").map((e) => e.data),
 	).toEqual([
-		{ tool: "rm -rf ~", answer: "reject-once" },
-		{ tool: "rm -rf ~", answer: "allow-once" },
+		{ tool: "rm -rf ~", answer: "reject-once", allowed: false },
+		{ tool: "rm -rf ~", answer: "allow-once", allowed: true },
 	]);
 });
 

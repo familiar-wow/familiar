@@ -16,6 +16,7 @@ import {
 import type {
 	Connection,
 	Language,
+	Page,
 	Status,
 	TraySnapshot,
 	TrayUpdate,
@@ -37,6 +38,10 @@ export interface View {
 	language: Language;
 	/** The log's `question` and `answered` lines, oldest first. */
 	log: Record<string, unknown>[];
+	/** Every log line of this core, oldest first, for the Logs page. */
+	lines: Record<string, unknown>[];
+	/** The page the main window shows. */
+	page: Page;
 }
 
 export function emptyView(language: Language): View {
@@ -47,6 +52,8 @@ export function emptyView(language: Language): View {
 		stderrSeq: 0,
 		language,
 		log: [],
+		lines: [],
+		page: "overview",
 	};
 }
 

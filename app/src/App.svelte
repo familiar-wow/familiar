@@ -1,5 +1,7 @@
 <script lang="ts">
 import { untrack } from "svelte";
+import Game from "./components/Game.svelte";
+import Logs from "./components/Logs.svelte";
 import Overview from "./components/Overview.svelte";
 import Sidebar from "./components/Sidebar.svelte";
 import { translator } from "./lib/i18n.ts";
@@ -29,13 +31,25 @@ const o = $derived(present(view, now));
 </script>
 
 <div class="app">
-	<Sidebar {t} version={view.version} />
-	<Overview
-		{o}
-		{t}
-		onRestartCore={() => app.restartCore()}
-		onRestartFamiliar={() => app.restartFamiliar()}
-	/>
+	<Sidebar {t} version={view.version} page={view.page} onOpen={(page) => app.open(page)} />
+	{#if view.page === "game"}
+		<Game
+			{app}
+			{view}
+			{t}
+			restartNeeded={o.restartNeeded}
+			onRestartFamiliar={() => app.restartFamiliar()}
+		/>
+	{:else if view.page === "logs"}
+		<Logs {view} {t} onOpenFolder={() => app.call("logs.open")} />
+	{:else}
+		<Overview
+			{o}
+			{t}
+			onRestartCore={() => app.restartCore()}
+			onRestartFamiliar={() => app.restartFamiliar()}
+		/>
+	{/if}
 </div>
 
 <style>

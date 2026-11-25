@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { MainApp } from "./main-app.ts";
+import { KEEP_LINES, MainApp } from "./main-app.ts";
 import type {
 	Host,
 	HostEvents,
@@ -34,6 +34,7 @@ function fakeHost(
 	const trays: TrayUpdate[] = [];
 	const snapshots: TraySnapshot[] = [];
 	const closeModes: string[] = [];
+	const picks: string[] = [];
 	const replies: Record<string, Reply> = {
 		hello: { result: { version: "0.14.0" } },
 		"settings.get": {
@@ -78,6 +79,10 @@ function fakeHost(
 		setCloseMode: async (m) => void closeModes.push(m),
 		showMain: async () => {},
 		quit: async () => {},
+		pickFolder: async (title) => {
+			picks.push(title);
+			return "D:\\Games\\World of Warcraft";
+		},
 		on: async (event, handler) => {
 			handlers.set(event, [
 				...(handlers.get(event) ?? []),
@@ -96,6 +101,7 @@ function fakeHost(
 		trays,
 		snapshots,
 		closeModes,
+		picks,
 		replies,
 		fire,
 		line: (gen: number, data: unknown) =>
@@ -147,6 +153,28 @@ test("a failed step shows its message and stops the bootstrap", async () => {
 	expect(app.view.failure).toBe("The settings file is broken.");
 	expect(f.trays.at(-1)?.state).toBe("error");
 	expect(f.snapshots.at(-1)?.gameLine).toBe("The settings file is broken.");
+});
+
+test("once Familiar runs again, the error that kept it from starting goes", async () => {
+	const f = fakeHost();
+	f.replies.start = {
+		error: "WoW Forever was not found. Choose its _forever_ folder.",
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.failure).toBe(
+		"WoW Forever was not found. Choose its _forever_ folder.",
+	);
+	// The player chose the client and installed the addon; the Game page starts Familiar.
+	f.replies.start = { result: status({ running: true }) };
+	await app.startFamiliar();
+	expect(app.view.failure).toBeUndefined();
+	expect(f.trays.at(-1)?.state).not.toBe("error");
+	// A start that answers but does not run keeps the error where it was.
+	f.replies.start = { error: "Still no client." };
+	await app.startFamiliar();
+	expect(app.view.failure).toBe("Still no client.");
 });
 
 test("the core exiting fails what is pending and shows the last stderr line", async () => {
@@ -358,4 +386,115 @@ test("lines that come while the recent log is asked for are kept once", async ()
 	await app.start();
 	await settle();
 	expect(app.view.log).toEqual([asked, during]);
+});
+
+test("the recent log asks for 500 lines and fills the Logs page's buffer", async () => {
+	const f = fakeHost();
+	const recent = [
+		{ at: 1, event: "start", version: "0.15.0" },
+		{ at: 2, event: "question", n: 1, text: "Where?" },
+		{ at: 3, event: "mcp-call", tool: "quests" },
+	];
+	f.replies["logs.recent"] = { result: recent };
+	let params: unknown;
+	const origSend = f.host.send;
+	f.host.send = async (line) => {
+		const r = JSON.parse(line);
+		if (r.method === "logs.recent") params = r.params;
+		return origSend(line);
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(params).toEqual({ limit: 500 });
+	expect(app.view.lines).toEqual(recent);
+	// The overview's question buffer stays as it was: questions only.
+	expect(app.view.log).toEqual([
+		{ at: 2, event: "question", n: 1, text: "Where?" },
+	]);
+	f.line(1, { event: "log", data: { at: 4, event: "say", text: "hi" } });
+	expect(app.view.lines.at(-1)).toEqual({ at: 4, event: "say", text: "hi" });
+	expect(app.view.log).toHaveLength(1);
+});
+
+test("the log buffer keeps the newest 2000 lines", async () => {
+	const f = fakeHost();
+	f.replies["logs.recent"] = {
+		result: Array.from({ length: 500 }, (_, i) => ({ at: i, event: "say" })),
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	for (let i = 500; i < 2100; i++)
+		f.line(1, { event: "log", data: { at: i, event: "send", bytes: 1 } });
+	expect(app.view.lines).toHaveLength(KEEP_LINES);
+	expect(app.view.lines[0]?.at).toBe(100);
+	expect(app.view.lines.at(-1)?.at).toBe(2099);
+});
+
+test("a new core starts with an empty log buffer and fills it again", async () => {
+	const f = fakeHost();
+	f.replies["logs.recent"] = { result: [{ at: 1, event: "say", text: "old" }] };
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.line(1, { event: "log", data: { at: 2, event: "say", text: "old too" } });
+	expect(app.view.lines).toHaveLength(2);
+	f.replies["logs.recent"] = { result: [{ at: 5, event: "say", text: "new" }] };
+	f.fire("sidecar-exit", { gen: 1, code: null });
+	await settle();
+	await app.restartCore();
+	await settle();
+	expect(app.view.gen).toBe(2);
+	expect(app.view.lines).toEqual([{ at: 5, event: "say", text: "new" }]);
+	// Lines of the old core that come late are not mixed in.
+	f.line(1, { event: "log", data: { at: 6, event: "say", text: "late" } });
+	expect(app.view.lines).toHaveLength(1);
+});
+
+test("familiar-open from the tray panel switches the page, also across a new core", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.page).toBe("overview");
+	const seen: string[] = [];
+	app.watch((v) => seen.push(v.page));
+	f.fire("familiar-open", { page: "logs" });
+	expect(app.view.page).toBe("logs");
+	expect(seen.at(-1)).toBe("logs");
+	app.open("game");
+	expect(app.view.page).toBe("game");
+	await app.restartCore();
+	await settle();
+	expect(app.view.gen).toBe(2);
+	expect(app.view.page).toBe("game");
+});
+
+test("pickFolder passes the dialog's title in the page's language", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	expect(await app.pickFolder()).toBe("D:\\Games\\World of Warcraft");
+	await app.start();
+	await settle();
+	// settings.get said German.
+	await app.pickFolder();
+	expect(f.picks).toEqual([
+		"Choose the WoW Forever folder",
+		"Wähle den Ordner von WoW Forever",
+	]);
+});
+
+test("pages call the core and refresh the shared status", async () => {
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["game.find"] = { result: [{ client: "C:\\WoW", installed: true }] };
+	expect(await app.call("game.find")).toEqual([
+		{ client: "C:\\WoW", installed: true },
+	]);
+	f.replies.status = { result: status({ running: true, restartNeeded: true }) };
+	await app.refreshStatus();
+	expect(app.view.status?.restartNeeded).toBe(true);
 });

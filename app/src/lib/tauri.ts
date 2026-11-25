@@ -2,6 +2,7 @@
 // so the rest of the pages and their tests never need Tauri.
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { Host, SidecarState } from "./types.ts";
 
 /** Whether the page runs inside the app, not in a plain browser. */
@@ -29,6 +30,10 @@ export function tauriHost(): Host {
 		},
 		quit: async () => {
 			await invoke("quit");
+		},
+		pickFolder: async (title) => {
+			const chosen = await open({ directory: true, multiple: false, title });
+			return typeof chosen === "string" ? chosen : null;
 		},
 		on: (event, handler) => listen(event, (e) => handler(e.payload as never)),
 		emit: (event, payload) => emit(event, payload),

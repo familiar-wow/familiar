@@ -75,6 +75,18 @@ export function isInstalled(paths: WowPaths): boolean {
 	return owned(join(paths.addons, MAIN));
 }
 
+/** The version of the installed addon, from its `.toc`; undefined when it is not ours or not there. */
+export function installedVersion(paths: WowPaths): string | undefined {
+	const folder = join(paths.addons, MAIN);
+	if (!owned(folder)) return undefined;
+	try {
+		const toc = readFileSync(join(folder, `${MAIN}.toc`), "utf8");
+		return toc.match(/^## Version: *(\S+) *$/m)?.[1];
+	} catch {
+		return undefined;
+	}
+}
+
 export function install(
 	paths: WowPaths,
 	iface: number,

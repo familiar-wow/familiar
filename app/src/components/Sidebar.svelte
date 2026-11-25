@@ -1,13 +1,25 @@
 <script lang="ts">
 import type { Key, Translate } from "../lib/i18n.ts";
+import type { Page } from "../lib/types.ts";
 
-let { t, version }: { t: Translate; version?: string } = $props();
+let {
+	t,
+	version,
+	page,
+	onOpen,
+}: {
+	t: Translate;
+	version?: string;
+	page: Page;
+	onOpen: (page: Page) => void;
+} = $props();
 
-// Only the overview exists in this version; the others come with later pull requests.
-const later: { icon: string; key: Key }[] = [
-	{ icon: "⚔", key: "nav.game" },
+// Brain and Settings come with later pull requests; they stay in the list, dimmed.
+const items: { icon: string; key: Key; page?: Page }[] = [
+	{ icon: "◈", key: "nav.overview", page: "overview" },
+	{ icon: "⚔", key: "nav.game", page: "game" },
 	{ icon: "✦", key: "nav.brain" },
-	{ icon: "☰", key: "nav.logs" },
+	{ icon: "☰", key: "nav.logs", page: "logs" },
 	{ icon: "⚙", key: "nav.settings" },
 ];
 </script>
@@ -18,13 +30,23 @@ const later: { icon: string; key: Key }[] = [
 		<b>FAMILIAR</b>
 	</div>
 	<nav>
-		<span class="nav-item on" aria-current="page">
-			<span class="icon" aria-hidden="true">◈</span>{t("nav.overview")}
-		</span>
-		{#each later as item (item.key)}
-			<span class="nav-item off" aria-disabled="true" title={t("nav.later")}>
-				<span class="icon" aria-hidden="true">{item.icon}</span>{t(item.key)}
-			</span>
+		{#each items as item (item.key)}
+			{#if item.page}
+				{@const target = item.page}
+				<button
+					type="button"
+					class="nav-item"
+					class:on={page === target}
+					aria-current={page === target ? "page" : undefined}
+					onclick={() => onOpen(target)}
+				>
+					<span class="icon" aria-hidden="true">{item.icon}</span>{t(item.key)}
+				</button>
+			{:else}
+				<span class="nav-item off" aria-disabled="true" title={t("nav.later")}>
+					<span class="icon" aria-hidden="true">{item.icon}</span>{t(item.key)}
+				</span>
+			{/if}
 		{/each}
 	</nav>
 	<div class="foot">
@@ -69,11 +91,24 @@ const later: { icon: string; key: Key }[] = [
 		display: flex;
 		align-items: center;
 		gap: 10px;
+		width: 100%;
 		padding: 9px 12px;
+		border: 0;
+		border-left: 2px solid transparent;
 		border-radius: 8px;
+		background: none;
 		color: var(--muted);
 		font-size: 14px;
-		border-left: 2px solid transparent;
+		text-align: left;
+	}
+
+	button.nav-item {
+		cursor: pointer;
+	}
+
+	button.nav-item:hover:not(.on) {
+		background: var(--panel);
+		color: var(--text);
 	}
 
 	.icon {
