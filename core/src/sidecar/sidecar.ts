@@ -126,6 +126,10 @@ export class Sidecar {
 	private lifecycle: Promise<unknown> = Promise.resolve();
 	/** Which run the log belongs to; lines of an earlier run change nothing. */
 	private run = 0;
+	/** A start is under way: settings saved now apply after a restart. */
+	private starting = false;
+	/** The app has gone or asked to shut down: nothing starts any more. */
+	private closed = false;
 	private logFile?: string;
 	private readonly handlers: Record<string, Handler>;
 
@@ -191,6 +195,12 @@ export class Sidecar {
 				reply = { id: request.id, error: { message: shown(error) } };
 			}
 		this.write(JSON.stringify(reply));
+	}
+
+	/** Stops whatever runs, and lets nothing start again. */
+	close(): void {
+		this.closed = true;
+		this.stop();
 	}
 
 	/** Stops whatever runs, now. */
@@ -419,19 +429,23 @@ export class Sidecar {
 			"brain.test": (p) => this.testBrain(p.settings),
 
 			start: () => this.serial(() => this.start()),
-			stop: () =>
-				this.serial(async () => {
+			stop: () => {
+				// At once, so a start that is still under way sees it; then once more in turn, for a
+				// start that came up in between.
+				this.stop();
+				return this.serial(async () => {
 					this.stop();
 					this.changed();
 					return null;
-				}),
+				});
+			},
 			restart: () =>
 				this.serial(async () => {
 					this.stop();
 					return this.start();
 				}),
 			shutdown: () => {
-				this.stop();
+				this.close();
 				setTimeout(() => process.exit(0), 50);
 				return null;
 			},
@@ -454,27 +468,33 @@ export class Sidecar {
 			? this.settings()
 			: undefined;
 		const model = next.brain.model;
-		// The app never sees a key that is in the file, so it cannot send it back: keep it.
-		if (
+		// A key the app sends replaces the one in the keychain.
+		const sent = model?.apiKey;
+		// The app never sees a key that is in the file, so it cannot send it back: keep it, and
+		// move it into the keychain unless a key is there already, which is newer and wins.
+		const inFile =
 			model &&
-			!model.apiKey &&
+			!sent &&
 			before?.brain.model?.apiKey &&
 			before.brain.model.provider === model.provider
-		)
-			model.apiKey = before.brain.model.apiKey;
-		if (model?.apiKey) {
-			// A key goes into the keychain, not into the file: one the app sends, and one that
-			// was in the file. Without a keychain it stays in the file, readable by its owner only.
+				? before.brain.model.apiKey
+				: undefined;
+		if (model && sent) {
+			await this.deps.secrets.set(names.apiKey(model.provider), sent);
+			delete model.apiKey;
+		} else if (model && inFile) {
+			const name = names.apiKey(model.provider);
 			try {
-				await this.deps.secrets.set(names.apiKey(model.provider), model.apiKey);
-				delete model.apiKey;
-			} catch (error) {
-				if (before?.brain.model?.apiKey !== model.apiKey) throw error;
+				if (!(await this.deps.secrets.get(name)))
+					await this.deps.secrets.set(name, inFile);
+			} catch {
+				// Without a keychain it stays in the file, readable by its owner only.
+				model.apiKey = inFile;
 			}
 		}
 		saveSettings(this.o.settingsFile, next);
 		// While Familiar runs, the overview shows the brain that answers, not the new one.
-		if (this.status.running) this.status.restartNeeded = true;
+		if (this.status.running || this.starting) this.status.restartNeeded = true;
 		else this.status.brain = describeBrain(next);
 		this.changed();
 		return this.shownSettings(next);
@@ -523,9 +543,21 @@ export class Sidecar {
 	}
 
 	private async start() {
-		if (this.running) return this.status;
+		if (this.running || this.closed) return this.status;
+		// A stop from here on, even before the start gets anywhere, ends this run.
+		const run = ++this.run;
+		this.starting = true;
+		try {
+			return await this.startRun(run);
+		} finally {
+			this.starting = false;
+		}
+	}
+
+	private async startRun(run: number) {
 		const settings = this.settings();
 		const client = await this.client(undefined);
+		if (run !== this.run) return this.status;
 		mkdirSync(this.o.logs, { recursive: true });
 		this.logFile = join(
 			this.o.logs,
@@ -535,7 +567,6 @@ export class Sidecar {
 		this.status.restartNeeded = false;
 		this.status.client = client;
 		this.status.brain = describeBrain(settings);
-		const run = ++this.run;
 		const log = this.log(this.logFile, run);
 		const started = await this.deps.startFamiliar({
 			paths: wowPaths(client),
@@ -636,7 +667,7 @@ export async function serveSidecar(o: SidecarOptions): Promise<void> {
 	if (rest) pending.push(sidecar.handle(rest).catch(() => {}));
 	// The app is gone: stop at once, give replies a moment to finish, then leave. A sign-in
 	// waiting for the browser does not keep Familiar running.
-	sidecar.stop();
+	sidecar.close();
 	await Promise.race([Promise.allSettled(pending), Bun.sleep(2000)]);
 	process.exit(0);
 }

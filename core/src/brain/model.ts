@@ -117,6 +117,7 @@ export class ModelBrain implements Brain {
 	private readonly validators = new Map<string, z.ZodType>();
 	/** Aborts the answer in progress, so a stopped Familiar does not keep a model working. */
 	private current?: AbortController;
+	private stopped = false;
 
 	constructor(
 		private readonly settings: Settings["brain"],
@@ -134,7 +135,14 @@ export class ModelBrain implements Brain {
 	ask(question: Question, turn: Turn): Promise<string> {
 		return new Promise((reply) => {
 			this.queue = this.queue
-				.then(async () => reply(await this.answer(question, turn)))
+				.then(async () =>
+					// A stopped brain asks the model nothing more: that would cost the player.
+					reply(
+						this.stopped
+							? "Familiar has stopped."
+							: await this.answer(question, turn),
+					),
+				)
 				// answer() does not throw. Should it ever, the player still hears, and the next
 				// question still runs.
 				.catch((error) =>
@@ -148,8 +156,9 @@ export class ModelBrain implements Brain {
 		this.history.clear();
 	}
 
-	/** Stops the answer in progress; it ends as if its time were up. */
+	/** Stops the answer in progress, as if its time were up, and every question still waiting. */
 	stop(): void {
+		this.stopped = true;
 		this.current?.abort();
 	}
 

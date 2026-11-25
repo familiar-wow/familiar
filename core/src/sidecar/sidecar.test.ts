@@ -429,3 +429,85 @@ test("without a keychain the key stays in the file, readable only by its owner",
 	).toBe("sk-file");
 	expect(statSync(settingsFile).mode & 0o777).toBe(0o600);
 });
+
+test("a stop before the start has found its client still stops it, and shutdown ends all starts", async () => {
+	const { client } = wow();
+	let release: (() => void) | undefined;
+	let starts = 0;
+	const { call } = sidecar(
+		{
+			// The start's look for the game is held back, before anything else runs.
+			findClients: () =>
+				release === undefined
+					? new Promise((resolve) => {
+							release = () => resolve([client]);
+						})
+					: Promise.resolve([client]),
+			startFamiliar: async () => {
+				starts++;
+				return { install: {} as never, fresh: false, stop: () => {} };
+			},
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	const start = call("start");
+	await Bun.sleep(20);
+	const stop = call("stop");
+	release?.();
+	await start;
+	await stop;
+	expect(starts).toBe(0);
+	expect(((await call("status")).result as { running: boolean }).running).toBe(
+		false,
+	);
+});
+
+test("settings saved while a start is under way also wait for a restart", async () => {
+	const { client } = wow();
+	let release: () => void = () => {};
+	const { call } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async () => {
+				await new Promise<void>((r) => {
+					release = r;
+				});
+				return { install: {} as never, fresh: false, stop: () => {} };
+			},
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	const start = call("start");
+	await Bun.sleep(20);
+	const got = (await call("settings.get")).result as {
+		settings: { brain: { command: string[] } };
+	};
+	got.settings.brain.command = ["codex-acp"];
+	await call("settings.set", { settings: got.settings });
+	release();
+	await start;
+	expect((await call("status")).result).toMatchObject({
+		running: true,
+		restartNeeded: true,
+		brain: { command: ["hermes", "acp"] },
+	});
+});
+
+test("an old key from the file does not replace a newer one in the keychain", async () => {
+	const { call, store, settingsFile } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-old" },
+			},
+		},
+	);
+	await store.set(names.apiKey("openrouter"), "sk-new");
+	const got = (await call("settings.get")).result as { settings: unknown };
+	await call("settings.set", { settings: got.settings });
+	expect(await store.get(names.apiKey("openrouter"))).toBe("sk-new");
+	expect(
+		JSON.parse(readFileSync(settingsFile, "utf8")).brain.model.apiKey,
+	).toBeUndefined();
+});
