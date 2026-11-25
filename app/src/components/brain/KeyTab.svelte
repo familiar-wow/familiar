@@ -2,6 +2,7 @@
 // The API key tab: a provider, its key in the system keychain, and a model from its list.
 import { untrack } from "svelte";
 import {
+	answersNow,
 	choiceFor,
 	isActive,
 	KEY_PROVIDERS,
@@ -72,6 +73,7 @@ const choice = $derived(s.model ? tab.choice() : undefined);
 const inUse = $derived(
 	choice !== undefined &&
 		view.settings !== undefined &&
+		answersNow(view.status) &&
 		isActive(view.settings, choice),
 );
 const busy = $derived(s.busy !== undefined);

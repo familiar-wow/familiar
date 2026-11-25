@@ -28,10 +28,12 @@ const base: Settings = {
 	mcp: { port: 27495 },
 };
 
-const view = (settings: Settings = base): View => ({
+const view = (settings: Settings = base, running = true): View => ({
 	...emptyView("en"),
 	gen: 1,
 	settings,
+	// Familiar runs with the saved settings unless a test says otherwise.
+	status: { running, restartNeeded: false } as View["status"],
 });
 
 const hermes: FoundAgent = {
@@ -764,6 +766,49 @@ test("an incomplete form shows what is missing only after Use or Test", async ()
 		host: "agent.err.host",
 		cwd: "agent.err.cwdAbsolute",
 	});
+});
+
+test("an SSH result counts only for the form it was asked with", async () => {
+	// Host A is tested; the player types host B while the host key is looked up.
+	let answer = () => {};
+	const f = fake({
+		"ssh.hostKey": () =>
+			new Promise((resolve) => {
+				answer = () => resolve({ known: true });
+			}),
+		"ssh.test": () => ({ ok: true, agentFound: true, agentPath: "/a/hermes" }),
+	});
+	const c = new AgentController(f.deps, base);
+	c.setWhere("ssh");
+	c.editSsh({ host: "a", command: "hermes acp", cwd: "/home/p" });
+	const running = c.connect();
+	await tick();
+	c.editSsh({ host: "b" });
+	answer();
+	await running;
+	expect(f.calls.map(([m]) => m)).toEqual(["ssh.hostKey"]);
+	expect(c.state.connection).toBeUndefined();
+	expect(c.state.trust).toEqual({ step: "none" });
+	// A connection result goes when the command it was tested with changes.
+	const g = fake({
+		"ssh.hostKey": () => ({ known: true }),
+		"ssh.test": () => ({ ok: true, agentFound: true }),
+	});
+	const d = new AgentController(g.deps, base);
+	d.setWhere("ssh");
+	d.editSsh({ host: "a", command: "hermes acp", cwd: "/home/p" });
+	await d.connect();
+	expect(d.state.connection?.result.ok).toBe(true);
+	d.editSsh({ command: "codex-acp" });
+	expect(d.state.connection).toBeUndefined();
+});
+
+test("a brain saved but not running is not in use", () => {
+	const s = presentAgent(initialState(base), view(base, false), t);
+	expect(s.inUse).toBe(false);
+	expect(presentAgent(initialState(base), view(base, true), t).inUse).toBe(
+		true,
+	);
 });
 
 test("a result about the form goes when the form changes; an error stays", async () => {

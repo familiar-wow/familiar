@@ -38,8 +38,10 @@ export interface TabRow {
 export function tabRows(
 	settings: Settings | undefined,
 	t: Translate,
+	/** Whether the saved brain answers now (`answersNow`); else no tab is "in use". */
+	answering = true,
 ): TabRow[] {
-	const active = settings ? activeKind(settings) : undefined;
+	const active = settings && answering ? activeKind(settings) : undefined;
 	return TABS.map((kind) => ({
 		kind,
 		label: t(`brain.tab.${kind}`),
@@ -868,8 +870,10 @@ export class LocalTab extends TabController<LocalState> {
 		super(deps, {
 			...(initial
 				? {
+						// A server at its own address, such as Ollama on another PC, shows as "Other
+						// server" with that address: found servers here are another destination.
 						source:
-							initial.provider === "openai-compatible"
+							initial.provider === "openai-compatible" || initial.baseUrl
 								? ("other" as const)
 								: initial.provider,
 						model: initial.name,
@@ -880,23 +884,26 @@ export class LocalTab extends TabController<LocalState> {
 
 	/** The address of the other server the tab held, for the address field. */
 	get initialAddress(): string {
-		return this.initial?.provider === "openai-compatible"
-			? (this.initial.baseUrl ?? "")
-			: "";
+		return this.initial?.baseUrl ?? "";
 	}
 
 	choice(): Choice | undefined {
 		const { source, model, other } = this.state;
 		if (!source || !model) return undefined;
-		if (source === "other")
-			return other
-				? {
-						kind: "local",
-						provider: "openai-compatible",
-						name: model,
-						baseUrl: other.baseUrl,
-					}
-				: undefined;
+		if (source === "other") {
+			if (!other) return undefined;
+			// The address it held: its provider stays, so nothing changes but the model.
+			const same =
+				this.initial?.baseUrl === other.baseUrl &&
+				this.initial.provider !== "openai-compatible";
+			return {
+				kind: "local",
+				provider:
+					same && this.initial ? this.initial.provider : "openai-compatible",
+				name: model,
+				baseUrl: other.baseUrl,
+			};
+		}
 		const server = this.state.servers?.find((s) => s.kind === source);
 		return server?.running
 			? { kind: "local", provider: source, name: model }

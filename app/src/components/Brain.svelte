@@ -2,7 +2,7 @@
 // The Brain page: one tab per kind of brain, each with its own settings. Switching tabs never
 // changes the brain that answers; only a tab's "Use this" does.
 import { untrack } from "svelte";
-import type { BrainKind } from "../lib/brain.ts";
+import { answersNow, type BrainKind } from "../lib/brain.ts";
 import { openingTab, prosCons, TABS, tabRows } from "../lib/brain-page.ts";
 import type { Translate } from "../lib/i18n.ts";
 import type { MainApp } from "../lib/main-app.ts";
@@ -26,7 +26,7 @@ $effect(() => {
 });
 const opening = untrack(() => view.brainTab);
 const tab = $derived(chosen ?? openingTab(view.settings, opening));
-const rows = $derived(tabRows(view.settings, t));
+const rows = $derived(tabRows(view.settings, t, answersNow(view.status)));
 const pc = $derived(prosCons(tab, t));
 
 const tabButtons: Partial<Record<BrainKind, HTMLButtonElement>> = $state({});

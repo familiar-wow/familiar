@@ -198,6 +198,8 @@ test("joinCommand gives back exactly the words splitCommand reads", () => {
 		["say", '"hello"', "it's"],
 		["a", "", "b"],
 		["C:\\dir\\", "x"],
+		["agent.exe", "--directory", "C:\\Program Files\\Agent\\"],
+		['a\\"b', "c\\\\"],
 	])
 		expect(splitCommand(joinCommand(words))).toEqual(words);
 });
@@ -236,6 +238,14 @@ test("a tab opens with what it held last, also for the kind that answers", () =>
 	});
 	expect(isActive(s, { kind: "chatgpt", name: "gpt-6-luna-pro" })).toBe(false);
 	expect(isActive(s, { kind: "chatgpt", name: "gpt-6-luna" })).toBe(true);
+});
+
+test("using one brain keeps a choice another tab holds but never used", () => {
+	// ChatGPT model A answers; B is picked on the tab, not used; then an API model is used.
+	let s = applyChoice(base, { kind: "chatgpt", name: "a" });
+	s = remember(s, { kind: "chatgpt", name: "b" });
+	s = applyChoice(s, { kind: "key", provider: "openrouter", name: "m" });
+	expect(choiceFor(s, "chatgpt")).toEqual({ kind: "chatgpt", name: "b" });
 });
 
 test("in use does not depend on the order fields were written in", () => {

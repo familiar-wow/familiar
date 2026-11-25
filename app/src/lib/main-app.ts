@@ -82,6 +82,8 @@ export class MainApp {
 	private setupShown = false;
 	/** Settings changes, one after another (`updateSettings`). */
 	private settingsQueue: Promise<unknown> = Promise.resolve();
+	/** A start or restart under way, if one is. */
+	private starting?: Promise<Outcome>;
 	/** The ChatGPT sign-in that waits for the browser, if one does. */
 	private signingIn?: Promise<{ account: string; usage: string }>;
 
@@ -213,9 +215,16 @@ export class MainApp {
 		} catch (error) {
 			return { ok: false, problem: messageOf(error) };
 		}
-		return this.view.status?.running
-			? this.restartFamiliar()
-			: this.startFamiliar();
+		// A start under way (such as the one after the setup assistant) began with the brain
+		// before: wait for it, then restart so the saved brain is the one that answers.
+		await this.starting?.catch(() => {});
+		const outcome = this.view.status?.running
+			? await this.restartFamiliar()
+			: await this.startFamiliar();
+		// It came up, but not with these settings yet: one restart more.
+		if (outcome.ok && this.view.status?.restartNeeded)
+			return this.restartFamiliar();
+		return outcome;
 	}
 
 	/**
@@ -326,7 +335,16 @@ export class MainApp {
 	}
 
 	/** Also says how it went, for a page that waits for it. */
-	private async run(method: "start" | "restart"): Promise<Outcome> {
+	private run(method: "start" | "restart"): Promise<Outcome> {
+		const running = this.runOnce(method);
+		this.starting = running;
+		void running.finally(() => {
+			if (this.starting === running) this.starting = undefined;
+		});
+		return running;
+	}
+
+	private async runOnce(method: "start" | "restart"): Promise<Outcome> {
 		const gen = this.view.gen;
 		try {
 			const status = await this.client.request<Status>(

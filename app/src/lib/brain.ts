@@ -185,9 +185,11 @@ export function remember(settings: Settings, choice: Choice): Settings {
  * else stays: the game, the other tabs, and the agent's permissions and time limit.
  */
 export function applyChoice(settings: Settings, choice: Choice): Settings {
-	// The brain that answered keeps its place on its tab, also when it was set up by hand.
+	// The brain that answered keeps its place on its tab, also when it was set up by hand; a
+	// choice the tab holds already (one the player picked but did not use) stays.
 	const before = activeChoice(settings);
-	const next = remember(before ? remember(settings, before) : settings, choice);
+	const seed = before && !rememberedFor(settings, before) ? before : undefined;
+	const next = remember(seed ? remember(settings, seed) : settings, choice);
 	const brain = { ...next.brain };
 	if (choice.kind === "agent") {
 		brain.use = "agent";
@@ -212,6 +214,24 @@ export function applyChoice(settings: Settings, choice: Choice): Settings {
 	}
 	next.brain = brain;
 	return next;
+}
+
+/** Whether `choice`'s tab (or place, for an agent) holds something already. */
+function rememberedFor(settings: Settings, choice: Choice): boolean {
+	const brains = settings.app?.brains ?? {};
+	if (choice.kind === "agent")
+		return Boolean(choice.where === "ssh" ? brains.ssh : brains.agent);
+	return Boolean(brains[choice.kind]);
+}
+
+/**
+ * Whether the saved brain is the one that answers: Familiar runs, and with these settings.
+ * A brain that was saved but did not start is not "in use".
+ */
+export function answersNow(
+	status: { running?: boolean; restartNeeded?: boolean } | undefined,
+): boolean {
+	return status?.running === true && status.restartNeeded !== true;
 }
 
 /** Whether `choice` is the brain that answers now, so the page can say "in use". */
@@ -242,10 +262,12 @@ function canonical(value: unknown): string {
 }
 
 /**
- * A command typed in one line, split into words. Spaces separate words; a word in double quotes
- * keeps its spaces, and in it `\"` is a quote. Backslashes stay as they are otherwise, so a
- * Windows path needs no doubling. No variables, no `~`, no globbing: the words go to the program
- * as written. Undefined when a quote is not closed.
+ * A command typed in one line, split into words the way Windows splits a command line
+ * (CommandLineToArgvW): spaces separate words; double quotes keep spaces in a word; backslashes
+ * are themselves, except right before a quote: 2n backslashes and a quote are n backslashes and
+ * the quote's usual meaning, 2n+1 are n backslashes and a quote in the word. So
+ * `"C:\Program Files\Agent\agent.exe"` needs no doubling. No variables, no `~`, no globbing:
+ * the words go to the program as written. Undefined when a quote is not closed.
  */
 export function splitCommand(line: string): string[] | undefined {
 	const words: string[] = [];
@@ -255,16 +277,24 @@ export function splitCommand(line: string): string[] | undefined {
 	const chars = [...line.trim()];
 	for (let i = 0; i < chars.length; i++) {
 		const ch = chars[i] as string;
-		if (quoted) {
-			if (ch === "\\" && chars[i + 1] === '"') {
-				word += '"';
-				i++;
-			} else if (ch === '"') quoted = false;
-			else word += ch;
-		} else if (ch === '"') {
-			quoted = true;
+		if (ch === "\\") {
+			let n = 0;
+			while (chars[i + n] === "\\") n++;
+			if (chars[i + n] === '"') {
+				word += "\\".repeat(Math.floor(n / 2));
+				if (n % 2 === 1) {
+					word += '"';
+					i += n;
+				} else i += n - 1;
+			} else {
+				word += "\\".repeat(n);
+				i += n - 1;
+			}
 			started = true;
-		} else if (/\s/.test(ch)) {
+		} else if (ch === '"') {
+			quoted = !quoted;
+			started = true;
+		} else if (!quoted && /\s/.test(ch)) {
 			if (started) words.push(word);
 			word = "";
 			started = false;
@@ -280,9 +310,25 @@ export function splitCommand(line: string): string[] | undefined {
 
 /** The words as one line again, so that `splitCommand` gives them back unchanged. */
 export function joinCommand(words: readonly string[]): string {
-	return words
-		.map((w) =>
-			w === "" || /[\s"]/.test(w) ? `"${w.replace(/"/g, '\\"')}"` : w,
-		)
-		.join(" ");
+	return words.map(quoteWord).join(" ");
+}
+
+function quoteWord(word: string): string {
+	if (word !== "" && !/[\s"]/.test(word)) return word;
+	let out = '"';
+	let slashes = 0;
+	for (const ch of word) {
+		if (ch === "\\") {
+			slashes++;
+			continue;
+		}
+		// Backslashes before a quote are doubled, and the quote gets one of its own.
+		out +=
+			ch === '"'
+				? `${"\\".repeat(slashes * 2 + 1)}"`
+				: `${"\\".repeat(slashes)}${ch}`;
+		slashes = 0;
+	}
+	// Before the closing quote, too.
+	return `${out}${"\\".repeat(slashes * 2)}"`;
 }

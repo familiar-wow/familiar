@@ -67,6 +67,18 @@ const KEYED: readonly Provider[] = [
 ];
 type KeySource = "keychain" | "file" | "environment";
 
+/** What the app's test answers. */
+type TestResult = {
+	ok: boolean;
+	ms: number;
+	answer?: string;
+	problem?: string;
+	tools: string[];
+};
+
+export const TEST_QUESTION =
+	"This is a test from the Familiar app. Answer in one short sentence, without tools.";
+
 /** The app's test: the answer's own limit, and the whole test with starting the brain. */
 export const TEST_ANSWER_S = 60;
 export const TEST_TOTAL_S = 80;
@@ -106,6 +118,8 @@ export interface SidecarOptions {
 	write?: (line: string) => void;
 	/** Replaced in tests. */
 	deps?: Partial<Deps>;
+	/** The brain test's whole deadline; shorter in tests. */
+	testDeadlineMs?: number;
 }
 
 export interface Deps {
@@ -716,63 +730,99 @@ export class Sidecar {
 	private async testBrain(value: unknown) {
 		const settings =
 			value === undefined ? this.settings() : parseSettings(value);
-		const timeout = Math.min(settings.brain.timeout, TEST_ANSWER_S);
+		// The app never has the key in the file (settings.get leaves it out): take it from the
+		// file here, for the same provider only, as a start would.
+		const model = settings.brain.model;
+		const filed = this.settings().brain.model;
+		if (
+			model &&
+			!model.apiKey &&
+			filed?.apiKey &&
+			filed.provider === model.provider
+		)
+			model.apiKey = filed.apiKey;
 		const started = performance.now();
-		const prepared = await prepareBrain(settings, {
-			secrets: this.deps.secrets,
-			askpass: this.o.askpass,
-			forward: false,
+		// One deadline for all of it: preparing (ssh -G, the keychain), starting the brain and
+		// its answer. The brain is stopped either way, also one still starting.
+		let brain: (Brain & { stop?: () => void }) | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const late = new Promise<TestResult>((resolve) => {
+			timer = setTimeout(
+				() =>
+					resolve({
+						ok: false,
+						ms: Math.round(performance.now() - started),
+						problem: `No answer within ${TEST_TOTAL_S} s.`,
+						tools: [],
+					}),
+				this.o.testDeadlineMs ?? TEST_TOTAL_S * 1000,
+			);
 		});
-		const brainSettings = { ...prepared.brain, timeout };
+		const run = async (): Promise<TestResult> => {
+			const prepared = await prepareBrain(settings, {
+				secrets: this.deps.secrets,
+				askpass: this.o.askpass,
+				forward: false,
+			});
+			brain = this.testedBrain(settings, prepared);
+			return this.askTest(brain, started);
+		};
+		try {
+			return await Promise.race([run(), late]);
+		} finally {
+			clearTimeout(timer);
+			brain?.stop?.();
+		}
+	}
+
+	/** The brain a test asks: the saved permissions do not count, a test never allows a tool. */
+	private testedBrain(
+		settings: Settings,
+		prepared: Awaited<ReturnType<typeof prepareBrain>>,
+	): Brain & { stop?: () => void } {
+		const timeout = Math.min(settings.brain.timeout, TEST_ANSWER_S);
+		const brainSettings = {
+			...prepared.brain,
+			timeout,
+			permissions: "deny" as const,
+		};
 		const quiet: Log = { event: () => {}, say: () => {} };
 		const game = new Game({ fetchTimeoutMs: 1000 });
-		const brain: Brain & { stop?: () => void } =
-			brainSettings.use === "model"
-				? new ModelBrain(brainSettings, {
-						log: quiet,
-						tools: wowTools(game),
-						chatgpt: this.chatgpt(),
-					})
-				: new AcpBrain(brainSettings, {
-						folder: dirname(this.o.settingsFile),
-						log: quiet,
-						version: this.o.version,
-						env: prepared.env,
-					});
+		return brainSettings.use === "model"
+			? new ModelBrain(brainSettings, {
+					log: quiet,
+					tools: wowTools(game),
+					chatgpt: this.chatgpt(),
+				})
+			: new AcpBrain(brainSettings, {
+					folder: dirname(this.o.settingsFile),
+					log: quiet,
+					version: this.o.version,
+					env: prepared.env,
+				});
+	}
+
+	private async askTest(brain: Brain, started: number): Promise<TestResult> {
 		const tools: string[] = [];
 		let answered = false;
 		const turn: Turn = {
 			onTool: (title) => void tools.push(title.split(":")[0] ?? title),
 			onNote: () => {},
-			// Nobody is in game to ask: a test never allows anything.
+			// Nobody is in game to ask, and the permissions are "deny" anyway.
 			onPermission: async () => false,
 			onAnswered: () => {
 				answered = true;
 			},
 		};
 		const question: Question = {
-			text: "This is a test from the Familiar app. Answer in one short sentence, without tools.",
+			text: TEST_QUESTION,
 			character: {},
 		};
-		// Starting an agent and opening its session come before the answer's own time limit:
-		// the whole test gets a deadline of its own, and the brain is stopped either way.
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const late = new Promise<string>((resolve) => {
-			timer = setTimeout(
-				() => resolve(`No answer within ${TEST_TOTAL_S} s.`),
-				TEST_TOTAL_S * 1000,
-			);
-		});
-		try {
-			const text = await Promise.race([brain.ask(question, turn), late]);
-			const ms = Math.round(performance.now() - started);
-			return answered
-				? { ok: true, ms, answer: text.slice(0, 300), tools }
-				: { ok: false, ms, problem: text.slice(0, 300), tools };
-		} finally {
-			clearTimeout(timer);
-			brain.stop?.();
-		}
+		const text = await brain.ask(question, turn);
+		const ms = Math.round(performance.now() - started);
+		return answered
+			? { ok: true, ms, answer: text.slice(0, 300), tools }
+			: { ok: false, ms, problem: text.slice(0, 300), tools };
 	}
 }
 

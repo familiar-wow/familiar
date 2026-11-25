@@ -104,6 +104,8 @@ const Remembered = z.strictObject({
 				"deepseek",
 			]),
 			name: z.string().min(1),
+			/** A provider's own address, such as a proxy, set by hand. */
+			baseUrl: ServerUrl.optional(),
 		})
 		.optional(),
 	local: z

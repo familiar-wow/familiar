@@ -791,6 +791,25 @@ function localDeps(servers: () => LocalServer[]) {
 	return { fake, deps: local };
 }
 
+test("local: Ollama at its own address stays there, not the Ollama found here", async () => {
+	const { deps } = localDeps(() => [ollama, lmOff]);
+	const tab = new LocalTab(deps, {
+		kind: "local",
+		provider: "ollama",
+		name: "qwen3.7:32b",
+		baseUrl: "http://192.168.1.20:11434/v1",
+	});
+	expect(tab.initialAddress).toBe("http://192.168.1.20:11434/v1");
+	await tab.load();
+	expect(tab.state.source).toBe("other");
+	expect(tab.choice()).toEqual({
+		kind: "local",
+		provider: "ollama",
+		name: "qwen3.7:32b",
+		baseUrl: "http://192.168.1.20:11434/v1",
+	});
+});
+
 test("local: the first running server is preselected with a model that can call tools", async () => {
 	const { fake, deps } = localDeps(() => [
 		{

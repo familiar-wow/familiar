@@ -53,6 +53,15 @@ test("old settings get the app's new fields: setup unset, nothing remembered", (
 			});
 		},
 	);
+	// What the app remembers for a key provider with its own address loads too.
+	withFile(
+		'{"app":{"brains":{"key":{"provider":"openai","name":"m","baseUrl":"https://proxy.example/v1"}}}}',
+		(file) => {
+			expect(loadSettings(file).app.brains.key?.baseUrl).toBe(
+				"https://proxy.example/v1",
+			);
+		},
+	);
 	// A remembered API key provider is one that takes a key, not a local server.
 	withFile(
 		'{"app":{"brains":{"key":{"provider":"ollama","name":"x"}}}}',

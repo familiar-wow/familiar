@@ -2,7 +2,7 @@
 // The local model tab: Ollama and LM Studio on this PC, or any OpenAI-compatible server by its
 // address, and one of its models.
 import { untrack } from "svelte";
-import { choiceFor, isActive } from "../../lib/brain.ts";
+import { answersNow, choiceFor, isActive } from "../../lib/brain.ts";
 import {
 	type LocalState,
 	LocalTab,
@@ -55,6 +55,7 @@ const choice = $derived.by(() => {
 const inUse = $derived(
 	choice !== undefined &&
 		view.settings !== undefined &&
+		answersNow(view.status) &&
 		isActive(view.settings, choice),
 );
 const busy = $derived(s.busy !== undefined);

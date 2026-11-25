@@ -1,7 +1,12 @@
 <script lang="ts">
 // The ChatGPT plan tab: sign in through the browser, choose a model, see where usage is managed.
 import { untrack } from "svelte";
-import { activeKind, choiceFor, isActive } from "../../lib/brain.ts";
+import {
+	activeKind,
+	answersNow,
+	choiceFor,
+	isActive,
+} from "../../lib/brain.ts";
 import { type ChatGptState, ChatGptTab } from "../../lib/brain-page.ts";
 import type { Translate } from "../../lib/i18n.ts";
 import type { MainApp } from "../../lib/main-app.ts";
@@ -44,6 +49,7 @@ const choice = $derived(s.account && s.model ? tab.choice() : undefined);
 const inUse = $derived(
 	choice !== undefined &&
 		view.settings !== undefined &&
+		answersNow(view.status) &&
 		isActive(view.settings, choice),
 );
 const answersWithChatGpt = $derived(

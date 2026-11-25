@@ -5,6 +5,7 @@
 // way to the keychain; they are never part of the state.
 import {
 	activeChoice,
+	answersNow,
 	type Choice,
 	isActive,
 	joinCommand,
@@ -501,9 +502,10 @@ export function presentAgent(
 		problems: shown,
 		complete: choice !== undefined,
 		inUse:
-			choice !== undefined && view.settings !== undefined
-				? isActive(view.settings, choice)
-				: false,
+			choice !== undefined &&
+			view.settings !== undefined &&
+			answersNow(view.status) &&
+			isActive(view.settings, choice),
 	};
 	if (state.findError) page.findError = state.findError;
 	if (state.where === "ssh") {
@@ -666,6 +668,16 @@ export class AgentController {
 			ssh,
 			...this.stale(this.state.ssh, ssh),
 		};
+		// A connection result is about the computer, sign-in and command it was tested with.
+		if (
+			this.state.connection &&
+			(ssh.host !== this.state.ssh.host ||
+				ssh.user !== this.state.ssh.user ||
+				ssh.identityFile !== this.state.ssh.identityFile ||
+				ssh.auth !== this.state.ssh.auth ||
+				ssh.command !== this.state.ssh.command)
+		)
+			next.connection = undefined;
 		if (this.state.resolved && this.state.resolved.host !== host)
 			next.resolved = undefined;
 		if (this.state.resolveError && this.state.resolveError.host !== host)
@@ -812,8 +824,8 @@ export class AgentController {
 		return this.run("connect", async () => {
 			const choice = this.ready();
 			if (choice?.kind !== "agent" || choice.where !== "ssh") return;
-			if (!(await this.hostKey(choice.ssh.host, "connect"))) return;
 			const signIn = signInOf(this.state.ssh);
+			if (!(await this.hostKey(choice, "connect"))) return;
 			let result: Connection;
 			try {
 				result = await this.deps.call<Connection>("ssh.test", {
@@ -822,8 +834,16 @@ export class AgentController {
 			} catch (error) {
 				result = { ok: false, problem: messageOf(error) };
 			}
+			// The form changed while it ran: this result is about another computer or command.
+			if (!this.still(choice)) return;
 			this.set({ connection: { signIn, result: result ?? { ok: false } } });
 		});
+	}
+
+	/** Whether the form still makes `choice`: results of a call that started with it count. */
+	private still(choice: Choice): boolean {
+		const now = formChoice(this.state).choice;
+		return now !== undefined && key(now) === key(choice);
 	}
 
 	/** "Trust this computer": the fingerprint the player saw, then what they had started. */
@@ -852,7 +872,10 @@ export class AgentController {
 		const c = this.state.connection?.result;
 		const words = splitCommand(this.state.ssh.command);
 		if (!c?.agentPath || !words || this.state.busy) return;
+		// The path the connection test found: its result still holds for this command.
+		const connection = this.state.connection;
 		this.editSsh({ command: joinCommand([c.agentPath, ...words.slice(1)]) });
+		this.set({ connection });
 		this.commit();
 	}
 
@@ -862,7 +885,9 @@ export class AgentController {
 			const choice = this.ready();
 			if (!choice) return;
 			if (choice.kind === "agent" && choice.where === "ssh")
-				if (!(await this.hostKey(choice.ssh.host, "use"))) return;
+				if (!(await this.hostKey(choice, "use"))) return;
+			// Changed while the host key was looked up: use nothing the player no longer sees.
+			if (!this.still(choice)) return;
 			const outcome = await this.deps.useBrain(choice);
 			this.set({
 				remembered: key(choice),
@@ -879,6 +904,7 @@ export class AgentController {
 			const choice = this.ready();
 			if (!choice) return;
 			const r = await this.deps.testBrain(choice);
+			if (!this.still(choice)) return;
 			this.set({
 				result: r.ok
 					? {
@@ -909,16 +935,20 @@ export class AgentController {
 
 	/** Whether the computer's host key is trusted, asking the player once when it is not. */
 	private async hostKey(
-		host: string,
+		choice: Choice & { kind: "agent"; where: "ssh" },
 		next: "connect" | "use",
 	): Promise<boolean> {
+		const host = choice.ssh.host;
 		let answer: HostKeyAnswer | null;
 		try {
 			answer = await this.deps.call("ssh.hostKey", { host });
 		} catch (error) {
-			this.set({ result: { kind: "error", message: messageOf(error) } });
+			if (this.still(choice))
+				this.set({ result: { kind: "error", message: messageOf(error) } });
 			return false;
 		}
+		// About another computer by now: neither a trust question nor a go.
+		if (!this.still(choice)) return false;
 		const step = trustStep(host, answer, next);
 		if (step === "go") {
 			this.set({ trust: { step: "none" } });

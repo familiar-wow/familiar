@@ -623,6 +623,29 @@ test("use this brain: saved, then a running Familiar restarts and a stopped one 
 	]);
 });
 
+test("use this while a start is under way: it waits, then restarts with the new brain", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: { settings: { app: { setupDone: false } }, keys: {} },
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["settings.set"] = { result: { settings: {}, keys: {} } };
+	f.replies.start = "never";
+	await app.finishSetup();
+	const startId = f.sent.find((s) => s.method === "start")?.id;
+	expect(startId).toBeDefined();
+	f.replies.restart = { result: status({ running: true }) };
+	const using = app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" });
+	await settle();
+	// Still waiting for the start that began with the brain before.
+	expect(f.sent.map((s) => s.method)).not.toContain("restart");
+	f.line(1, { id: startId, result: status({ running: true }) });
+	expect(await using).toEqual({ ok: true });
+	expect(f.sent.at(-1)?.method).toBe("restart");
+});
+
 test("one ChatGPT sign-in at a time, with its address shown while it waits", async () => {
 	const f = fakeHost();
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });

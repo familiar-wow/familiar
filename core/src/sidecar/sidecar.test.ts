@@ -48,7 +48,11 @@ function wow(): { root: string; client: string } {
 	return { root, client };
 }
 
-function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
+function sidecar(
+	deps: Partial<Deps> = {},
+	settings?: unknown,
+	more: { testDeadlineMs?: number } = {},
+) {
 	const dir = temp();
 	const settingsFile = join(dir, "settings.json");
 	const logs = join(dir, "logs");
@@ -61,6 +65,7 @@ function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 		version: "0.0.0-test",
 		askpass: "/opt/familiar",
 		write: (line) => void out.push(JSON.parse(line)),
+		...more,
 		deps: {
 			secrets: store,
 			findClients: async () => [],
@@ -272,6 +277,116 @@ test("says whether an SSH secret is stored, never what it is", async () => {
 		JSON.stringify(await call("ssh.hasSecret", { host: "homelab" })),
 	).not.toContain("hunter2");
 });
+
+test("a brain test never allows a tool, also when the settings say always allow", async () => {
+	const { call } = sidecar();
+	const got = (
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "agent",
+					command: [...FAKE_AGENT, "--ask"],
+					permissions: "allow",
+					timeout: 20,
+				},
+			},
+		})
+	).result as { ok: boolean; answer?: string };
+	expect(got.ok).toBe(true);
+	expect(got.answer).toBe("got reject-once");
+}, 30_000);
+
+test("a brain test's deadline also ends an agent stuck before it answered initialize", async () => {
+	const pidFile = join(temp(), "pid");
+	const { call } = sidecar({}, undefined, { testDeadlineMs: 1500 });
+	const started = performance.now();
+	const got = (
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "agent",
+					// The shell writes the agent's pid, then becomes it.
+					command: [
+						"sh",
+						"-c",
+						`echo $$ > '${pidFile}'; exec '${FAKE_AGENT[0]}' '${FAKE_AGENT[1]}' --hang-init`,
+					],
+					timeout: 20,
+				},
+			},
+		})
+	).result as { ok: boolean; problem?: string };
+	expect(got.ok).toBe(false);
+	expect(got.problem).toContain("No answer within");
+	expect(performance.now() - started).toBeLessThan(5000);
+	const pid = Number(readFileSync(pidFile, "utf8").trim());
+	// Killed: gone within a moment.
+	let alive = true;
+	for (let i = 0; i < 20 && alive; i++) {
+		try {
+			process.kill(pid, 0);
+			await Bun.sleep(100);
+		} catch {
+			alive = false;
+		}
+	}
+	expect(alive).toBe(false);
+}, 15_000);
+
+test("a brain test finds a key that is only in the settings file, for its provider only", async () => {
+	let used: string | undefined;
+	const { call } = sidecar(
+		{},
+		{
+			brain: {
+				use: "model",
+				model: { provider: "openrouter", name: "m", apiKey: "sk-file" },
+			},
+		},
+	);
+	// The app's settings never hold the key; the test still reaches the provider with it.
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			used = request.headers.get("authorization") ?? undefined;
+			return Response.json(
+				{ error: { message: "stop here" } },
+				{ status: 400 },
+			);
+		},
+	});
+	try {
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "model",
+					model: {
+						provider: "openrouter",
+						name: "m",
+						baseUrl: `http://127.0.0.1:${server.port}/v1`,
+					},
+				},
+			},
+		});
+		expect(used).toBe("Bearer sk-file");
+		used = undefined;
+		await call("brain.test", {
+			settings: {
+				brain: {
+					use: "model",
+					model: {
+						provider: "deepseek",
+						name: "m",
+						baseUrl: `http://127.0.0.1:${server.port}/v1`,
+					},
+				},
+			},
+		});
+		expect(used).not.toBe("Bearer sk-file");
+	} finally {
+		server.stop(true);
+	}
+}, 30_000);
 
 test("opens the log folder, and makes it first when nothing was logged yet", async () => {
 	let opened = "";
