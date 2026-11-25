@@ -226,7 +226,7 @@ test("the brain step never goes Next: a card or Later finishes", () => {
 
 test("brain cards: four kinds in the tab order, the one that answers in use", () => {
 	const cards = brainCards(NEW_PLAYER, t);
-	expect(cards.map((c) => [c.kind, c.name, c.inUse])).toEqual([
+	expect(cards.map((c) => [c.kind, c.name, c.set])).toEqual([
 		["chatgpt", "ChatGPT plan", false],
 		["key", "API key", false],
 		["local", "Local model", false],
@@ -242,7 +242,7 @@ test("brain cards: four kinds in the tab order, the one that answers in use", ()
 	const chatgpt: Settings = {
 		brain: { use: "model", model: { provider: "chatgpt", name: "gpt-5.5" } },
 	};
-	expect(brainCards(chatgpt, t).find((c) => c.inUse)?.kind).toBe("chatgpt");
+	expect(brainCards(chatgpt, t).find((c) => c.set)?.kind).toBe("chatgpt");
 });
 
 test("Later says which brain stays, and that the default needs an agent", () => {

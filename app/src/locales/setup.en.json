@@ -26,7 +26,7 @@
 	"setup.addon.startWow": "The addon loads when you start WoW Forever.",
 	"setup.brain.heading": "Who should answer?",
 	"setup.brain.text": "Pick a kind of brain. The Brain page opens on it, where you set it up and test it. You can change it at any time.",
-	"setup.brain.inUse": "In use",
+	"setup.brain.set": "Set now",
 	"setup.brain.setUp": "Set up",
 	"setup.kind.chatgpt": "ChatGPT plan",
 	"setup.kind.key": "API key",

@@ -803,12 +803,58 @@ test("an SSH result counts only for the form it was asked with", async () => {
 	expect(d.state.connection).toBeUndefined();
 });
 
+test("trusting goes on only with the form the question was about", async () => {
+	let trustDone = () => {};
+	const f = fake({
+		"ssh.hostKey": () => ({ known: false, fingerprint: FP }),
+		"ssh.trust": () =>
+			new Promise((resolve) => {
+				trustDone = () => resolve(null);
+			}),
+		"ssh.test": () => ({ ok: true, agentFound: true }),
+	});
+	const c = new AgentController(f.deps, base);
+	c.setWhere("ssh");
+	c.editSsh({ host: "a", command: "hermes acp", cwd: "/home/p" });
+	await c.connect();
+	expect(c.state.trust).toMatchObject({ step: "ask" });
+	const trusting = c.trust();
+	await tick();
+	// Another command typed while trusting: it is not tested by itself.
+	c.editSsh({ command: "codex-acp" });
+	trustDone();
+	await trusting;
+	expect(f.calls.map(([m]) => m)).toEqual(["ssh.hostKey", "ssh.trust"]);
+});
+
+test("Use this: a result for a form changed while it ran is not shown", async () => {
+	let started = () => {};
+	const f = fake({ "ssh.hostKey": () => ({ known: true }) });
+	f.deps.useBrain = () =>
+		new Promise((resolve) => {
+			started = () => resolve({ ok: true });
+		});
+	const c = new AgentController(f.deps, base);
+	c.setWhere("ssh");
+	c.editSsh({ host: "a", command: "hermes acp", cwd: "/home/p" });
+	const using = c.use();
+	await tick();
+	c.editSsh({ command: "codex-acp" });
+	started();
+	await using;
+	expect(c.state.result).toBeUndefined();
+});
+
 test("a brain saved but not running is not in use", () => {
 	const s = presentAgent(initialState(base), view(base, false), t);
 	expect(s.inUse).toBe(false);
 	expect(presentAgent(initialState(base), view(base, true), t).inUse).toBe(
 		true,
 	);
+	// The found agents' rows too.
+	const found = { ...initialState(base), agents: [hermes] };
+	expect(presentAgent(found, view(base, false), t).rows[0]?.inUse).toBe(false);
+	expect(presentAgent(found, view(base, true), t).rows[0]?.inUse).toBe(true);
 });
 
 test("a result about the form goes when the form changes; an error stays", async () => {

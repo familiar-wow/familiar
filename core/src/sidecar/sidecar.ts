@@ -758,18 +758,22 @@ export class Sidecar {
 				this.o.testDeadlineMs ?? TEST_TOTAL_S * 1000,
 			);
 		});
+		// Set when the test is over: a preparation that ends later starts no brain.
+		let over = false;
 		const run = async (): Promise<TestResult> => {
 			const prepared = await prepareBrain(settings, {
 				secrets: this.deps.secrets,
 				askpass: this.o.askpass,
 				forward: false,
 			});
+			if (over) return { ok: false, ms: 0, problem: "Too late.", tools: [] };
 			brain = this.testedBrain(settings, prepared);
 			return this.askTest(brain, started);
 		};
 		try {
 			return await Promise.race([run(), late]);
 		} finally {
+			over = true;
 			clearTimeout(timer);
 			brain?.stop?.();
 		}

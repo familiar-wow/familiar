@@ -333,6 +333,53 @@ test("a brain test's deadline also ends an agent stuck before it answered initia
 	expect(alive).toBe(false);
 }, 15_000);
 
+test("a preparation that ends after the deadline starts no brain", async () => {
+	let asked = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch() {
+			asked++;
+			return Response.json(
+				{ error: { message: "stop here" } },
+				{ status: 400 },
+			);
+		},
+	});
+	// The keychain answers only after the test gave up.
+	const slow = {
+		...memoryStore(),
+		get: async () => {
+			await Bun.sleep(1200);
+			return "sk-late";
+		},
+	};
+	const { call } = sidecar({ secrets: slow }, undefined, {
+		testDeadlineMs: 300,
+	});
+	try {
+		const got = (
+			await call("brain.test", {
+				settings: {
+					brain: {
+						use: "model",
+						model: {
+							provider: "openrouter",
+							name: "m",
+							baseUrl: `http://127.0.0.1:${server.port}/v1`,
+						},
+					},
+				},
+			})
+		).result as { ok: boolean; problem?: string };
+		expect(got.ok).toBe(false);
+		expect(got.problem).toContain("No answer within");
+		await Bun.sleep(1500);
+		expect(asked).toBe(0);
+	} finally {
+		server.stop(true);
+	}
+}, 15_000);
+
 test("a brain test finds a key that is only in the settings file, for its provider only", async () => {
 	let used: string | undefined;
 	const { call } = sidecar(

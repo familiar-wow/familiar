@@ -175,8 +175,11 @@ export interface BrainCard {
 	name: string;
 	pros: string[];
 	cons: string[];
-	/** The kind of the brain that answers now. */
-	inUse: boolean;
+	/**
+	 * The kind of the brain that is set. During the setup Familiar does not run yet, so this is
+	 * "set", not "in use".
+	 */
+	set: boolean;
 }
 
 export function brainCards(settings: Settings, t: Translate): BrainCard[] {
@@ -186,7 +189,7 @@ export function brainCards(settings: Settings, t: Translate): BrainCard[] {
 		name: t(KIND_NAMES[kind]),
 		pros: PROS_CONS[kind].pros.map((key) => t(key)),
 		cons: PROS_CONS[kind].cons.map((key) => t(key)),
-		inUse: kind === active,
+		set: kind === active,
 	}));
 }
 

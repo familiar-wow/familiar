@@ -182,13 +182,13 @@ $effect(() => {
 						<button
 							type="button"
 							class="kind"
-							class:sel={card.inUse}
+							class:sel={card.set}
 							disabled={p.busy}
 							onclick={() => setup.choose(card.kind)}
 						>
 							<span class="name">
 								{card.name}
-								{#if card.inUse}<span class="chip">{t("setup.brain.inUse")}</span>{/if}
+								{#if card.set}<span class="chip">{t("setup.brain.set")}</span>{/if}
 							</span>
 							<ul>
 								{#each card.pros as pro (pro)}<li class="pro">{pro}</li>{/each}

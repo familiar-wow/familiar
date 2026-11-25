@@ -314,9 +314,11 @@ export function agentRows(
 	form: LocalForm,
 	settings: Settings | undefined,
 	t: Translate,
+	/** Whether the saved brain answers now (`answersNow`); else no row is "in use". */
+	answeringNow = true,
 ): AgentRow[] {
 	const typed = splitCommand(form.command);
-	const active = settings ? activeChoice(settings) : undefined;
+	const active = settings && answeringNow ? activeChoice(settings) : undefined;
 	const answering =
 		active?.kind === "agent" && active.where === "local"
 			? active.command
@@ -487,7 +489,13 @@ export function presentAgent(
 	for (const [field, problem] of Object.entries(problems) as [Field, Key][])
 		if (state.tried || !REQUIRED.has(problem)) shown[field] = problem;
 	const agents = state.agents ?? [];
-	const rows = agentRows(agents, state.local, view.settings, t);
+	const rows = agentRows(
+		agents,
+		state.local,
+		view.settings,
+		t,
+		answersNow(view.status),
+	);
 	const page: AgentPage = {
 		where: state.where,
 		rows,
@@ -584,6 +592,8 @@ export class AgentController {
 	private readonly watchers = new Set<(state: AgentState) => void>();
 	/** The tab is gone: late answers are dropped. */
 	private disposed = false;
+	/** The form (its `key`) the open trust question is about. */
+	private trustFor?: string;
 
 	constructor(
 		private readonly deps: AgentDeps,
@@ -863,7 +873,9 @@ export class AgentController {
 				this.set({ result: { kind: "error", message: messageOf(error) } });
 			}
 		});
-		if (!trusted || this.state.ssh.host.trim() !== trust.host) return;
+		// Go on only with the form the question was asked for, not one typed while trusting.
+		const now = formChoice(this.state).choice;
+		if (!trusted || !now || key(now) !== this.trustFor) return;
 		await (trust.next === "use" ? this.use() : this.connect());
 	}
 
@@ -889,6 +901,9 @@ export class AgentController {
 			// Changed while the host key was looked up: use nothing the player no longer sees.
 			if (!this.still(choice)) return;
 			const outcome = await this.deps.useBrain(choice);
+			// Changed meanwhile: what was used shows as "in use" where it is; the form now holds
+			// something else, so neither this result nor "remembered" is about it.
+			if (!this.still(choice)) return;
 			this.set({
 				remembered: key(choice),
 				result: outcome.ok
@@ -954,6 +969,8 @@ export class AgentController {
 			this.set({ trust: { step: "none" } });
 			return true;
 		}
+		// The whole form the question is about: trusting goes on only with that one.
+		this.trustFor = key(choice);
 		this.set({ trust: step });
 		return false;
 	}

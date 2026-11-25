@@ -26,7 +26,7 @@
 	"setup.addon.startWow": "Das Addon lädt, wenn du WoW Forever startest.",
 	"setup.brain.heading": "Wer soll antworten?",
 	"setup.brain.text": "Wähle eine Art von Gehirn. Danach öffnet sich die Seite „Gehirn“: Dort richtest du es ein und testest es. Du kannst es jederzeit ändern.",
-	"setup.brain.inUse": "In Benutzung",
+	"setup.brain.set": "Eingestellt",
 	"setup.brain.setUp": "Einrichten",
 	"setup.kind.chatgpt": "ChatGPT-Abo",
 	"setup.kind.key": "API-Schlüssel",
