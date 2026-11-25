@@ -732,6 +732,7 @@ test("the fingerprint is the one ssh-keygen prints", async () => {
 	expect(await hostKey("box", { run, knownHosts })).toEqual({
 		known: false,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 	expect(calls.map((c) => c.cmd)).toEqual([
 		["ssh", "-G", "box"],
@@ -779,6 +780,7 @@ test("trustHost saves the confirmed key, and ssh-keygen then knows the host", as
 	expect(await hostKey("box", { run, knownHosts })).toEqual({
 		known: true,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 	// Trusting it again changes nothing.
 	await trustHost("box", ed.fingerprint, { run, knownHosts });
@@ -875,6 +877,7 @@ test("the key is kept under the name ssh looks it up by", async () => {
 	expect(await hostKey("gamer", { run: alias.run, knownHosts })).toEqual({
 		known: true,
 		fingerprint: rsa.fingerprint,
+		type: rsa.type,
 	});
 });
 
@@ -919,6 +922,7 @@ test("trustHost writes the file ssh adds keys to, not ~/.ssh/known_hosts", async
 	expect(await hostKey("box", { run, home })).toEqual({
 		known: false,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 	expect(looked(calls)).toEqual([own, second, shared]);
 	await trustHost("box", ed.fingerprint, { run, home });
@@ -929,6 +933,7 @@ test("trustHost writes the file ssh adds keys to, not ~/.ssh/known_hosts", async
 	expect(await hostKey("box", { run, home })).toEqual({
 		known: true,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 });
 
@@ -943,6 +948,7 @@ test("a key in any file that ssh reads counts as known", async () => {
 		expect(await hostKey("box", { run })).toEqual({
 			known: true,
 			fingerprint: ed.fingerprint,
+			type: ed.type,
 		});
 		// Trusting what is trusted already writes nothing.
 		await trustHost("box", ed.fingerprint, { run });
@@ -1031,6 +1037,7 @@ test("trustHost saves nothing when the SSH config keeps no file it could write",
 	expect(await hostKey("box", { run })).toEqual({
 		known: false,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 	expect(looked(calls)).toEqual([shared]);
 });
@@ -1066,6 +1073,7 @@ test("with the real ssh: the known hosts files of the SSH config are the ones us
 	expect(await hostKey("box", { run })).toEqual({
 		known: true,
 		fingerprint: ed.fingerprint,
+		type: ed.type,
 	});
 });
 

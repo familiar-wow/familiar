@@ -437,7 +437,10 @@ export class Sidecar {
 				return this.deps.listModels(provider, key);
 			},
 
-			"chatgpt.account": () => this.chatgpt().account() ?? null,
+			"chatgpt.account": () => {
+				const account = this.chatgpt().account();
+				return account ? { account, usage: USAGE_URL } : null;
+			},
 			"chatgpt.signIn": async () => {
 				const account = await this.chatgpt().signIn((url) => {
 					this.emit({ event: "chatgpt-url", data: { url } });
@@ -464,6 +467,15 @@ export class Sidecar {
 					value,
 				);
 				return null;
+			},
+			/** Whether a password or passphrase is stored for this computer; never the value. */
+			"ssh.hasSecret": async (p) => {
+				const host = hostOf(p.host);
+				const name =
+					p.kind === "passphrase"
+						? names.sshPassphrase(host)
+						: names.sshPassword(host);
+				return Boolean(await this.deps.secrets.get(name).catch(() => null));
 			},
 			"ssh.test": (p) =>
 				this.deps.testConnection(this.sshConfig(p), {

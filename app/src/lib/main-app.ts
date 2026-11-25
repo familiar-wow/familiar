@@ -135,6 +135,8 @@ export class MainApp {
 	open(page: Page): void {
 		if (page === this.view.page) return;
 		this.view.page = page;
+		// A tab asked for once: the next visit opens on the brain that answers again.
+		if (page !== "brain") this.view.brainTab = undefined;
 		this.changed();
 	}
 
@@ -266,15 +268,18 @@ export class MainApp {
 
 	/**
 	 * The setup assistant ran or was skipped: it does not open by itself again, and Familiar
-	 * starts, which the first start left to the assistant. `then` is the page to show.
+	 * starts, which the first start left to the assistant. `then` is the page to show, or `tab`
+	 * the Brain page's tab. Rejects with the core's message if the save fails, before leaving.
 	 */
-	async finishSetup(then: Page = "overview"): Promise<void> {
+	async finishSetup(then: Page = "overview", tab?: BrainKind): Promise<void> {
 		await this.updateSettings((settings) => ({
 			...settings,
 			app: { ...settings.app, setupDone: true },
 		}));
-		this.open(then);
-		if (!this.view.status?.running) await this.startFamiliar();
+		if (tab) this.openBrain(tab);
+		else this.open(then);
+		// In the background: the page is there already, and starting may take a minute.
+		if (!this.view.status?.running) void this.startFamiliar();
 	}
 
 	/** The setup assistant runs: it says when Familiar starts (a new player). */

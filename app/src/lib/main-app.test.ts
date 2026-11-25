@@ -694,7 +694,7 @@ test("the brain test: a real answer, or the core's words, never a timeout's cras
 	).toMatchObject({ ok: false, problem: "The settings are broken." });
 });
 
-test("openBrain opens the Brain page on a kind's tab", async () => {
+test("openBrain opens a kind's tab once; the next visit follows the brain that answers", async () => {
 	const f = fakeHost();
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
@@ -702,6 +702,41 @@ test("openBrain opens the Brain page on a kind's tab", async () => {
 	app.openBrain("local");
 	expect(app.view.page).toBe("brain");
 	expect(app.view.brainTab).toBe("local");
+	app.open("overview");
+	expect(app.view.brainTab).toBeUndefined();
+});
+
+test("finishing the setup on a brain card opens its tab, and does not wait for the start", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: { settings: { app: { setupDone: false } }, keys: {} },
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.replies["settings.set"] = {
+		result: { settings: { app: { setupDone: true } }, keys: {} },
+	};
+	f.replies.start = "never";
+	await app.finishSetup("brain", "key");
+	expect(app.view.page).toBe("brain");
+	expect(app.view.brainTab).toBe("key");
+	expect(f.sent.at(-1)?.method).toBe("start");
+	// A failed save keeps the player where they are, with the core's words.
+	const g = fakeHost();
+	g.replies["settings.get"] = {
+		result: { settings: { app: { setupDone: false } }, keys: {} },
+	};
+	const other = new MainApp(g.host, { systemLanguage: "en-US" });
+	await other.start();
+	await settle();
+	g.replies["settings.set"] = {
+		error: "The settings file could not be written.",
+	};
+	await expect(other.finishSetup("brain", "key")).rejects.toThrow(
+		"The settings file could not be written.",
+	);
+	expect(other.view.page).toBe("setup");
 });
 
 test("familiar-open from the tray panel switches the page, also across a new core", async () => {

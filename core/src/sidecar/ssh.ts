@@ -267,14 +267,20 @@ function words(c: SshAgentConfig, direct: boolean): string[] {
 export async function hostKey(
 	host: string,
 	opts: { run?: Runner; knownHosts?: string; home?: string } = {},
-): Promise<{ known: boolean; fingerprint?: string }> {
+): Promise<{ known: boolean; fingerprint?: string; type?: string }> {
 	const run = opts.run ?? spawn;
 	const target = await find(host, run, opts);
 	const known = await knownKeys(target, run);
-	if (known[0]) return { known: true, fingerprint: fingerprint(known[0]) };
+	// The key's type too, such as ssh-ed25519: the player compares it with that key's file there.
+	if (known[0])
+		return {
+			known: true,
+			fingerprint: fingerprint(known[0]),
+			type: known[0].type,
+		};
 	const shown = await scan(target, run);
 	return shown[0]
-		? { known: false, fingerprint: fingerprint(shown[0]) }
+		? { known: false, fingerprint: fingerprint(shown[0]), type: shown[0].type }
 		: { known: false };
 }
 

@@ -256,6 +256,23 @@ test("the brain test says whether a real answer came, not only what was said", a
 	expect(bad.answer).toBeUndefined();
 }, 30_000);
 
+test("says whether an SSH secret is stored, never what it is", async () => {
+	const { call } = sidecar();
+	const has = async (kind: string) =>
+		(await call("ssh.hasSecret", { host: "homelab", kind })).result;
+	expect(await has("password")).toBe(false);
+	await call("ssh.setSecret", {
+		host: "homelab",
+		kind: "password",
+		value: "hunter2",
+	});
+	expect(await has("password")).toBe(true);
+	expect(await has("passphrase")).toBe(false);
+	expect(
+		JSON.stringify(await call("ssh.hasSecret", { host: "homelab" })),
+	).not.toContain("hunter2");
+});
+
 test("opens the log folder, and makes it first when nothing was logged yet", async () => {
 	let opened = "";
 	const { call, logs } = sidecar({
