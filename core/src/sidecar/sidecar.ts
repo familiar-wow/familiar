@@ -131,6 +131,8 @@ export class Sidecar {
 	/** The app has gone or asked to shut down: nothing starts any more. */
 	private closed = false;
 	private logFile?: string;
+	/** The WoW processes seen last; the hello belongs to one of them. */
+	private pids: number[] = [];
 	private readonly handlers: Record<string, Handler>;
 
 	constructor(private readonly o: SidecarOptions) {
@@ -283,9 +285,16 @@ export class Sidecar {
 		const at = this.deps.now();
 		if (name === "message" || name === "repeat") s.game.lastContact = at;
 		else if (name === "hello") s.game.hello = String(data.text ?? "");
-		else if (name === "game")
-			s.game.running = Array.isArray(data.pids) && data.pids.length > 0;
-		else if (name === "question")
+		else if (name === "game") {
+			const pids = Array.isArray(data.pids) ? data.pids.map(Number) : [];
+			s.game.running = pids.length > 0;
+			// A WoW that closed takes its addon with it: the next one has not said hello yet.
+			if (this.pids.some((pid) => !pids.includes(pid))) {
+				delete s.game.hello;
+				delete s.game.lastContact;
+			}
+			this.pids = pids;
+		} else if (name === "question")
 			s.character = data.character as Status["character"];
 		else if (name === "answered")
 			s.last = {

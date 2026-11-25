@@ -14,7 +14,7 @@ import { join } from "node:path";
 import type { Log } from "../log.ts";
 import { ListError } from "./models.ts";
 import { memoryStore, names, SecretError } from "./secrets.ts";
-import { clientFolder, type Deps, Sidecar } from "./sidecar.ts";
+import { clientFolder, type Deps, Sidecar, type Status } from "./sidecar.ts";
 
 const folders: string[] = [];
 afterAll(() => {
@@ -280,6 +280,43 @@ test("start runs Familiar and the status follows what the log says", async () =>
 	).toBe(2);
 	await call("stop");
 	expect(stopped).toBe(true);
+});
+
+test("a WoW that closes takes its hello along, so the app no longer shows it connected", async () => {
+	const { client } = wow();
+	let log: Log | undefined;
+	const { call, out } = sidecar({
+		findClients: async () => [client],
+		startFamiliar: async (o) => {
+			log = o.log;
+			return {
+				install: { added: 0, updated: 0, removed: 0 } as never,
+				fresh: false,
+				stop: () => {},
+			};
+		},
+	});
+	await call("start");
+	const game = () =>
+		(out.filter((m) => m.event === "status").at(-1)?.data as Status | undefined)
+			?.game ?? ({} as Status["game"]);
+	log?.event("game", { pids: [41] });
+	log?.event("hello", { text: "Familiar 0.0.0, build 1" });
+	log?.event("message", { key: "k", id: 1 });
+	// A second client starting changes nothing for the first one's addon.
+	log?.event("game", { pids: [41, 77] });
+	expect(game()).toMatchObject({
+		running: true,
+		hello: "Familiar 0.0.0, build 1",
+	});
+	log?.event("game", { pids: [77] });
+	expect(game().running).toBe(true);
+	expect(game().hello).toBeUndefined();
+	expect(game().lastContact).toBeUndefined();
+	log?.event("hello", { text: "Familiar 0.0.0, build 2" });
+	log?.event("game", { pids: [] });
+	expect(game()).toEqual({ running: false });
+	await call("stop");
 });
 
 test("two starts at once start Familiar once, and a stop during the start wins", async () => {

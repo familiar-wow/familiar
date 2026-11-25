@@ -63,8 +63,12 @@ export class Conversation {
 
 	private async answer(question: Question): Promise<void> {
 		this.log.say(`Question: ${question.text}`);
-		// For the desktop app's overview: who asks, and later how long it took and with what.
-		this.log.event("question", { character: question.character });
+		// For the desktop app's overview: who asks what, and later how long it took and with what.
+		// The question is in the log anyway, in the line above.
+		this.log.event("question", {
+			text: question.text,
+			character: question.character,
+		});
 		this.game.see(question.character, question.revs);
 		const asked = performance.now();
 		const status = throttle(
