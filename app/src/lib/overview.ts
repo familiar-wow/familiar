@@ -30,6 +30,8 @@ export interface View {
 	/** The message of the bootstrap step that failed. */
 	failure?: string;
 	stderrTail: string[];
+	/** The number of the last stderr line the page has, so a stale snapshot adds nothing. */
+	stderrSeq: number;
 	/** The core's version, from `hello`. */
 	version?: string;
 	language: Language;
@@ -38,7 +40,14 @@ export interface View {
 }
 
 export function emptyView(language: Language): View {
-	return { gen: 0, exited: false, stderrTail: [], language, log: [] };
+	return {
+		gen: 0,
+		exited: false,
+		stderrTail: [],
+		stderrSeq: 0,
+		language,
+		log: [],
+	};
 }
 
 export interface QuestionRow {

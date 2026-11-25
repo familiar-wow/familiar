@@ -1012,6 +1012,7 @@ dependencies = [
 name = "familiar-app"
 version = "0.14.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tauri",
@@ -1019,6 +1020,7 @@ dependencies = [
  "tauri-plugin-positioner",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

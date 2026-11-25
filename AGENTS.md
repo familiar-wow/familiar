@@ -71,7 +71,7 @@ bun test            # tests; the addon test needs Lua 5.1 with the bit library, 
 ```
 
 The desktop app's Rust shell has its own checks, see [app/README.md](app/README.md):
-`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` in `app/src-tauri`. Spikes list
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` in `app/src-tauri`. Spikes list
 their own commands in their README.
 
 ## Done means verified

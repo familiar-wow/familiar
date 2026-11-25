@@ -66,7 +66,7 @@ export class MainApp {
 		const h = this.host;
 		this.unlisten = await Promise.all([
 			h.on("sidecar-line", (p) => this.client.receive(p.gen, p.line)),
-			h.on("sidecar-stderr", (p) => this.stderr(p.gen, p.line)),
+			h.on("sidecar-stderr", (p) => this.stderr(p.gen, p.seq, p.line)),
 			h.on("sidecar-exit", (p) => this.exited(p.gen, p.code)),
 			h.on("sidecar-started", (p) => this.started(p.gen)),
 			h.on("familiar-snapshot-request", () => this.sendSnapshot(true)),
@@ -127,10 +127,10 @@ export class MainApp {
 			return;
 		}
 		if (state.gen < this.view.gen) return;
-		if (state.gen > this.view.gen) this.switchTo(state.gen, state.stderrTail);
+		if (state.gen > this.view.gen) this.switchTo(state.gen);
 		// Rust keeps the stderr of this core too, such as why it could not start at all, which
-		// no event carries: take what the page has not heard yet.
-		else this.mergeStderr(state.stderrTail);
+		// no event carries: take the lines the page has not heard yet, by their numbers.
+		this.mergeStderr(state.stderrTail, state.stderrSeq);
 		if (!state.running) {
 			this.markExited(state.exitCode ?? null);
 			return;
@@ -143,7 +143,7 @@ export class MainApp {
 	private started(gen: number): void {
 		if (gen < this.view.gen) return;
 		if (gen > this.view.gen) {
-			this.switchTo(gen, []);
+			this.switchTo(gen);
 			this.changed();
 		} else if (this.view.exited) return;
 		void this.bootstrap.run(gen);
@@ -151,7 +151,7 @@ export class MainApp {
 
 	private exited(gen: number, code: number | null): void {
 		if (gen < this.view.gen) return;
-		if (gen > this.view.gen) this.switchTo(gen, []);
+		if (gen > this.view.gen) this.switchTo(gen);
 		this.markExited(code);
 	}
 
@@ -162,36 +162,35 @@ export class MainApp {
 		this.changed();
 	}
 
-	/** The sticky tail ends with what the page already has, or holds lines it never got. */
-	private mergeStderr(sticky: readonly string[]): void {
-		const have = this.view.stderrTail;
-		let known = Math.min(have.length, sticky.length);
-		while (
-			known > 0 &&
-			have.slice(-known).join("\n") !== sticky.slice(0, known).join("\n")
-		)
-			known--;
-		const fresh = sticky.slice(known);
-		if (fresh.length > 0)
-			this.view.stderrTail = [...have, ...fresh].slice(-KEEP_STDERR);
+	/**
+	 * Lines of the sticky tail the page has not had: their numbers run up to `seq`. A snapshot
+	 * older than the events already heard adds nothing, and equal lines never get mixed up.
+	 */
+	private mergeStderr(sticky: readonly string[], seq: number): void {
+		const first = seq - sticky.length + 1;
+		const fresh = sticky.filter((_, i) => first + i > this.view.stderrSeq);
+		if (fresh.length === 0) return;
+		this.view.stderrTail = [...this.view.stderrTail, ...fresh].slice(
+			-KEEP_STDERR,
+		);
+		this.view.stderrSeq = seq;
 	}
 
-	private stderr(gen: number, line: string): void {
-		if (gen !== this.view.gen) return;
-		const tail = [...this.view.stderrTail, line].slice(-KEEP_STDERR);
-		this.view.stderrTail = tail;
+	private stderr(gen: number, seq: number, line: string): void {
+		if (gen !== this.view.gen || seq <= this.view.stderrSeq) return;
+		this.view.stderrTail = [...this.view.stderrTail, line].slice(-KEEP_STDERR);
+		this.view.stderrSeq = seq;
 		this.changed();
 	}
 
 	/** A newer core: forget everything the old one said, keep the language until settings come. */
-	private switchTo(gen: number, stderrTail: string[]): void {
+	private switchTo(gen: number): void {
 		this.client.useGen(gen);
 		this.arriving = undefined;
 		this.view = {
 			...emptyView(this.view.language),
 			gen,
 			version: this.view.version,
-			stderrTail: stderrTail.slice(-KEEP_STDERR),
 		};
 	}
 

@@ -21,6 +21,8 @@ export interface SidecarState {
 	running: boolean;
 	exitCode?: number | null;
 	stderrTail: string[];
+	/** The number of the last line in `stderrTail`; each core counts its lines from 1. */
+	stderrSeq: number;
 }
 
 export type Connection = "connected" | "waiting" | "error";
@@ -53,7 +55,7 @@ export interface TrayUpdate {
 /** Events Rust emits to every window, and the two the pages send each other. */
 export interface HostEvents {
 	"sidecar-line": { gen: number; line: string };
-	"sidecar-stderr": { gen: number; line: string };
+	"sidecar-stderr": { gen: number; seq: number; line: string };
 	"sidecar-exit": { gen: number; code: number | null };
 	"sidecar-started": { gen: number };
 	"familiar-snapshot": TraySnapshot;

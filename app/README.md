@@ -5,6 +5,7 @@ The desktop app: a window with the overview and a panel above the tray icon, bui
 ## How it is split
 
 - `src-tauri/`: the Rust shell, kept thin. It owns the core process (start, restart, quit, and a generation number on every event so an old process's exit never marks a new one dead), the tray icon and the close button's behaviour.
+- `src-tauri/src/process.rs`: the core's process tree. On Unix the core leads its own process group, which is only signalled while the core is not reaped, so a kill never reaches another program that got the same id. On Windows it runs in a job object that kills the whole tree when Familiar closes it, also when Familiar itself is killed.
 - `src/`: the pages. Only the main window talks to the core; the tray panel gets snapshots from it. The logic lives in `src/lib/*.ts` without Tauri, so `bun test` covers it; `src/lib/tauri.ts` is the one file that touches the Tauri API.
 - `scripts/sidecar.ts` builds the core for the target and copies it to `src-tauri/binaries/familiar-core-<target>`, which the installer bundles. The name is not `familiar`, because Windows would not tell `familiar.exe` from `Familiar.exe`. `FAMILIAR_SIDECAR=<file>` copies a core built before, as CI does.
 - `scripts/licenses.ts` collects the license texts of the bundled fonts into the installer.
@@ -29,6 +30,7 @@ Checks, besides the repository's `bun run check`, `bun run typecheck` and `bun t
 cd app/src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo test     # the process tests read /proc, so they run on Linux only
 ```
 
 CI builds the Windows installer, installs it silently, starts the app against an empty client folder and checks that the addon arrives and that the core goes away with the app. The installer is not signed yet (FAM-18), so Windows SmartScreen warns before it runs.

@@ -111,7 +111,7 @@ jobs:
       - run: bun test acp.test bank.test server.test game.test chatgpt.test model.test settings.test sidecar/
         working-directory: core
 
-  # The desktop app's Rust shell: format, lints, and that it builds with the pages embedded.
+  # The desktop app's Rust shell: format, lints, tests, and that it builds with the pages embedded.
   app:
     name: App
     runs-on: ubuntu-latest
@@ -133,6 +133,10 @@ jobs:
       - run: bun run tauri build --debug --no-bundle
         working-directory: app
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: app/src-tauri
+      # Includes the core's process tree: a hung core is killed with its children, and nothing
+      # of a core that left by itself stays behind.
+      - run: cargo test
         working-directory: app/src-tauri
 
   # The installer players get. Built and installed on Windows, then started against an empty

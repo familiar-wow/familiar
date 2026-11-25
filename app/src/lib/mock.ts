@@ -39,7 +39,12 @@ export function mockHost(
 		}, 0);
 	const later = (ms: number, fn: () => void) => setTimeout(fn, ms);
 
-	let state: SidecarState = { gen: 1, running: true, stderrTail: [] };
+	let state: SidecarState = {
+		gen: 1,
+		running: true,
+		stderrTail: [],
+		stderrSeq: 0,
+	};
 	let status: Status = fresh();
 	let log: Record<string, unknown>[] = [];
 	const line = (data: unknown) =>
@@ -116,7 +121,8 @@ export function mockHost(
 					"error: Something went wrong (TypeError).",
 				]) {
 					state.stderrTail.push(text);
-					fire("sidecar-stderr", { gen, line: text });
+					state.stderrSeq++;
+					fire("sidecar-stderr", { gen, seq: state.stderrSeq, line: text });
 				}
 				state = { ...state, running: false, exitCode: 1 };
 				fire("sidecar-exit", { gen, code: 1 });
@@ -206,7 +212,12 @@ export function mockHost(
 		},
 		restart: async () => {
 			fire("sidecar-exit", { gen: state.gen, code: null });
-			state = { gen: state.gen + 1, running: true, stderrTail: [] };
+			state = {
+				gen: state.gen + 1,
+				running: true,
+				stderrTail: [],
+				stderrSeq: 0,
+			};
 			status = fresh();
 			log = [];
 			scenario = "live";

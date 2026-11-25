@@ -27,7 +27,7 @@ function status(over: Partial<Status> = {}): Status {
 
 /** The shell and a core that answers by method, as the test says. */
 function fakeHost(
-	state: SidecarState = { gen: 1, running: true, stderrTail: [] },
+	state: SidecarState = { gen: 1, running: true, stderrTail: [], stderrSeq: 0 },
 ) {
 	const handlers = new Map<string, ((p: never) => void)[]>();
 	const sent: { gen: number; id: number; method: string }[] = [];
@@ -66,7 +66,12 @@ function fakeHost(
 			setTimeout(() => answer(r.id, reply), 0);
 		},
 		restart: async () => {
-			state = { gen: state.gen + 1, running: true, stderrTail: [] };
+			state = {
+				gen: state.gen + 1,
+				running: true,
+				stderrTail: [],
+				stderrSeq: 0,
+			};
 			fire("sidecar-started", { gen: state.gen });
 		},
 		trayUpdate: async (u) => void trays.push(u),
@@ -151,7 +156,7 @@ test("the core exiting fails what is pending and shows the last stderr line", as
 	await app.start();
 	await settle();
 	expect(f.sent.at(-1)?.method).toBe("start");
-	f.fire("sidecar-stderr", { gen: 1, line: "panic: out of cheese" });
+	f.fire("sidecar-stderr", { gen: 1, seq: 1, line: "panic: out of cheese" });
 	f.fire("sidecar-exit", { gen: 1, code: 3 });
 	await settle();
 	expect(app.view.exited).toBe(true);
@@ -172,6 +177,7 @@ test("a page that loads after the core died shows the error at once", async () =
 		running: false,
 		exitCode: 1,
 		stderrTail: ["a", "boom", ""],
+		stderrSeq: 3,
 	});
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
@@ -219,6 +225,7 @@ test("a restart whose core cannot start shows why, though no event said it", asy
 			running: false,
 			exitCode: null,
 			stderrTail: ["Could not start the core: not found"],
+			stderrSeq: 1,
 		});
 		f.fire("sidecar-started", { gen: 2 });
 		f.fire("sidecar-exit", { gen: 2, code: null });
@@ -235,18 +242,45 @@ test("stderr lines the page heard are not repeated from the sticky state", async
 	const app = new MainApp(f.host, { systemLanguage: "en-US" });
 	await app.start();
 	await settle();
-	f.fire("sidecar-stderr", { gen: 1, line: "one" });
-	f.fire("sidecar-stderr", { gen: 1, line: "two" });
+	f.fire("sidecar-stderr", { gen: 1, seq: 1, line: "one" });
+	f.fire("sidecar-stderr", { gen: 1, seq: 2, line: "two" });
 	f.setState({
 		gen: 1,
 		running: false,
 		exitCode: 1,
 		stderrTail: ["one", "two", "three"],
+		stderrSeq: 3,
 	});
 	f.host.restart = async () => {};
 	await app.restartCore();
 	await settle();
 	expect(app.view.stderrTail).toEqual(["one", "two", "three"]);
+});
+
+test("a snapshot older than the events changes nothing, and equal lines stay apart", async () => {
+	// Taken when the core had said "one"; "fatal" and a second "one" arrived before it.
+	const f = fakeHost();
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	f.fire("sidecar-stderr", { gen: 1, seq: 1, line: "one" });
+	f.fire("sidecar-stderr", { gen: 1, seq: 2, line: "fatal" });
+	f.fire("sidecar-stderr", { gen: 1, seq: 3, line: "one" });
+	f.fire("sidecar-exit", { gen: 1, code: 1 });
+	f.setState({
+		gen: 1,
+		running: false,
+		exitCode: 1,
+		stderrTail: ["one"],
+		stderrSeq: 1,
+	});
+	f.host.restart = async () => {};
+	await app.restartCore();
+	await settle();
+	expect(app.view.stderrTail).toEqual(["one", "fatal", "one"]);
+	// A late event already in the tail is not added twice either.
+	f.fire("sidecar-stderr", { gen: 1, seq: 2, line: "fatal" });
+	expect(app.view.stderrTail).toEqual(["one", "fatal", "one"]);
 });
 
 test("status and log events from the core update the view", async () => {
