@@ -69,6 +69,41 @@ const Ssh = z.strictObject({
 	command: z.array(z.string().min(1)).min(1),
 });
 
+/**
+ * What each kind of brain on the app's Brain page held last, so that switching to another kind
+ * and back keeps the choice. The brain that answers is in `brain`; this is only remembered.
+ */
+const Remembered = z.strictObject({
+	chatgpt: z.strictObject({ name: z.string().min(1) }).optional(),
+	key: z
+		.strictObject({
+			provider: z.enum([
+				"openai",
+				"anthropic",
+				"google",
+				"openrouter",
+				"deepseek",
+			]),
+			name: z.string().min(1),
+		})
+		.optional(),
+	local: z
+		.strictObject({
+			provider: z.enum(["ollama", "lmstudio", "openai-compatible"]),
+			name: z.string().min(1),
+			baseUrl: z.url().optional(),
+		})
+		.optional(),
+	agent: z
+		.strictObject({
+			command: z.array(z.string().min(1)).min(1),
+			cwd: z.string().min(1).optional(),
+		})
+		.optional(),
+	/** The working folder there is a folder on that computer, so it is kept apart. */
+	ssh: Ssh.extend({ cwd: z.string().min(1).optional() }).optional(),
+});
+
 const Settings = z.strictObject({
 	/** The WoW Forever client folder the player chose; found automatically when left out. */
 	game: z.strictObject({ client: z.string().min(1).optional() }).prefault({}),
@@ -80,6 +115,9 @@ const Settings = z.strictObject({
 			/** Start with Windows, in the tray. */
 			autostart: z.boolean().default(false),
 			language: z.enum(["system", "en", "de"]).default("system"),
+			/** The setup assistant ran, or the player chose to skip it. */
+			setupDone: z.boolean().default(false),
+			brains: Remembered.prefault({}),
 		})
 		.prefault({}),
 	brain: z

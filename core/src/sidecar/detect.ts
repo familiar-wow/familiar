@@ -312,6 +312,25 @@ async function lmStudioModels(fetch: Fetch): Promise<LocalModel[] | undefined> {
 	);
 }
 
+/**
+ * The models of any OpenAI-compatible server, such as Ollama on another PC; undefined when
+ * nothing there answers like one. `baseUrl` ends where `/models` follows, such as
+ * `http://192.168.1.20:11434/v1`.
+ */
+export async function serverModels(
+	baseUrl: string,
+	opts: { fetch?: Fetch } = {},
+): Promise<LocalModel[] | undefined> {
+	const list = (await getJson(
+		opts.fetch ?? fetch,
+		`${baseUrl.replace(/\/+$/, "")}/models`,
+	)) as { data?: unknown } | undefined;
+	if (!Array.isArray(list?.data)) return undefined;
+	return (list.data as ({ id?: unknown } | null)[]).flatMap((m) =>
+		typeof m?.id === "string" ? [{ id: m.id }] : [],
+	);
+}
+
 /** %VAR% in registry values (REG_EXPAND_SZ), from the injected environment. */
 function expand(c: Context, value: string): string {
 	return value.replace(

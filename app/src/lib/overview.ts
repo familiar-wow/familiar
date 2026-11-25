@@ -1,5 +1,6 @@
 // The view state of the main window and what the overview, the tray panel and the tray icon
 // show from it. Pure: App.svelte and Tray.svelte only render what comes out of here.
+import type { Settings } from "./brain.ts";
 import { seconds, translator } from "./i18n.ts";
 import { clock, recentQuestions, toolChips } from "./questions.ts";
 import {
@@ -42,6 +43,10 @@ export interface View {
 	lines: Record<string, unknown>[];
 	/** The page the main window shows. */
 	page: Page;
+	/** The settings as `settings.get` gave them last, without any key. */
+	settings?: Settings;
+	/** Per provider: whether an API key is stored (`settings.get`'s `keys`). */
+	keys: Record<string, boolean>;
 }
 
 export function emptyView(language: Language): View {
@@ -54,6 +59,7 @@ export function emptyView(language: Language): View {
 		log: [],
 		lines: [],
 		page: "overview",
+		keys: {},
 	};
 }
 

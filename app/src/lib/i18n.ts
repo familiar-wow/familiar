@@ -1,7 +1,26 @@
-// The app's texts in English and German. Both files have the same keys (i18n.test.ts checks).
-import de from "../locales/de.json" with { type: "json" };
-import en from "../locales/en.json" with { type: "json" };
+// The app's texts in English and German, one pair of files per part of the app so that parts can
+// be written side by side. Each pair has the same keys, and no key is in two parts
+// (i18n.test.ts checks both).
+import agentDe from "../locales/agent.de.json" with { type: "json" };
+import agentEn from "../locales/agent.en.json" with { type: "json" };
+import brainDe from "../locales/brain.de.json" with { type: "json" };
+import brainEn from "../locales/brain.en.json" with { type: "json" };
+import baseDe from "../locales/de.json" with { type: "json" };
+import baseEn from "../locales/en.json" with { type: "json" };
+import setupDe from "../locales/setup.de.json" with { type: "json" };
+import setupEn from "../locales/setup.en.json" with { type: "json" };
 import type { Language } from "./types.ts";
+
+/** The parts, for the tests: each with its English and German texts. */
+export const parts = {
+	base: { en: baseEn, de: baseDe },
+	brain: { en: brainEn, de: brainDe },
+	agent: { en: agentEn, de: agentDe },
+	setup: { en: setupEn, de: setupDe },
+};
+
+const en = { ...baseEn, ...brainEn, ...agentEn, ...setupEn };
+const de = { ...baseDe, ...brainDe, ...agentDe, ...setupDe };
 
 export type Key = keyof typeof en;
 export type Translate = (

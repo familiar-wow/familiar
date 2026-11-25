@@ -35,10 +35,13 @@ function fakeHost(
 	const snapshots: TraySnapshot[] = [];
 	const closeModes: string[] = [];
 	const picks: string[] = [];
+	const params: { method: string; params?: Record<string, unknown> }[] = [];
 	const replies: Record<string, Reply> = {
 		hello: { result: { version: "0.14.0" } },
 		"settings.get": {
-			result: { settings: { app: { language: "de", close: "quit" } } },
+			result: {
+				settings: { app: { language: "de", close: "quit", setupDone: true } },
+			},
 		},
 		status: { result: status() },
 		"logs.recent": { result: [] },
@@ -63,6 +66,7 @@ function fakeHost(
 		send: async (line) => {
 			const r = JSON.parse(line);
 			sent.push({ gen: state.gen, id: r.id, method: r.method });
+			params.push({ method: r.method, params: r.params });
 			const reply = replies[r.method] ?? { error: "Unknown." };
 			setTimeout(() => answer(r.id, reply), 0);
 		},
@@ -102,6 +106,7 @@ function fakeHost(
 		snapshots,
 		closeModes,
 		picks,
+		params,
 		replies,
 		fire,
 		line: (gen: number, data: unknown) =>
@@ -450,6 +455,105 @@ test("a new core starts with an empty log buffer and fills it again", async () =
 	// Lines of the old core that come late are not mixed in.
 	f.line(1, { event: "log", data: { at: 6, event: "say", text: "late" } });
 	expect(app.view.lines).toHaveLength(1);
+});
+
+test("the setup assistant opens once when it never ran, not for every new core", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: { settings: { app: { language: "en" } }, keys: {} },
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.page).toBe("setup");
+	app.open("overview");
+	await app.restartCore();
+	await settle();
+	expect(app.view.gen).toBe(2);
+	expect(app.view.page).toBe("overview");
+});
+
+test("finishing the setup saves setupDone with the rest and goes to the overview", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: {
+			settings: {
+				app: { language: "en" },
+				brain: { command: ["hermes", "acp"] },
+			},
+			keys: { openai: true },
+		},
+	};
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.keys).toEqual({ openai: true });
+	f.replies["settings.set"] = {
+		result: { settings: { app: { setupDone: true } }, keys: {} },
+	};
+	await app.finishSetup();
+	expect(app.view.page).toBe("overview");
+	expect(app.view.settings?.app?.setupDone).toBe(true);
+	// The whole settings object goes back, with only setupDone changed.
+	expect(f.params.filter((p) => p.method === "settings.set")).toEqual([
+		{
+			method: "settings.set",
+			params: {
+				settings: {
+					app: { language: "en", setupDone: true },
+					brain: { command: ["hermes", "acp"] },
+				},
+			},
+		},
+	]);
+});
+
+test("use this brain: saved, then a running Familiar restarts and a stopped one starts", async () => {
+	const f = fakeHost();
+	f.replies["settings.get"] = {
+		result: {
+			settings: {
+				app: { setupDone: true },
+				brain: { use: "agent", command: ["hermes", "acp"], permissions: "ask" },
+			},
+			keys: {},
+		},
+	};
+	f.replies["settings.set"] = { result: { settings: {}, keys: {} } };
+	f.replies.restart = { result: status({ running: true }) };
+	const app = new MainApp(f.host, { systemLanguage: "en-US" });
+	await app.start();
+	await settle();
+	expect(app.view.status?.running).toBe(true);
+	f.sent.length = 0;
+	await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" });
+	expect(f.sent.map((s) => s.method)).toEqual([
+		"settings.get",
+		"settings.set",
+		"restart",
+	]);
+	expect(f.params.find((p) => p.method === "settings.set")?.params).toEqual({
+		settings: {
+			app: {
+				setupDone: true,
+				brains: { chatgpt: { name: "gpt-6-luna" } },
+			},
+			brain: {
+				use: "model",
+				model: { provider: "chatgpt", name: "gpt-6-luna" },
+				command: ["hermes", "acp"],
+				permissions: "ask",
+			},
+		},
+	});
+	app.view.status = status({ running: false });
+	f.sent.length = 0;
+	await app.useBrain({ kind: "chatgpt", name: "gpt-6-luna" });
+	expect(f.sent.map((s) => s.method)).toEqual([
+		"settings.get",
+		"settings.set",
+		"start",
+	]);
 });
 
 test("familiar-open from the tray panel switches the page, also across a new core", async () => {

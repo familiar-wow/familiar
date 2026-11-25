@@ -67,6 +67,7 @@ function sidecar(deps: Partial<Deps> = {}, settings?: unknown) {
 			clientProcesses: async () => [],
 			openUrl: () => {},
 			openFolder: () => {},
+			serverModels: async () => undefined,
 			...deps,
 		},
 	});
@@ -199,6 +200,35 @@ test("refuses a test realm, also one that would pass as a client folder", async 
 	expect(isTestRealm(join(root, "_xptr_", "Wow.exe"))).toBe(true);
 	expect(isTestRealm(join(root, "_beta_"))).toBe(true);
 	expect(isTestRealm(join(root, "ptr notes"))).toBe(false);
+});
+
+test("lists another server's models, and refuses addresses that are no server", async () => {
+	const asked: string[] = [];
+	const { call } = sidecar({
+		serverModels: async (url) => {
+			asked.push(url);
+			return url.includes("192.168.1.20") ? [{ id: "qwen3:8b" }] : undefined;
+		},
+	});
+	expect(
+		(await call("local.models", { baseUrl: " http://192.168.1.20:11434/v1/ " }))
+			.result,
+	).toEqual([{ id: "qwen3:8b" }]);
+	expect(asked).toEqual(["http://192.168.1.20:11434/v1"]);
+	expect(
+		(await call("local.models", { baseUrl: "http://10.0.0.9/v1" })).error
+			?.message,
+	).toContain("No OpenAI-compatible server answered");
+	for (const [baseUrl, words] of [
+		["", "Enter the server's address"],
+		["file:///etc/passwd", "http:// or https://"],
+		["http://user:secret@host/v1", "Leave the user name and password out"],
+	])
+		expect((await call("local.models", { baseUrl })).error?.message).toContain(
+			words,
+		);
+	// Nothing that is no server was asked.
+	expect(asked).toHaveLength(2);
 });
 
 test("opens the log folder, and makes it first when nothing was logged yet", async () => {
@@ -588,6 +618,33 @@ test("settings saved while a start is under way also wait for a restart", async 
 		running: true,
 		restartNeeded: true,
 		brain: { command: ["hermes", "acp"] },
+	});
+});
+
+test("the app's own settings change nothing a run uses, so they need no restart", async () => {
+	const { client } = wow();
+	const { call } = sidecar(
+		{
+			findClients: async () => [client],
+			startFamiliar: async () => ({
+				install: {} as never,
+				fresh: false,
+				stop: () => {},
+			}),
+		},
+		{ brain: { command: ["hermes", "acp"] } },
+	);
+	await call("start");
+	const got = (await call("settings.get")).result as {
+		settings: { app: Record<string, unknown> };
+	};
+	got.settings.app.language = "de";
+	got.settings.app.setupDone = true;
+	got.settings.app.brains = { agent: { command: ["codex-acp"] } };
+	await call("settings.set", { settings: got.settings });
+	expect((await call("status")).result).toMatchObject({
+		running: true,
+		restartNeeded: false,
 	});
 });
 

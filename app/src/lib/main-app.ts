@@ -1,7 +1,9 @@
 // The main window's logic: it owns the connection to the core, follows the core's generations,
 // runs the bootstrap, and tells the tray icon and the tray panel what to show. App.svelte only
 // renders `view`.
+
 import { Bootstrap, type Step } from "./bootstrap.ts";
+import { applyChoice, type Choice, remember, type Settings } from "./brain.ts";
 import { CoreClient, STOPPED } from "./client.ts";
 import { resolveLanguage, translator } from "./i18n.ts";
 import { emptyView, snapshot, trayUpdate, type View } from "./overview.ts";
@@ -24,6 +26,21 @@ export const KEEP_LINES = 2000;
 const RECENT = 500;
 /** Rust keeps the same number of stderr lines. */
 const KEEP_STDERR = 20;
+/** `brain.test` waits up to 60 s for the brain; a little more for starting it. */
+export const BRAIN_TEST_TIMEOUT_MS = 75_000;
+
+interface SettingsReply {
+	settings?: Settings;
+	keys?: Record<string, boolean>;
+	file?: string;
+}
+
+/** What `brain.test` answers: how long it took, the start of the answer, the tools it named. */
+export interface BrainTest {
+	ms: number;
+	answer: string;
+	tools: string[];
+}
 
 export interface MainAppOptions {
 	/** navigator.language, for `app.language: "system"`. */
@@ -45,6 +62,8 @@ export class MainApp {
 	private lastSnapshot?: string;
 	/** Log lines that arrived while `logs.recent` was under way. */
 	private arriving?: Record<string, unknown>[];
+	/** The setup assistant opens by itself once per app start, not for every new core. */
+	private setupShown = false;
 
 	constructor(
 		private readonly host: Host,
@@ -114,6 +133,66 @@ export class MainApp {
 		const status = await this.client.request<Status>("status");
 		if (gen !== this.view.gen || !status) return;
 		this.view.status = status;
+		this.changed();
+	}
+
+	/** Saves the whole settings object and keeps what the core answers. */
+	async saveSettings(settings: Settings): Promise<Settings> {
+		const gen = this.view.gen;
+		const got = await this.client.request<SettingsReply>("settings.set", {
+			settings,
+		});
+		if (gen === this.view.gen) this.takeSettings(got);
+		return got?.settings ?? settings;
+	}
+
+	/** The settings as the core has them now, for a page that changes part of them. */
+	async loadSettings(): Promise<Settings> {
+		const gen = this.view.gen;
+		const got = await this.client.request<SettingsReply>("settings.get");
+		if (gen === this.view.gen) this.takeSettings(got);
+		return got?.settings ?? {};
+	}
+
+	/** Keeps what a tab holds without changing the brain that answers. */
+	async rememberBrain(choice: Choice): Promise<void> {
+		await this.saveSettings(remember(await this.loadSettings(), choice));
+	}
+
+	/**
+	 * "Use this": the choice becomes the brain that answers, and Familiar runs with it. A run
+	 * that is under way restarts, so the next question already goes to the new brain.
+	 */
+	async useBrain(choice: Choice): Promise<void> {
+		await this.saveSettings(applyChoice(await this.loadSettings(), choice));
+		if (this.view.status?.running) await this.restartFamiliar();
+		else await this.startFamiliar();
+	}
+
+	/** "Test": one short question to `choice`, without saving it; the core's answer as it is. */
+	async testBrain(choice: Choice): Promise<BrainTest> {
+		const settings = applyChoice(await this.loadSettings(), choice);
+		return this.client.request<BrainTest>(
+			"brain.test",
+			{ settings },
+			BRAIN_TEST_TIMEOUT_MS,
+		);
+	}
+
+	/** The setup assistant ran or was skipped: it does not open by itself again. */
+	async finishSetup(): Promise<void> {
+		const settings = await this.loadSettings();
+		await this.saveSettings({
+			...settings,
+			app: { ...settings.app, setupDone: true },
+		});
+		this.open("overview");
+	}
+
+	private takeSettings(got: SettingsReply | undefined): void {
+		if (!got?.settings) return;
+		this.view.settings = got.settings;
+		this.view.keys = got.keys ?? {};
 		this.changed();
 	}
 
@@ -241,6 +320,9 @@ export class MainApp {
 			gen,
 			version: this.view.version,
 			page: this.view.page,
+			// Kept until the new core's settings.get answers, so an open page does not blank out.
+			...(this.view.settings ? { settings: this.view.settings } : {}),
+			keys: this.view.keys,
 		};
 	}
 
@@ -267,14 +349,18 @@ export class MainApp {
 			{
 				name: "settings.get",
 				run: async () => {
-					const got = await ask<{
-						settings?: { app?: { language?: unknown; close?: unknown } };
-					}>("settings.get");
+					const got = await ask<SettingsReply>("settings.get");
 					const app = got?.settings?.app;
 					this.view.language = resolveLanguage(
 						app?.language,
 						this.o.systemLanguage,
 					);
+					this.takeSettings(got);
+					// The first time, the setup assistant opens; once, until it ran or was skipped.
+					if (app && app.setupDone !== true && !this.setupShown) {
+						this.setupShown = true;
+						this.view.page = "setup";
+					}
 					this.changed();
 					await this.host.setCloseMode(app?.close === "quit" ? "quit" : "tray");
 				},

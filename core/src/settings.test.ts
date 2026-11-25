@@ -21,6 +21,48 @@ test("old settings without brain.use keep the player's agent", () => {
 	});
 });
 
+test("old settings get the app's new fields: setup not done, nothing remembered", () => {
+	withFile('{"brain":{"command":["hermes","acp"]}}', (file) => {
+		expect(loadSettings(file).app).toMatchObject({
+			setupDone: false,
+			brains: {},
+		});
+	});
+	withFile(
+		JSON.stringify({
+			app: {
+				setupDone: true,
+				brains: {
+					key: { provider: "openrouter", name: "openai/gpt-6-luna" },
+					local: {
+						provider: "openai-compatible",
+						name: "qwen3",
+						baseUrl: "http://192.168.1.20:11434/v1",
+					},
+					agent: { command: ["codex-acp"] },
+					ssh: { host: "homelab", command: ["hermes", "acp"] },
+				},
+			},
+		}),
+		(file) => {
+			const app = loadSettings(file).app;
+			expect(app.setupDone).toBe(true);
+			expect(app.brains.ssh).toEqual({
+				host: "homelab",
+				auth: "key",
+				command: ["hermes", "acp"],
+			});
+		},
+	);
+	// A remembered API key provider is one that takes a key, not a local server.
+	withFile(
+		'{"app":{"brains":{"key":{"provider":"ollama","name":"x"}}}}',
+		(file) => {
+			expect(() => loadSettings(file)).toThrow();
+		},
+	);
+});
+
 test("the built-in agent needs a model, and openai-compatible a baseUrl", () => {
 	withFile('{"brain":{"use":"model"}}', (file) => {
 		expect(() => loadSettings(file)).toThrow("brain.model must name");

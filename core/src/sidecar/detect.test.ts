@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { findAgents, findLocalServers, type LocalServer } from "./detect.ts";
+import {
+	findAgents,
+	findLocalServers,
+	type LocalServer,
+	serverModels,
+} from "./detect.ts";
 import { launchable, type Runner, type RunResult } from "./run.ts";
 
 const ok = (stdout: string): RunResult => ({
@@ -304,6 +309,19 @@ const NO_LMSTUDIO: LocalServer = {
 	installed: false,
 	models: [],
 };
+
+test("lists the models of another OpenAI-compatible server, or says nothing answered", async () => {
+	const { fetch, calls } = fakeFetch((call) =>
+		call.url === "http://192.168.1.20:11434/v1/models"
+			? json({ data: [{ id: "qwen3:8b" }, { id: 7 }, null, { id: "llama4" }] })
+			: undefined,
+	);
+	expect(
+		await serverModels("http://192.168.1.20:11434/v1/", { fetch }),
+	).toEqual([{ id: "qwen3:8b" }, { id: "llama4" }]);
+	expect(calls[0]?.signal).toBeDefined();
+	expect(await serverModels("http://10.0.0.9/v1", { fetch })).toBeUndefined();
+});
 
 test("reports both servers as not installed when nothing is there", async () => {
 	const { runner, calls } = fakeRun();

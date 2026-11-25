@@ -29,7 +29,7 @@ export type Connection = "connected" | "waiting" | "error";
 export type Language = "en" | "de";
 export type CloseMode = "tray" | "quit";
 /** The main window's pages; Brain and Settings come later. */
-export type Page = "overview" | "game" | "logs";
+export type Page = "overview" | "game" | "brain" | "logs" | "setup";
 
 /** A WoW Forever client, as `game.find` and `game.check` describe it. */
 export interface GameClient {

@@ -38,7 +38,7 @@ import {
 	isInstalled,
 	uninstall,
 } from "../wow/install.ts";
-import { findAgents, findLocalServers } from "./detect.ts";
+import { findAgents, findLocalServers, serverModels } from "./detect.ts";
 import { ListError, listModels, type Provider } from "./models.ts";
 import {
 	type Event,
@@ -107,6 +107,7 @@ export interface Deps {
 	findClients: typeof findClients;
 	findAgents: typeof findAgents;
 	findLocalServers: typeof findLocalServers;
+	serverModels: typeof serverModels;
 	listModels: typeof listModels;
 	startFamiliar: typeof startFamiliar;
 	clientProcesses: typeof clientProcesses;
@@ -157,6 +158,7 @@ export class Sidecar {
 			findClients,
 			findAgents,
 			findLocalServers,
+			serverModels,
 			listModels,
 			startFamiliar,
 			clientProcesses,
@@ -383,6 +385,15 @@ export class Sidecar {
 
 			"agents.find": () => this.deps.findAgents(),
 			"local.find": () => this.deps.findLocalServers(),
+			"local.models": async (p) => {
+				const baseUrl = serverAddress(p.baseUrl);
+				const models = await this.deps.serverModels(baseUrl);
+				if (!models)
+					throw new PlayerError(
+						"No OpenAI-compatible server answered at this address. Check it ends in /v1 and the server runs.",
+					);
+				return models;
+			},
 			"local.start": async (p) => {
 				const servers = await this.deps.findLocalServers();
 				const server = servers.find((s) => s.kind === p.kind);
@@ -520,9 +531,21 @@ export class Sidecar {
 			}
 		}
 		saveSettings(this.o.settingsFile, next);
-		// While Familiar runs, the overview shows the brain that answers, not the new one.
-		if (this.status.running || this.starting) this.status.restartNeeded = true;
-		else this.status.brain = describeBrain(next);
+		// While Familiar runs, the overview shows the brain that answers, not the new one. Only
+		// what a run uses needs a restart; the app's own settings, such as the language, do not.
+		const used = (s?: Settings) =>
+			s &&
+			JSON.stringify([
+				s.game,
+				{
+					...s.brain,
+					model: s.brain.model && { ...s.brain.model, apiKey: undefined },
+				},
+				s.mcp,
+			]);
+		if (this.status.running || this.starting) {
+			if (used(before) !== used(next)) this.status.restartNeeded = true;
+		} else this.status.brain = describeBrain(next);
 		this.changed();
 		return this.shownSettings(next);
 	}
@@ -732,6 +755,26 @@ export function clientFolder(chosen: string): string | undefined {
 	for (const candidate of [dir, join(dir, "_forever_")])
 		if (isClientFolder(candidate)) return candidate;
 	return undefined;
+}
+
+/** An http(s) address the player typed for a server; nothing else is asked. */
+function serverAddress(value: unknown): string {
+	let url: URL;
+	try {
+		url = new URL(String(value ?? "").trim());
+	} catch {
+		throw new PlayerError(
+			"Enter the server's address, such as http://192.168.1.20:11434/v1.",
+		);
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:")
+		throw new PlayerError("The address has to start with http:// or https://.");
+	// No user or password in it: they would end up in the settings file.
+	if (url.username || url.password)
+		throw new PlayerError(
+			"Leave the user name and password out of the address.",
+		);
+	return url.toString().replace(/\/+$/, "");
 }
 
 function keyedProvider(value: unknown): Provider {
