@@ -616,8 +616,17 @@ end
 
 -- Forever hides some character values from addons at times, in combat for example: they arrive as
 -- secret values, which an addon may pass on but not compute with, compare or format (C_Secrets).
+-- A client with secrets whose check is missing or fails counts every value as secret: better a
+-- value left out than an error, or a secret sent on.
 local function isSecret(v)
-	return v ~= nil and issecretvalue ~= nil and issecretvalue(v) == true
+	if v == nil then
+		return false
+	end
+	if issecretvalue == nil then
+		return C_Secrets ~= nil
+	end
+	local ok, secret = pcall(issecretvalue, v)
+	return not ok or secret == true
 end
 
 local function collectStats()
@@ -931,8 +940,9 @@ local function snapshotMerchant()
 	end
 	local npc = ""
 	if UnitName then
+		-- The NPC's name can be secret too; the snapshot is kept without it.
 		local nok, n = pcall(UnitName, "npc")
-		if nok and n then
+		if nok and n and not isSecret(n) then
 			npc = clean(n)
 		end
 	end
@@ -999,8 +1009,9 @@ local function snapshotTrainer()
 	end
 	local npc = ""
 	if UnitName then
+		-- The NPC's name can be secret too; the snapshot is kept without it.
 		local nok, n = pcall(UnitName, "npc")
-		if nok and n then
+		if nok and n and not isSecret(n) then
 			npc = clean(n)
 		end
 	end
@@ -1359,7 +1370,8 @@ function Collect.Init()
 	f:SetScript("OnEvent", function(_, event, arg1)
 		local unitSlice = UNIT_EVENTS[event]
 		if unitSlice then
-			if arg1 == "player" then
+			-- A unit token the game hid cannot be compared: count it as the player's, to be safe.
+			if isSecret(arg1) or arg1 == "player" then
 				revs[unitSlice] = (revs[unitSlice] or 0) + 1
 			end
 			return

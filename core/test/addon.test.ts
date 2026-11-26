@@ -687,32 +687,98 @@ test("stats the game hides are named, not computed with, and read again next tim
 	});
 
 	// In combat, say: the game hands the addon secret values (Collect.lua used to fail on them).
-	command("set secretStats 1");
-	command("fire UNIT_ATTACK_POWER player");
-	at = await roundTrip("stats hidden", /heard: stats hidden$/, at);
-	const hidden = await call("stats");
-	expect(hidden).toMatchObject({
-		healthMax: 1600,
-		hidden: ["armor", "meleeAP", "spellCrit", "spellDamage"],
-	});
-	expect(hidden.note).toContain("hid these values");
-	for (const key of ["armor", "meleeAP", "spellCrit", "spellDamage"])
-		expect(hidden[key]).toBeUndefined();
+	// Back to plain values even when an assertion fails, so the next test is not affected.
+	try {
+		command("set secretStats 1");
+		command("fire UNIT_ATTACK_POWER player");
+		at = await roundTrip("stats hidden", /heard: stats hidden$/, at);
+		const hidden = await call("stats");
+		expect(hidden).toMatchObject({
+			healthMax: 1600,
+			hidden: ["armor", "meleeAP", "spellCrit", "spellDamage"],
+		});
+		expect(hidden.note).toContain("hid these values");
+		for (const key of ["armor", "meleeAP", "spellCrit", "spellDamage"])
+			expect(hidden[key]).toBeUndefined();
 
-	// After combat no stats event need fire: the addon counts a hidden read as changed, so the
-	// next question reads the game again instead of the cache.
-	command("set secretStats 0");
-	at = await roundTrip("stats back", /heard: stats back$/, at);
-	const back = await call("stats");
-	expect(back).toMatchObject({
-		cached: false,
-		meleeAP: 115,
-		spellCrit: 4.5,
-		spellDamage: 37,
-	});
-	expect(back.hidden).toBeUndefined();
+		// After combat no stats event need fire: the addon counts a hidden read as changed, so the
+		// next question reads the game again instead of the cache.
+		command("set secretStats 0");
+		at = await roundTrip("stats back", /heard: stats back$/, at);
+		const back = await call("stats");
+		expect(back).toMatchObject({
+			cached: false,
+			meleeAP: 115,
+			spellCrit: 4.5,
+			spellDamage: 37,
+		});
+		expect(back.hidden).toBeUndefined();
+
+		// Only the buffs secret, not the base: the sum is still not computed.
+		command("set secretStats 2");
+		command("fire UNIT_ATTACK_POWER player");
+		at = await roundTrip(
+			"stats buffs hidden",
+			/heard: stats buffs hidden$/,
+			at,
+		);
+		expect(await call("stats")).toMatchObject({
+			hidden: ["meleeAP"],
+			armor: 421,
+		});
+	} finally {
+		command("set secretStats 0");
+	}
 	expect(errors).toEqual([]);
 }, 45_000);
+
+test("a missing or failing secret check hides the stats, and a secret NPC name is left out", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	const call = async (name: string) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return (await tool.call({})) as Record<string, unknown>;
+	};
+	// Past every earlier "Connected", so each reload below waits for its own.
+	at = await roundTrip("secret check start", /heard: secret check start$/, at);
+	try {
+		for (const detector of ["missing", "throws"]) {
+			command(`set detector ${detector}`);
+			command("reload");
+			at = await waitFor(/Connected to the test app\.$/, at);
+			at = await roundTrip(
+				`detector ${detector}`,
+				new RegExp(`heard: detector ${detector}$`),
+				at,
+			);
+			const stats = await call("stats");
+			// A client with secrets but no working check: nothing is trusted, nothing raises.
+			expect(stats.hidden).toContain("meleeAP");
+			expect(stats.meleeAP).toBeUndefined();
+		}
+	} finally {
+		// A removed detector comes back only with a new interface: set it, then reload.
+		command("set detector ok");
+		command("reload");
+		at = await waitFor(/Connected to the test app\.$/, at);
+	}
+
+	try {
+		// The merchant's name secret: the snapshot keeps its wares, without the name.
+		command("set secretNpc 1");
+		command("visit");
+		at = await roundTrip("secret npc", /heard: secret npc$/, at);
+		const merchant = await call("merchant");
+		expect(merchant).toMatchObject({
+			available: true,
+			items: [{ name: "Water" }],
+		});
+		expect(merchant.npc ?? "").toBe("");
+	} finally {
+		command("set secretNpc 0");
+	}
+	expect(errors).toEqual([]);
+}, 60_000);
 
 test("collector revisions follow late events and restart with the interface", async () => {
 	let at = await waitFor(CONNECTED, 0);

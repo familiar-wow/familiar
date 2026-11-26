@@ -126,7 +126,7 @@ export interface StatsState {
 	defense?: number;
 	/**
 	 * Values the game hid from the addon when it read them, in combat for example (Forever's
-	 * secret values). They are missing above; the next read asks the game again.
+	 * secret values). They are missing above; the next question reads the game again.
 	 */
 	hidden?: string[];
 	/** Says so in words for the brain, when values were hidden. */
