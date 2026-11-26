@@ -463,11 +463,16 @@ local stub = {
 	done783 = "0", -- 1: quest 783 counts as completed
 	noMap = "0", -- 1: the game has no map for the player, as during a loading screen
 	ratchet = "0", -- 1: the character has found the flight path at Ratchet
-	secretStats = "0", -- 1: attack power, armor, spell crit and one school's spell damage are secret
+	secretStats = "0", -- 1: attack power, armor, spell crit and one school's spell damage are secret;
+	-- 2: only attack power's buffs are, not its base
+	secretNpc = "0", -- 1: the merchant's name is secret
+	detector = "ok", -- missing: no issecretvalue; throws: it raises an error
 }
 
--- A secret value as Forever hands it to a tainted addon: it can be passed on, but computing with
--- it, comparing, concatenating or turning it into text raises an error, as in the game.
+-- An opaque stand-in for a secret value: arithmetic, comparison, concatenation and tostring
+-- raise. The game is less strict in places (it may format or concatenate a secret into another
+-- secret) and stricter in others (boolean tests, table keys); this only catches an addon that
+-- computes with one. The live client is the real check.
 local SECRET = {}
 local function refuse()
 	error("attempt to perform arithmetic on a secret number value, while execution tainted by 'Familiar'", 2)
@@ -548,7 +553,8 @@ local function api()
 	end
 	-- Who asks, for the header of a question.
 	e.UnitName = function(unit)
-		return unit == "npc" and "Test Vendor" or character
+		if unit == "npc" then return stub.secretNpc == "1" and secret() or "Test Vendor" end
+		return character
 	end
 	e.GetRealmName = function()
 		return realm
@@ -924,12 +930,20 @@ local function api()
 	e.UnitHealthMax = function() return 1600 end
 	e.UnitArmor = function() return stat(400, 421) end
 	e.GetSpellCritChance = function(...) assert(select("#", ...) == 0); return stat(4.5) end
-	e.UnitAttackPower = function() return stat(100, 20, -5) end
+	e.UnitAttackPower = function()
+		if stub.secretStats == "2" then return 100, secret(), secret() end
+		return stat(100, 20, -5)
+	end
 	e.GetSpellBonusDamage = function(school)
 		if school == 3 then return stat(37) end
 		return school == 5 and 12 or 0
 	end
-	e.issecretvalue = function(v) return getmetatable(v) == SECRET end
+	e.issecretvalue = function(v)
+		if stub.detector == "throws" then error("issecretvalue is not allowed here") end
+		return getmetatable(v) == SECRET
+	end
+	if stub.detector == "missing" then e.issecretvalue = nil end
+	e.C_Secrets = { ShouldUnitStatsBeSecret = function() return stub.secretStats ~= "0" end }
 	e.Enum = { BankType = { Character = 0 }, SpellBookSpellBank = { Player = 0 }, SpellBookItemType = { Spell = 1, FutureSpell = 2 } }
 	e.C_Bank = {FetchPurchasedBankTabData = function(kind) assert(kind == 0); return {{ ID = 22 }} end}
 	e.C_SkillInfo = {GetNumSkillLines = function() return 2 end, GetSkillLineInfo = function(i)
