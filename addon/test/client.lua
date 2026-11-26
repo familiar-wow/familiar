@@ -463,7 +463,32 @@ local stub = {
 	done783 = "0", -- 1: quest 783 counts as completed
 	noMap = "0", -- 1: the game has no map for the player, as during a loading screen
 	ratchet = "0", -- 1: the character has found the flight path at Ratchet
+	secretStats = "0", -- 1: attack power, armor, spell crit and one school's spell damage are secret
 }
+
+-- A secret value as Forever hands it to a tainted addon: it can be passed on, but computing with
+-- it, comparing, concatenating or turning it into text raises an error, as in the game.
+local SECRET = {}
+local function refuse()
+	error("attempt to perform arithmetic on a secret number value, while execution tainted by 'Familiar'", 2)
+end
+for _, op in ipairs({ "__add", "__sub", "__mul", "__div", "__mod", "__pow", "__unm", "__concat", "__lt", "__le", "__tostring" }) do
+	SECRET[op] = refuse
+end
+local function secret()
+	return setmetatable({}, SECRET)
+end
+-- A stat API's answer, or a secret one while `secretStats` is on.
+local function stat(...)
+	if stub.secretStats ~= "1" then
+		return ...
+	end
+	local out = {}
+	for i = 1, select("#", ...) do
+		out[i] = secret()
+	end
+	return unpack(out, 1, select("#", ...))
+end
 
 -- Whether a load request for uncached data is answered: only once `slowLoads` requests are spent.
 local function loadNow()
@@ -897,8 +922,14 @@ local function api()
 		end,
 	}
 	e.UnitHealthMax = function() return 1600 end
-	e.UnitArmor = function() return 400, 421 end
-	e.GetSpellCritChance = function(...) assert(select("#", ...) == 0); return 4.5 end
+	e.UnitArmor = function() return stat(400, 421) end
+	e.GetSpellCritChance = function(...) assert(select("#", ...) == 0); return stat(4.5) end
+	e.UnitAttackPower = function() return stat(100, 20, -5) end
+	e.GetSpellBonusDamage = function(school)
+		if school == 3 then return stat(37) end
+		return school == 5 and 12 or 0
+	end
+	e.issecretvalue = function(v) return getmetatable(v) == SECRET end
 	e.Enum = { BankType = { Character = 0 }, SpellBookSpellBank = { Player = 0 }, SpellBookItemType = { Spell = 1, FutureSpell = 2 } }
 	e.C_Bank = {FetchPurchasedBankTabData = function(kind) assert(kind == 0); return {{ ID = 22 }} end}
 	e.C_SkillInfo = {GetNumSkillLines = function() return 2 end, GetSkillLineInfo = function(i)

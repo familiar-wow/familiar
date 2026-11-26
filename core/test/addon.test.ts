@@ -672,6 +672,48 @@ test("reads the second collectors through the addon and keeps session-only visit
 	expect(errors).toEqual([]);
 }, 60_000);
 
+test("stats the game hides are named, not computed with, and read again next time", async () => {
+	let at = await waitFor(CONNECTED, 0);
+	const call = async (name: string) => {
+		const tool = wowTools(gameState).find((t) => t.name === name);
+		if (!tool) throw new Error(`Missing tool: ${name}`);
+		return (await tool.call({})) as Record<string, unknown>;
+	};
+	at = await roundTrip("stats plain", /heard: stats plain$/, at);
+	expect(await call("stats")).toMatchObject({
+		meleeAP: 115,
+		spellDamage: 37,
+		armor: 421,
+	});
+
+	// In combat, say: the game hands the addon secret values (Collect.lua used to fail on them).
+	command("set secretStats 1");
+	command("fire UNIT_ATTACK_POWER player");
+	at = await roundTrip("stats hidden", /heard: stats hidden$/, at);
+	const hidden = await call("stats");
+	expect(hidden).toMatchObject({
+		healthMax: 1600,
+		hidden: ["armor", "meleeAP", "spellCrit", "spellDamage"],
+	});
+	expect(hidden.note).toContain("hid these values");
+	for (const key of ["armor", "meleeAP", "spellCrit", "spellDamage"])
+		expect(hidden[key]).toBeUndefined();
+
+	// After combat no stats event need fire: the addon counts a hidden read as changed, so the
+	// next question reads the game again instead of the cache.
+	command("set secretStats 0");
+	at = await roundTrip("stats back", /heard: stats back$/, at);
+	const back = await call("stats");
+	expect(back).toMatchObject({
+		cached: false,
+		meleeAP: 115,
+		spellCrit: 4.5,
+		spellDamage: 37,
+	});
+	expect(back.hidden).toBeUndefined();
+	expect(errors).toEqual([]);
+}, 45_000);
+
 test("collector revisions follow late events and restart with the interface", async () => {
 	let at = await waitFor(CONNECTED, 0);
 	const call = async (name: string, args: Record<string, unknown> = {}) => {

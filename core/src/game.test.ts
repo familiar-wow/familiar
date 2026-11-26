@@ -8,6 +8,7 @@ import {
 	parseLookup,
 	parseMerchant,
 	parseQuests,
+	parseStats,
 	parseTalents,
 	parseTaxi,
 	parseTrainer,
@@ -486,4 +487,16 @@ test("parses flight paths and skips broken lines", () => {
 		],
 		truncated: true,
 	});
+});
+
+test("stats the game hid are listed with a note, and unknown names in the list are dropped", () => {
+	expect(parseStats("healthMax\t1600\nhidden\tarmor,meleeAP,bogus")).toEqual({
+		healthMax: 1600,
+		hidden: ["armor", "meleeAP"],
+		note: expect.stringContaining("hid these values"),
+	});
+	expect(parseStats("healthMax\t1600\nhidden\tbogus")).toEqual({
+		healthMax: 1600,
+	});
+	expect(parseStats("armor\t421")).toEqual({ armor: 421 });
 });

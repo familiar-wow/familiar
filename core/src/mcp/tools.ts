@@ -180,7 +180,7 @@ export function wowTools(game: Game): Tool[] {
 		{
 			name: "stats",
 			description:
-				"The player's current character stats in WoW Forever: max health, primary resource, Strength/Agility/Stamina/Intellect/Spirit, armor, melee and ranged attack power, melee/ranged/spell crit chance, spell damage, spell healing, dodge, parry, block and defense.",
+				"The player's current character stats in WoW Forever: max health, primary resource, Strength/Agility/Stamina/Intellect/Spirit, armor, melee and ranged attack power, melee/ranged/spell crit chance, spell damage, spell healing, dodge, parry, block and defense. The game hides some of them from addons at times, in combat for example: those are listed under `hidden`, not given as numbers.",
 			inputSchema: {
 				type: "object",
 				properties: {},
