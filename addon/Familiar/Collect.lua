@@ -614,27 +614,58 @@ local function round1(n)
 	return format("%.1f", n)
 end
 
+-- Forever hides some character values from addons at times, in combat for example: they arrive as
+-- secret values, which an addon may pass on but not compute with, compare or format (C_Secrets).
+local function isSecret(v)
+	return v ~= nil and issecretvalue ~= nil and issecretvalue(v) == true
+end
+
 local function collectStats()
 	local lines = {}
+	local hidden, hiddenSeen = {}, {}
 	local function add(key, value)
 		if value ~= nil and value ~= "" then
 			lines[#lines + 1] = format("%s\t%s", key, tostring(value))
 		end
 	end
-	if UnitHealthMax then
-		local ok, v = pcall(UnitHealthMax, "player")
+	-- The results of a pcall, or false when it failed or one of them is secret. Every value is
+	-- checked before anything computes with it.
+	local function checked(key, ok, ...)
+		if not ok then
+			return false
+		end
+		for i = 1, select("#", ...) do
+			if isSecret((select(i, ...))) then
+				if not hiddenSeen[key] then
+					hiddenSeen[key] = true
+					hidden[#hidden + 1] = key
+				end
+				return false
+			end
+		end
+		return true, ...
+	end
+	local function read(key, fn, ...)
+		if not fn then
+			return false
+		end
+		return checked(key, pcall(fn, ...))
+	end
+
+	do
+		local ok, v = read("healthMax", UnitHealthMax, "player")
 		if ok and v then
 			add("healthMax", v)
 		end
 	end
-	if UnitPowerType then
-		local ok, _, token = pcall(UnitPowerType, "player")
+	do
+		local ok, _, token = read("powerType", UnitPowerType, "player")
 		if ok and token then
 			add("powerType", token)
 		end
 	end
-	if UnitPowerMax then
-		local ok, v = pcall(UnitPowerMax, "player")
+	do
+		local ok, v = read("powerMax", UnitPowerMax, "player")
 		if ok and v then
 			add("powerMax", v)
 		end
@@ -642,87 +673,74 @@ local function collectStats()
 	if UnitStat then
 		local keys = { "str", "agi", "sta", "int", "spi" }
 		for i = 1, 5 do
-			local ok, _, effective = pcall(UnitStat, "player", i)
+			local ok, _, effective = read(keys[i], UnitStat, "player", i)
 			if ok and effective then
 				add(keys[i], effective)
 			end
 		end
 	end
-	if UnitArmor then
-		local ok, _, effective = pcall(UnitArmor, "player")
+	do
+		local ok, _, effective = read("armor", UnitArmor, "player")
 		if ok and effective then
 			add("armor", effective)
 		end
 	end
-	if UnitAttackPower then
-		local ok, base, pos, neg = pcall(UnitAttackPower, "player")
+	do
+		local ok, base, pos, neg = read("meleeAP", UnitAttackPower, "player")
 		if ok and base then
 			add("meleeAP", base + (pos or 0) + (neg or 0))
 		end
 	end
-	if UnitRangedAttackPower then
-		local ok, base, pos, neg = pcall(UnitRangedAttackPower, "player")
+	do
+		local ok, base, pos, neg = read("rangedAP", UnitRangedAttackPower, "player")
 		if ok and base then
 			add("rangedAP", base + (pos or 0) + (neg or 0))
 		end
 	end
-	if GetCritChance then
-		local ok, v = pcall(GetCritChance)
+	for _, c in ipairs({
+		{ "meleeCrit", GetCritChance },
+		{ "rangedCrit", GetRangedCritChance },
+		{ "spellCrit", GetSpellCritChance },
+		{ "dodge", GetDodgeChance },
+		{ "parry", GetParryChance },
+		{ "block", GetBlockChance },
+	}) do
+		local ok, v = read(c[1], c[2])
 		if ok and v then
-			add("meleeCrit", round1(v))
+			add(c[1], round1(v))
 		end
-	end
-	if GetRangedCritChance then
-		local ok, v = pcall(GetRangedCritChance)
-		if ok and v then
-			add("rangedCrit", round1(v))
-		end
-	end
-	if GetSpellCritChance then
-		local ok, v = pcall(GetSpellCritChance)
-		if ok and v then add("spellCrit", round1(v)) end
 	end
 	if GetSpellBonusDamage then
-		local best = 0
+		-- The best school; one that is hidden hides the whole value rather than give a smaller one.
+		local best, complete = 0, true
 		for school = 2, 7 do
-			local ok, v = pcall(GetSpellBonusDamage, school)
-			if ok and v and v > best then
+			local ok, v = read("spellDamage", GetSpellBonusDamage, school)
+			if not ok then
+				complete = complete and not hiddenSeen.spellDamage
+			elseif v and v > best then
 				best = v
 			end
 		end
-		add("spellDamage", best)
+		if complete then
+			add("spellDamage", best)
+		end
 	end
-	if GetSpellBonusHealing then
-		local ok, v = pcall(GetSpellBonusHealing)
+	do
+		local ok, v = read("spellHealing", GetSpellBonusHealing)
 		if ok and v then
 			add("spellHealing", v)
 		end
 	end
-	if GetDodgeChance then
-		local ok, v = pcall(GetDodgeChance)
-		if ok and v then
-			add("dodge", round1(v))
-		end
-	end
-	if GetParryChance then
-		local ok, v = pcall(GetParryChance)
-		if ok and v then
-			add("parry", round1(v))
-		end
-	end
-	if GetBlockChance then
-		local ok, v = pcall(GetBlockChance)
-		if ok and v then
-			add("block", round1(v))
-		end
-	end
-	if UnitDefenseSkill then
-		local ok, base, mod = pcall(UnitDefenseSkill, "player")
+	do
+		local ok, base, mod = read("defense", UnitDefenseSkill, "player")
 		if ok and base then
 			add("defense", base + (mod or 0))
 		end
 	end
-	return pack(lines)
+	if #hidden > 0 then
+		lines[#lines + 1] = "hidden\t" .. concat(hidden, ",")
+	end
+	return pack(lines), #hidden > 0
 end
 
 local function collectProfessions()
@@ -1256,12 +1274,16 @@ Transport.OnMessage(function(body)
 		return
 	end
 	local rev = revs[slice] or 1
-	local ok, payload = pcall(fn)
+	local ok, payload, partial = pcall(fn)
 	if not ok then
 		Transport.Send(format("state\n%s\n%s\n%d\nerror\t%s", id, slice, rev, clean(payload)))
 		return
 	end
 	Transport.Send(format("state\n%s\n%s\n%d\n%s", id, slice, rev, payload))
+	-- Values the game hid are read again next time, not served from the companion's cache.
+	if partial then
+		revs[slice] = rev + 1
+	end
 end)
 
 -- Event wiring: bumps integer revisions, and snapshots last-seen frames while they are open.

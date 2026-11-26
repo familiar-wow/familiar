@@ -124,6 +124,13 @@ export interface StatsState {
 	parry?: number;
 	block?: number;
 	defense?: number;
+	/**
+	 * Values the game hid from the addon when it read them, in combat for example (Forever's
+	 * secret values). They are missing above; the next read asks the game again.
+	 */
+	hidden?: string[];
+	/** Says so in words for the brain, when values were hidden. */
+	note?: string;
 	truncated?: boolean;
 }
 
@@ -760,16 +767,27 @@ const NUMERIC_STAT_KEYS = new Set([
 	"defense",
 ]);
 
+const HIDDEN_NOTE =
+	"The game hid these values from addons when they were read, as it does in combat for example. They are not zero; ask again in a moment, out of combat.";
+
 export function parseStats(payload: string): StatsState {
-	const out: Record<string, number | string | boolean> = {};
+	const out: Record<string, number | string | boolean | string[]> = {};
 	for (const line of linesOf(payload)) {
 		if (line === "truncated") {
 			out.truncated = true;
 			continue;
 		}
-		const [key, value] = line.split("\t");
+		const [key, value] = line.split("	");
 		if (!key || value === undefined) continue;
-		if (key === "powerType") out.powerType = value;
+		if (key === "hidden") {
+			const hidden = value
+				.split(",")
+				.filter((k) => k === "powerType" || NUMERIC_STAT_KEYS.has(k));
+			if (hidden.length > 0) {
+				out.hidden = hidden;
+				out.note = HIDDEN_NOTE;
+			}
+		} else if (key === "powerType") out.powerType = value;
 		else if (NUMERIC_STAT_KEYS.has(key)) {
 			const n = optNum(value);
 			if (n !== undefined) out[key] = n;
